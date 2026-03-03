@@ -1,0 +1,69 @@
+SELECT
+    comp_na_daily_all.fundq.costat,
+    comp_na_daily_all.fundq.curcdq,
+    comp_na_daily_all.fundq.datafmt,
+    comp_na_daily_all.fundq.indfmt,
+    comp_na_daily_all.fundq.consol,
+    comp_na_daily_all.fundq.gvkey,
+    comp_na_daily_all.fundq.datadate,
+    comp_na_daily_all.fundq.tic,
+    comp_na_daily_all.fundq.exchg,
+    id_table.busdesc,
+    id_table.county,
+    id_table.naics,
+    id_table.sic,
+    id_table.spcindcd,
+    comp_na_daily_all.fundq.datacqtr,
+    comp_na_daily_all.fundq.datafqtr,
+    comp_na_daily_all.fundq.actq,
+    comp_na_daily_all.fundq.atq,
+    comp_na_daily_all.fundq.cheq,
+    comp_na_daily_all.fundq.cshiq,
+    comp_na_daily_all.fundq.cshopq,
+    comp_na_daily_all.fundq.cshprq,
+    comp_na_daily_all.fundq.dlcq,
+    comp_na_daily_all.fundq.dlttq,
+    comp_na_daily_all.fundq.dvpq,
+    comp_na_daily_all.fundq.fyearq,
+    comp_na_daily_all.fundq.intanq,
+    comp_na_daily_all.fundq.niq,
+    comp_na_daily_all.fundq.xrdq,
+    comp_na_daily_all.fundq.xsgaq,
+    comp_na_daily_all.fundq.capxy,
+    comp_na_daily_all.fundq.dvpy,
+    comp_na_daily_all.fundq.dvy,
+    comp_na_daily_all.fundq.oancfy,
+    comp_na_daily_all.fundq.prstkcy,
+    comp_na_daily_all.fundq.xrdy,
+    comp_na_daily_all.fundq.cshtrq,
+    comp_na_daily_all.fundq.dvpspq,
+    comp_na_daily_all.fundq.dvpsxq,
+    comp_na_daily_all.fundq.mkvaltq,
+    comp_na_daily_all.fundq.prccq,
+    comp_na_daily_all.fundq.tstkq,
+    comp_na_daily_all.fundq.tstknq,
+    comp_na_daily_all.fundq.prcraq
+
+FROM comp_na_daily_all.fundq
+LEFT JOIN (
+    SELECT
+        gvkey,
+        busdesc,
+        county,
+        naics,
+        sic,
+        spcindcd
+    FROM comp_na_daily_all.company
+) AS id_table 
+
+ON comp_na_daily_all.fundq.gvkey = id_table.gvkey
+
+WHERE comp_na_daily_all.fundq.datadate BETWEEN
+    '2005-01-01'::date AND '2027-02-01'::date
+
+AND ("comp_na_daily_all"."fundq"."consol" = ANY (ARRAY['C']) 
+AND "comp_na_daily_all"."fundq"."indfmt" = ANY (ARRAY['INDL','FS']) 
+AND "comp_na_daily_all"."fundq"."datafmt" = ANY (ARRAY['STD']) 
+AND "comp_na_daily_all"."fundq"."curcdq" = ANY (ARRAY['USD','CAD']) 
+AND "comp_na_daily_all"."fundq"."costat" = ANY (ARRAY['A','I'])) 
+AND (datafqtr IS NOT NULL)

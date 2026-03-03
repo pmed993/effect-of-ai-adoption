@@ -1,0 +1,56 @@
+SELECT
+    f.costat,
+    f.curcdq,
+    f.fyearq,
+    f.datafmt,
+    f.indfmt,
+    f.consol,
+    f.gvkey,
+    f.datadate,
+    f.tic,
+    f.exchg,
+    f.datacqtr,
+    f.datafqtr,
+    f.actq,
+    f.atq,
+    f.cheq,
+    f.cshiq,
+    f.cshopq,
+    f.cshprq,
+    f.dlcq,
+    f.dlttq,
+    f.dvpq,
+    f.intanq,
+    f.niq,
+    f.xrdq,
+    f.xsgaq,
+    f.capxy,
+    f.dvpy,
+    f.dvy,
+    f.oancfy,
+    f.prstkcy,
+    f.xrdy,
+    f.cshtrq,
+    f.dvpspq,
+    f.dvpsxq,
+    f.mkvaltq,
+    f.prccq,
+    f.tstkq,
+    f.tstknq,
+    f.prcraq,
+    f.req,
+
+    c.naics,
+    c.sic
+
+FROM comp.fundq AS f
+
+LEFT JOIN comp.company AS c
+    ON f.gvkey = c.gvkey
+
+
+WHERE f.indfmt = 'INDL'
+  AND f.datafmt = 'STD'
+  AND f.consol = 'C'
+  AND f.costat = 'A'
+  AND f.datadate >= '2005-01-01';

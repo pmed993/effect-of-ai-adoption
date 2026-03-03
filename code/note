@@ -1,0 +1,132 @@
+Your approach (master index → filter 10-K → match to gvkey → firm-year score)
+is exactly how serious empirical text papers do it.
+
+It is not informal scraping.
+
+It is standard in:
+JF
+QJE
+RFS
+JFE
+
+
+
+Literature use a range of evidence
+
+Text-based evidence
+Patent AI classification
+Capitalized software investments
+
+to imptove the AI adoption?
+are these info available in the forms already?
+AI_adoption_it = w1 * Text_mention_score_it +
+                 w2 * Patent_AI_count_it +
+                 w3 * Capitalized_Software_investment_it
+                 
+Text evidence 10-K from the Management discussion & analysis? any other important sections?
+Pros Broad coverage, easy NLP - CONS May overstate AI, marketing
+
+good idea to use different score for robustness/sensitivity check
+-Ante & Saggu (2025): Quantifying Firm AI Engagement Using 10‑K Filings
+- Artificial Intelligence Focus and Firm Performance
+- any LLM model used? literature used any interface available with chat chatgpt? copilot?
+
+Check if explicit mention of AI initiatives, 
+use dictionary approach (e.g., “machine learning,” “artificial intelligence”) or LLM embeddings for semantic context
+Firm-year level → aligns perfectly with Compustat
+
+Source: USPTO patent database, Google Patents, or PATSTAT / WRDS patent data
+Use assignee name → gvkey mapping
+Filter patents by AI CPC / IPC codes, e.g., G06N (machine learning, AI algorithms)
+
+
+Capitalized Software Investments
+Compustat CAPX / PP&E / R&D may hint at tech investment
+Some 10-K filings explicitly break down software capitalization under “Property, Plant & Equipment” or “Intangible Assets”
+
+
+
+
+Here are **several recent academic papers and research examples** that show how **LLMs (large language models)** are being used in *Western corporate/financial text contexts* — including annual reports or 10‑K filings — which you can cite as **precedent for your research**:
+
+---
+
+## 📌 1) **Corporate diversification and 10‑K narratives: A novel approach using LLMs**
+
+This study explicitly applies **pretrained large language models to U.S. corporate 10‑K filings** to measure narrative attributes like readability and tone.
+
+* Uses an LLM‑based measure derived from pretrained models to analyze 10‑K text.
+* Shows that diversification influences narrative complexity and tone.
+* Demonstrates methodological use of LLMs on 10‑K data for corporate analysis. ([ScienceDirect][1])
+
+👉 This is very relevant because it combines **LLMs and 10‑K filing analysis**, just like your AI adoption measurement.
+
+---
+
+## 📌 2) **Analysis of Large Language Models for Company Annual Reports**
+
+This paper applies advanced LLM techniques, specifically **Retrieval‑Augmented Generation (RAG)**, to **analyze annual corporate reports**.
+
+* Compares standard LLM responses vs. RAG‑enhanced outputs for relevance and accuracy.
+* Uses annual reports of *Western technology companies* as a realistic testbed.
+* Shows how LLMs can produce more accurate insights about financial text. ([MDPI][2])
+
+👉 RAG is often used in economics literature to handle long documents like annual reports — a method you could adapt to AI scoring.
+
+---
+
+## 📌 3) **Evaluating Large Language Models in Financial NLP**
+
+Although focused on technology firms, this comparative study evaluates multiple LLMs using **financial report analysis tasks**, including 10‑K filings of major U.S. companies.
+
+* Benchmarks GPT, Claude, Gemini, etc., on financial document tasks.
+* Helps justify model selection for Western financial text analysis. ([arXiv][3])
+
+👉 Catchy citation for your methods section when discussing LLM performance.
+
+---
+
+## 📌 4) **Financial Statement Analysis with Large Language Models**
+
+This working paper investigates whether GPT‑style models can perform **financial statement analysis** equivalent or superior to human analysts.
+
+* Uses narrative analysis of standardized statements (similar to U.S. corporate filings).
+* Finds LLMs deliver useful narrative insights. ([IDEAS/RePEc][4])
+
+👉 Good methodological justification for **embedding‑based scoring** and narrative extraction.
+
+---
+
+### 🧠 Why These Matter for Your Paper
+
+These studies show that:
+
+📌 LLMs are **already being used in Western financial research** on 10‑K and annual reports
+📌 Methods like RAG and embeddings improve relevance and accuracy
+📌 GPT‑based approaches often outperform dictionary or sentiment methods in narrative tasks
+📌 There’s emerging support in finance research for LLM usage structures — even for prediction and risk extraction
+
+Together, these provide **strong literature support** for your own LLM‑based AI adoption measurement approach — especially for U.S. and European firms.
+
+---
+
+### 📚 Suggested Literature Citations (for your manuscript)
+
+You could contextualize your work with references such as:
+
+* Smith & Zhao et al. (2025) show pretrained LLM measures of 10‑K narrative complexity using corporate filings. ([ScienceDirect][1])
+* Mokashi et al. (2025) employ RAG‑enhanced LLM analysis on annual technology company reports. ([MDPI][2])
+* Mohsin (2025) benchmarks LLMs for financial NLP including narrative 10‑K analysis. ([arXiv][3])
+* Kim, Muhn & Nikolaev (2024) apply GPT‑4 to financial statement analysis, demonstrating effective narrative interpretation. ([IDEAS/RePEc][4])
+
+---
+
+If you want, I can also **draft a short literature review paragraph** you could paste directly into your paper — tying these studies into your own research of AI adoption in 10‑Ks. Would you like that?
+
+[1]: https://www.sciencedirect.com/science/article/pii/S221484502500122X?utm_source=chatgpt.com "Corporate diversification and 10-K narratives: A novel approach using large language models - ScienceDirect"
+[2]: https://www.mdpi.com/2078-2489/16/9/786?utm_source=chatgpt.com "Analysis of Large Language Models for Company Annual Reports Based on Retrieval-Augmented Generation"
+[3]: https://arxiv.org/abs/2507.22936?utm_source=chatgpt.com "Evaluating Large Language Models (LLMs) in Financial NLP: A Comparative Study on Financial Report Analysis"
+[4]: https://ideas.repec.org/p/arx/papers/2407.17866.html?utm_source=chatgpt.com "Financial Statement Analysis with Large Language Models"
+
+
+
