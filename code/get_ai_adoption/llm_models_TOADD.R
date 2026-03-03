@@ -1,4 +1,4 @@
-# TODO need to get at least one more model so taht I can run some robustness tests
+# TODO need to get at least one more model so that I can run some robustness tests
 
 
 score_openai <- function(text, model = "gpt-5-mini") {
