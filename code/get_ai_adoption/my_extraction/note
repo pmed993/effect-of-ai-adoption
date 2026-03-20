@@ -1,0 +1,47 @@
+The extraction works well, tehre are some issue with the extracting functions that I need to solve.
+
+Most likely causes:
+- newer inline XBRL / HTML structure
+- headings no longer appearing as clean line starts like ^Item 7
+- item headers embedded inside long HTML text blocks
+- your regex being too dependent on line-based structure after HTML parsing
+So the pipeline is stable now, but extraction quality is still questionable for modern filings.
+
+The biggest issue is that there is a clear year pattern:
+- 2010 to around 2019 mostly look good
+- 2020 onward, especially 2021 to 2026, many firms flip to:
+    bus = no_section_found
+    mgmt = no_section_found
+That is not random noise. It points to a systematic extraction issue with newer filing formatting.
+
+Most likely causes:
+- newer inline XBRL / HTML structure
+- headings no longer appearing as clean line starts like ^Item 7
+- item headers embedded inside long HTML text blocks
+- your regex being too dependent on line-based structure after HTML parsing
+So the pipeline is stable now, but extraction quality is still questionable for modern filings.
+
+This is not a computational problem anymore but a text-recognition/ regex pattern extraction problem.
+The extraction looks at:
+- ^Item\\s{0,}7
+- ^Item\\s{0,}8
+- ^Item\\s{0,}1
+This essentially works best when the parsed text preserves its structure across filing line by line. But
+in many recent HTML filing, after parsing, the text may look more like:
+- Long flattened text blocks
+- Headers not at line start
+- ITEM 7. or ITEM 1. merged with surrounding content
+- Weird spacing or Unicode characters
+So the extraction says no_section_found even though the seciton is there
+
+The main problems are:
+ITEM&nbsp;1. / ITEM 1. / Item 1. Business are not always normalized into the same form.
+Some filings use title-only headings like OUR BUSINESS with an anchor ITEM_1_OUR_BUSINESS, instead of literal Item 1. Business.
+Some lines contain TOC references like See “Item 7...” or link-table rows, which can be mistaken for the real heading.
+Old encodings like &#146;, &#147;, &#149; are not being normalized well enough.
+Your current regexes are too dependent on exact line starts and exact wording.
+What this means for the extractor design
+You should keep the Edgar logic, but improve it in three places:
+1. Stronger normalization before matching
+You need to normalize HTML entities and spacing much more aggressively before section detection.
+

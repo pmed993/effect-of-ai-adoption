@@ -1,0 +1,150 @@
+---
+title: "working_chatgpt"
+output: html_document
+---
+
+both_missing <- p[
+  bus_status == "no_section_found" & mgmt_status == "no_section_found",
+  .(row_id, cik, year, raw_file)
+]
+
+both_missing
+Best first files:
+1000228 for 2020, 2021, 2022
+1000623 for 2020, 2021
+1001233 for 2020, 2021
+100122 for 2020, 2021
+These are better than the 2025 to 2026 ones because 2025 to 2026 may be partially incomplete or use newer structures, while 2020 to 2023 is enough to detect the regime shift.
+2. Inspect bus missing only
+This is your cleanest Business extractor debugging set.
+You already found the big one:
+1000697 from 2010 through 2026
+That is excellent because it is a stable repeated failure, so the business heading in this filer is probably labelled in a consistent but currently unmatched way.
+Use:
+bus_missing <- p[
+  bus_status == "no_section_found" & mgmt_status == "ok",
+  .(row_id, cik, year, raw_file)
+]
+
+bus_missing
+Best first files:
+1000697-10-K-2010.txt
+1000697-10-K-2021.txt
+1000697-10-K-2024.txt
+That gives you old, medium, and recent examples from the same firm.
+3. Inspect mgmt missing only
+This is your cleanest MD&A extractor debugging set.
+Use:
+mgmt_missing <- p[
+  bus_status == "ok" & mgmt_status == "no_section_found",
+  .(row_id, cik, year, raw_file)
+]
+
+mgmt_missing
+Best first files:
+1000209-10-K-2010.txt
+1000209-10-K-2014.txt
+1000230-10-K-2021.txt
+1000683-10-K-2013.txt
+1001171-10-K-2011.txt
+Those are especially useful because some of them are ones where you already manually saw Item 7 references.
+4. Pair each failure with a nearby success
+This is the fastest way to see what changed.
+For example:
+failed: 1000228-10-K-2020.txt
+success: 1000228-10-K-2019.txt
+failed: 1000623-10-K-2020.txt
+success: 1000623-10-K-2019.txt
+failed: 1001233-10-K-2020.txt
+success: 1001233-10-K-2019.txt
+failed: 1000230-10-K-2021.txt
+success: 1000230-10-K-2020.txt
+That comparison will show whether the issue is:
+heading wording changed
+HTML parsing collapsed the heading incorrectly
+heading exists only in anchor/name attributes
+section title is present without “Item 1” or “Item 7”
+5. Exact code to create the best inspection panel
+Run this:
+library(data.table)
+
+p <- fread("/Users/piomedolla/Desktop/effect-of-genai/cache/logs/extraction_progress.csv")
+
+inspect_priority <- rbindlist(list(
+  p[bus_status == "no_section_found" & mgmt_status == "no_section_found" & year >= 2020,
+    .(priority = "both_missing_recent", row_id, cik, year, raw_file)],
+  
+  p[bus_status == "no_section_found" & mgmt_status == "ok",
+    .(priority = "bus_missing_only", row_id, cik, year, raw_file)],
+  
+  p[bus_status == "ok" & mgmt_status == "no_section_found",
+    .(priority = "mgmt_missing_only", row_id, cik, year, raw_file)],
+  
+  p[overall_status == "done" & year >= 2019,
+    .(priority = "recent_success_control", row_id, cik, year, raw_file)]
+), use.names = TRUE, fill = TRUE)
+
+inspect_priority <- inspect_priority[
+  order(priority, cik, year)
+]
+
+fwrite(
+  inspect_priority,
+  "/Users/piomedolla/Desktop/effect-of-genai/cache/logs/inspection_priority_panel.csv"
+)
+
+inspect_priority
+6. Even better: a matched failed/success control set
+This is the most useful diagnostic file:
+library(data.table)
+
+p <- fread("/Users/piomedolla/Desktop/effect-of-genai/cache/logs/extraction_progress.csv")
+
+failed_recent <- p[
+  overall_status == "done_with_missing" & year >= 2020,
+  .(cik, failed_year = year, failed_row_id = row_id, failed_raw = raw_file,
+    bus_status, mgmt_status)
+]
+
+success_controls <- p[
+  overall_status == "done",
+  .(cik, success_year = year, success_row_id = row_id, success_raw = raw_file)
+]
+
+matched <- success_controls[
+  failed_recent,
+  on = .(cik)
+][
+  success_year == failed_year - 1L | success_year == failed_year - 2L
+][
+  order(cik, failed_year, -success_year)
+]
+
+fwrite(
+  matched,
+  "/Users/piomedolla/Desktop/effect-of-genai/cache/logs/failed_vs_success_controls.csv"
+)
+
+matched
+7. What this likely means already
+From your table, I would bet on three concrete extractor gaps:
+For Business:
+headings like OUR BUSINESS or just BUSINESS without ITEM 1
+headings where ITEM 1 and BUSINESS are split across separate parsed nodes
+headings embedded in anchors or table cells where normalization is over-collapsing structure
+For MD&A:
+headings like Management’s Discussion and Analysis of Financial Condition and Results of Operations where apostrophes/entities/tables split the phrase
+Item 7 appearing only as ITEM 7. and the actual title on the next line
+Item 7A or Item 8 boundary not being detected correctly after normalization
+For both missing:
+parsed text probably loses heading boundaries altogether after normalize_filing_text(f.text) because that function is flattening the vector too aggressively
+That last point is important: in both extractors, doing this:
+f.text <- normalize_filing_text(f.text)
+after already extracting text nodes may be hurting you, because it is flattening heading structure line by line. That is a prime suspect.
+8. Best next step
+Open about 8 to 12 files in this exact mix:
+3 both missing recent
+3 bus missing only from 1000697
+3 mgmt missing only from 1000209 and 1000230
+3 matched recent successes
+Then paste me the exact heading snippets around Item 1 / Business / Our Business / Item 7 / Item 7A / Item 8, and I’ll tighten the regex around the actual patterns instead of guessing.
