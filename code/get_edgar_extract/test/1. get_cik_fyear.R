@@ -1,7 +1,7 @@
 library(dplyr)
 library(readr)
 
-pairs <- readRDS("/Users/piomedolla/Desktop/effect-of-genai/cache/cik_year.rds")
+pairs <- readRDS("/Users/piomedolla/Desktop/effect-of-genai/cache/cik_fyear.rds")
 
 pairs_test <- pairs %>%
   distinct(cik, year) %>%
@@ -10,5 +10,5 @@ pairs_test <- pairs %>%
 
 saveRDS(
   pairs_test,
-  "/Users/piomedolla/Desktop/effect-of-genai/cache/cik_year30_2019.rds"
+  "/Users/piomedolla/Desktop/effect-of-genai/cache/cik_fyear30_2019.rds"
 )

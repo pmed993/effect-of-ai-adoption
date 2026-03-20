@@ -35,7 +35,7 @@ SELECT
     a.gvkey,
     b.cik,
     a.datadate,
-    EXTRACT(YEAR FROM a.datadate) AS year,
+    EXTRACT(YEAR FROM a.datadate),
     a.datadate,
     a.fyear,
     b.conm,
@@ -59,21 +59,21 @@ setDT(comp_data)
 
 # Normalise cik and tidy data
 comp_data[, cik := normalize_cik(cik)]
-comp_data <- comp_data[!is.na(cik) | !is.na(fyear) | !is.na(year)]  # important: drop bad CIKs early
-cik_year <- comp_data[, .(cik, year, fyear)]
+comp_data <- comp_data[!is.na(cik) | !is.na(fyear)]  # important: drop bad CIKs early
+cik_fyear <- comp_data[, .(cik, fyear)]
 
-# Check if there are any duplicate cik-year combination
-nrow(cik_year) == uniqueN(cik_year, by = c("cik", "year"))
-any(duplicated(cik_year, by = c("cik", "year")))
-cik_year[duplicated(cik_year, by = c("cik", "year"))]
+# Check if there are any duplicate cik-fyear combination
+nrow(cik_fyear) == uniqueN(cik_fyear, by = c("cik", "fyear"))
+any(duplicated(cik_fyear, by = c("cik", "fyear")))
+cik_fyear[duplicated(cik_fyear, by = c("cik", "fyear"))]
 
-# Lookup the cik-year combinatrion that appears more than once
-cik_year[, .N, by = .(cik, year)][N > 1]
+# Lookup the cik-year combination that appears more than once
+cik_fyear[, .N, by = .(cik, fyear)][N > 1]
 
 # Get unique cik-year combinations
-cik_year <- unique(comp_data[, .(cik, year)])
+cik_fyear <- unique(comp_data[, .(cik, year = fyear)])
 
-fname <- "cik_year.rds"
-saveRDS(cik_year, fname)
+fname <- "cik_fyear.rds"
+saveRDS(cik_fyear, fname)
 
-message("cik_year rows: ", nrow(cik_year))
+message("cik_fyear rows: ", nrow(cik_fyear))

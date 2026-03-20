@@ -175,12 +175,12 @@ def load_metadata(metadata_path: Path) -> pd.DataFrame:
 def load_extracted_jsons(extracted_dir: Path) -> pd.DataFrame:
     rows = []
 
-    for fp in extracted_dir.glob("*.json"):
+    for fp in extracted_dir.rglob("*.json"):
         try:
             with fp.open("r", encoding="utf-8") as f:
                 obj = json.load(f)
         except Exception as e:
-            print(f"Skipping unreadable JSON: {fp.name} ({e})")
+            print(f"Skipping unreadable JSON: {fp} ({e})")
             continue
 
         rows.append(
@@ -198,12 +198,14 @@ def load_extracted_jsons(extracted_dir: Path) -> pd.DataFrame:
 
     if not rows:
         return pd.DataFrame(
-            columns=["json_file", "filename", "cik", "filing_type", "filing_date", "item_1", "item_7", "full_json"]
+            columns=[
+                "json_file", "filename", "cik", "filing_type",
+                "filing_date", "item_1", "item_7", "full_json"
+            ]
         )
 
     df = pd.DataFrame(rows)
     df["filing_date"] = pd.to_datetime(df["filing_date"], errors="coerce")
-    df["year"] = df["filing_date"].dt.year
     return df
 
 
