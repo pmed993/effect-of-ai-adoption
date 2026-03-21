@@ -106,7 +106,7 @@ def build_config(
             "start_year": start_year,
             "end_year": end_year,
             "quarters": [1, 2, 3, 4],
-            "filing_types": ["10-K"],
+            "filing_types": ["10-K", "10-K/A", "10-KT", "10-KT/A"],
             "cik_tickers": str(cik_file),
             "user_agent": user_agent,
             "raw_filings_folder": raw_folder,
@@ -497,6 +497,19 @@ def main() -> None:
     finally:
         if backup_path is not None and backup_path.exists():
             shutil.move(str(backup_path), str(config_path))
+            
+    matched_pairs = matched[["cik", "year"]].drop_duplicates().copy()
+    missing_pairs = target_pairs.merge(
+        matched_pairs,
+        on=["cik", "year"],
+        how="left",
+        indicator=True
+    )
+    missing_pairs = missing_pairs[missing_pairs["_merge"] == "left_only"].drop(columns="_merge")
+    
+    print("\nMissing pairs:")
+    print(missing_pairs.to_string(index=False))
+    print(f"\nMissing count: {len(missing_pairs)}")
 
 
 if __name__ == "__main__":
