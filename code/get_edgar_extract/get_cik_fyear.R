@@ -1,7 +1,7 @@
 setwd("/Users/piomedolla/Desktop/effect-of-genai")
 
 # ---- Packages ----
-packages <- c("data.table", "DBI", "RPostgres", "httr")
+packages <- c("data.table", "DBI", "RPostgres", "httr", "tidyverse")
 install.packages(setdiff(packages,rownames(installed.packages())))
 sapply(packages, require, character.only=TRUE)
 
@@ -62,15 +62,16 @@ comp_data <- comp_data[!is.na(cik) & !is.na(fyear)] # important: drop bad CIKs e
 
 cik_fyear <- unique(comp_data[, .(cik, year = as.integer(fyear))])
 
+# Cannot run the full extraction as will occupy around 120GB of memory
 saveRDS(cik_fyear, "cik_fyear.rds")
 message("cik_fyear rows: ", nrow(cik_fyear))
 
-# Get testing sample
-set.seed(123)
-pairs_test <- cik_fyear %>%
-  distinct(cik, year) %>%
-  filter(year == 2019) %>%
-  slice_head(n = 500)
-
-saveRDS(pairs_test,"cik_fyear500_2019.rds")
-
+# The extraction will be run by year and then manually eliminate the RAW FILINGS
+years <- unique(cik_fyear$year)
+for (i in years) {
+  pairs_year <- cik_fyear %>%
+    distinct(cik, year) %>%
+    filter(year == i)
+  
+  saveRDS(pairs_year,  sprintf("cik_fyear_%s.rds", i))
+}
