@@ -207,20 +207,19 @@ def preferred_output_columns(save_raw_json: bool) -> List[str]:
 # Prompt construction and model-output parsing
 # ---------------------------------------------------------------------------
 def build_ai_prompt(text: str) -> str:
+  
     """
     Build the instruction sent to the model.
 
     The prompt is deliberately long because it defines the scoring concept,
     what should not count, and the required JSON output format.
     """
-
+    
     return (
         "You are an academic research assistant measuring firm-level artificial intelligence adoption from SEC Form 10-K disclosures.\n\n"
         "TASK\n"
         "Read the filing text and estimate the firm's level of AI adoption as described in this filing, at the time covered by the filing text.\n"
-        "Return exactly two fields in valid JSON:\n"
-        "1. score: a continuous number between 0.00 and 1.00\n"
-        "2. explanation: one short paragraph explaining why that score was assigned\n\n"
+        "After reading the filing text, return exactly two fields in valid JSON: score and explanation.\n\n"
         "CONCEPT TO MEASURE\n"
         "AI adoption means the extent to which AI, machine learning, algorithmic systems, or automated decision systems are already implemented and embedded in the firm's core business activities.\n"
         "This includes adoption in products, services, operations, production, logistics, underwriting, forecasting, recommendations, fraud detection, pricing, internal decision systems, or other strategically relevant processes.\n\n"
@@ -254,18 +253,18 @@ def build_ai_prompt(text: str) -> str:
         "- Base the score only on the text provided.\n"
         "- Do not infer adoption from the industry the firm operates in.\n"
         "- Do not reward aspiration more than implementation.\n\n"
-        "OUTPUT FORMAT\n"
-        "Return ONLY valid JSON in exactly this structure:\n"
-        "{\"score\": 0.00, \"explanation\": \"...\"}\n\n"
-        "RULES FOR OUTPUT\n"
-        "- score must be a number between 0.00 and 1.00\n"
-        "- explanation must be a single paragraph\n"
-        "- do not return markdown\n"
-        "- do not return any text before or after the JSON\n\n"
         "TEXT TO EVALUATE:\n"
-        f"{text}"
-    )
-
+        "<filing_text>\n"
+        f"{text}\n"
+        "</filing_text>\n\n"
+        "Now produce the score for the filing text above.\n"
+        "Return ONLY one valid JSON object and no other text.\n"
+        "The JSON object must have this shape:\n"
+        "{\"score\": NUMBER_BETWEEN_0_AND_1, \"explanation\": \"ONE_SHORT_PARAGRAPH\"}\n"
+        "Do not copy the template. Replace NUMBER_BETWEEN_0_AND_1 with a numeric score between 0.00 and 1.00.\n"
+        "Do not return markdown, bullets, headings, or any text before or after the JSON."
+        )
+      
 
 def extract_text_from_response(resp: Any) -> str:
     """
