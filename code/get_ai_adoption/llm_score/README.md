@@ -1,34 +1,63 @@
-# Filing-Level AI Adoption Scoring
+```markdown
+# get_ai_adoption
 
-This process scores SEC Form 10-K filings for firm-level artificial intelligence adoption using an LLM endpoint. It reads `extract_df_chunk_XXXXX.rds` files, converts filing sections from long format to one row per filing, sends relevant filing snippets to the model, and writes chunk-level CSV outputs plus JSON summaries.
+Filing-level AI adoption scoring for SEC 10-K filings.
 
-The main script is:
+This project scores EDGAR filing chunks using a Llama endpoint. It reads `.rds` files from S3, reshapes Item 1 and Item 7 text into one row per filing, extracts relevant AI-related snippets, sends those snippets to an LLM, and writes filing-level AI adoption scores.
+
+The main scoring script is:
 
 ```bash
-/Users/piomedolla/Documents/Codex/2026-04-17-check-and-qa-this-process-usr/get_llm_score_qa.py
+llm_score/get_llama_score.py
 ```
 
-## What The Script Produces
+## What The Process Does
 
-For each selected chunk, the script writes:
+For each selected chunk file:
 
-- one filing-level score CSV
-- one chunk summary JSON
-- one run manifest CSV
+1. Reads `extract_df_chunk_XXXXX.rds` from S3.
+2. Keeps 10-K filings and Item 1 / Item 7 sections.
+3. Converts the data to one row per filing.
+4. Detects AI-related keyword mentions.
+5. Optionally skips no-keyword filings with a hard-zero prefilter.
+6. Sends relevant filing snippets to the Llama endpoint.
+7. Parses the model response into:
+   - `ai_adoption_score`
+   - `explanation`
+   - `score_status`
+8. Writes a per-chunk CSV, summary JSON, and run manifest.
 
-By default, outputs are written under:
+## Input Data
+
+Input files are stored in S3.
+
+Expected file pattern:
 
 ```text
-output/llama_scores/<RUN_ID>/
+extract_df_chunk_00001.rds
+extract_df_chunk_00002.rds
+extract_df_chunk_00003.rds
 ```
 
-This run-specific output directory prevents accidental overwriting of earlier results.
+Current S3 bucket:
 
-Each scored row represents one filing, identified by `accession_number`.
+```text
+jupyter.notebook.uktrade.io
+```
 
-## Input Requirements
+Current prefix is stored in the environment variable:
 
-Each `.rds` chunk must contain a data frame with these columns:
+```text
+S3_PREFIX_TEAM_EFFECT_OF_AI
+```
+
+The prefix should point to the folder containing the chunk files, for example:
+
+```text
+teams/_team_effect_of_ai
+```
+
+Each `.rds` file must contain a data frame with these columns:
 
 ```text
 item
@@ -39,105 +68,207 @@ form_type
 text
 ```
 
-The process keeps only:
+The script expects:
 
 ```text
 form_type = 10-K
 item = item1 or item7
 ```
 
-Use `--include-amended` if you also want to include `10-K/A` rows.
+## Outputs
 
-Chunk filenames must match this strict pattern:
+Outputs are written locally under:
 
 ```text
-extract_df_chunk_00001.rds
-extract_df_chunk_00002.rds
-...
+<out-dir>/<RUN_ID>/
 ```
 
-## Dependencies
-
-The script expects:
+For each chunk, the script writes:
 
 ```text
-python 3
+extract_df_chunk_00001_llama_scores.csv
+extract_df_chunk_00001_summary.json
+run_manifest_<RUN_ID>.csv
+```
+
+Important CSV columns:
+
+```text
+accession_number
+cik
+year
+form_type
+has_item1
+has_item7
+combined_chars
+keyword_hits
+prefilter_mode
+prefilter_decision
+snippet_chars
+llm_called
+endpoint_attempts
+ai_adoption_score
+explanation
+score_status
+job_id
+snippet_sha256
+raw_json_sha256
+```
+
+Important `score_status` values:
+
+```text
+ok
+prefilter_zero_no_keyword
+prefilter_audit_ok
+empty_text_zero
+endpoint_error
+no_json_found
+no_valid_score_json
+snippet_extraction_failed
+```
+
+## Setup
+
+From the project folder:
+
+```bash
+cd ~/get_ai_adoption/llm_score
+```
+
+Install requirements if needed:
+
+```bash
+pip install -r requirements.txt
+```
+
+At minimum, the process needs:
+
+```text
 pandas
 pyreadr
+boto3
 dwutils
 dwutils[ml]
 ```
 
-For S3 input, it also needs:
-
-```text
-boto3
-```
-
-Install missing packages as needed:
+Check that the S3 prefix variable is available:
 
 ```bash
-pip install pandas pyreadr boto3 dwutils 'dwutils[ml]'
+echo "$S3_PREFIX_TEAM_EFFECT_OF_AI"
+```
+
+Expected output should be something like:
+
+```text
+teams/_team_effect_of_ai
+```
+
+## SageMaker Output Folder Check
+
+The `dwutils` endpoint helper may wait for outputs under:
+
+```text
+/home/dw-user-efs/sagemaker/outputs
+```
+
+In this environment, outputs may actually appear under:
+
+```text
+/home/dw-user/sagemaker/outputs
+```
+
+Before running LLM tests, check:
+
+```bash
+ls -ld /home/dw-user-efs/sagemaker/outputs
+ls -ld /home/dw-user/sagemaker/outputs
+```
+
+If `/home/dw-user-efs/sagemaker/outputs` does not exist but `/home/dw-user/sagemaker/outputs` does, create a symlink:
+
+```bash
+ln -s /home/dw-user/sagemaker/outputs /home/dw-user-efs/sagemaker/outputs
+```
+
+Then confirm:
+
+```bash
+ls -lt /home/dw-user-efs/sagemaker/outputs | head
 ```
 
 ## Basic Commands
 
-List available local chunks:
+List available chunks:
 
 ```bash
-python3 get_llm_score_qa.py \
-  --chunk-dir /path/to/chunks \
+python3 get_llama_score.py \
+  --s3-bucket jupyter.notebook.uktrade.io \
+  --s3-prefix-env S3_PREFIX_TEAM_EFFECT_OF_AI \
   --list-only
 ```
 
-Run a small smoke test:
+Run one filing with a small prompt:
 
 ```bash
-python3 get_llm_score_qa.py \
-  --chunk-dir /path/to/chunks \
-  --chunk-ids 1 \
-  --max-filings-per-chunk 10 \
-  --prefilter-mode off \
-  --out-dir /path/to/output/llama_scores_qa
-```
-
-Run a selected range:
-
-```bash
-python3 get_llm_score_qa.py \
-  --chunk-dir /path/to/chunks \
-  --chunk-range 1 5 \
-  --prefilter-mode off \
-  --out-dir /path/to/output/llama_scores_qa
-```
-
-Run from S3:
-
-```bash
-python3 get_llm_score_qa.py \
-  --source s3 \
+python3 get_llama_score.py \
   --s3-bucket jupyter.notebook.uktrade.io \
-  --s3-prefix path/to/chunks \
+  --s3-prefix-env S3_PREFIX_TEAM_EFFECT_OF_AI \
   --chunk-ids 1 \
+  --max-filings-per-chunk 1 \
   --prefilter-mode off \
-  --out-dir /path/to/output/llama_scores_qa
+  --max-prompt-chars 1500 \
+  --max-new-tokens 80 \
+  --retries 0 \
+  --out-dir output/test_small_prompt \
+  --log-level INFO
+```
+
+Run 25 filings with hard-zero prefilter:
+
+```bash
+python3 get_llama_score.py \
+  --s3-bucket jupyter.notebook.uktrade.io \
+  --s3-prefix-env S3_PREFIX_TEAM_EFFECT_OF_AI \
+  --chunk-ids 1 \
+  --max-filings-per-chunk 25 \
+  --prefilter-mode hard_zero \
+  --max-prompt-chars 1500 \
+  --max-new-tokens 80 \
+  --retries 0 \
+  --out-dir output/test_25_hard_zero \
+  --log-level INFO
 ```
 
 ## Prefilter Modes
 
-The script has three prefilter modes.
+### `off`
 
-`off`
+Calls the LLM for every non-empty filing.
 
-Calls the LLM for every non-empty filing. This is the safest QA mode and the recommended starting point.
+Use for small QA tests only.
 
 ```bash
 --prefilter-mode off
 ```
 
-`audit`
+Given current endpoint speed, this is not recommended for full chunks.
 
-Assigns hard zeroes to most no-keyword filings, but sends a deterministic sample of no-keyword filings to the LLM. Use this to estimate whether the keyword prefilter is creating false zeroes.
+### `hard_zero`
+
+Assigns `0.0` to filings with no AI keyword hits and skips the LLM.
+
+```bash
+--prefilter-mode hard_zero
+```
+
+This is the likely production mode, because the endpoint is slow.
+
+### `audit`
+
+Assigns zero to most no-keyword filings but sends a sample of no-keyword filings to the LLM.
+
+Use this to test whether the hard-zero prefilter creates false zeroes.
 
 ```bash
 --prefilter-mode audit \
@@ -145,38 +276,209 @@ Assigns hard zeroes to most no-keyword filings, but sends a deterministic sample
 --prefilter-audit-limit 25
 ```
 
-`hard_zero`
+## QA Test Plan
 
-Assigns score `0.0` to filings with no AI-related keyword hits and skips the LLM call. Use this only after validating that the false-zero rate is acceptable.
+### Test 1: Syntax Check
 
 ```bash
---prefilter-mode hard_zero
+python3 -m py_compile get_llama_score.py
 ```
 
-## Recommended QA Workflow
+Pass condition:
 
-1. List chunks.
+```text
+No output and no error.
+```
+
+### Test 2: Dependency Check
 
 ```bash
-python3 get_llm_score_qa.py \
-  --chunk-dir /path/to/chunks \
+python3 - <<'PY'
+import pandas
+import pyreadr
+import boto3
+from dwutils import sm
+
+print("pandas ok")
+print("pyreadr ok")
+print("boto3 ok")
+print("dwutils.sm ok")
+PY
+```
+
+Pass condition:
+
+```text
+All imports print ok.
+```
+
+### Test 3: S3 Chunk Listing
+
+```bash
+python3 get_llama_score.py \
+  --s3-bucket jupyter.notebook.uktrade.io \
+  --s3-prefix-env S3_PREFIX_TEAM_EFFECT_OF_AI \
   --list-only
 ```
 
-2. Run a small smoke test with the prefilter off.
+Pass condition:
 
-```bash
-python3 get_llm_score_qa.py \
-  --chunk-dir /path/to/chunks \
-  --chunk-ids 1 \
-  --max-filings-per-chunk 10 \
-  --prefilter-mode off \
-  --out-dir /path/to/output/smoke_test
+```text
+The command lists files like extract_df_chunk_00001.rds.
 ```
 
-3. Inspect the output CSV.
+### Test 4: Read And Reshape One Chunk
 
-Check:
+Run this from `llm_score/`:
+
+```bash
+python3 - <<'PY'
+import importlib.util
+import sys
+
+SCRIPT = "get_llama_score.py"
+BUCKET = "jupyter.notebook.uktrade.io"
+PREFIX_ENV = "S3_PREFIX_TEAM_EFFECT_OF_AI"
+
+spec = importlib.util.spec_from_file_location("scoreqa", SCRIPT)
+mod = importlib.util.module_from_spec(spec)
+sys.modules["scoreqa"] = mod
+spec.loader.exec_module(mod)
+
+bucket, prefix = mod.parse_s3_location(BUCKET, None, PREFIX_ENV)
+chunks = mod.list_chunks_s3(bucket, prefix)
+
+first_name = sorted(chunks)[0]
+ref = chunks[first_name]
+
+print("Testing chunk:", first_name)
+print("S3 path:", f"s3://{bucket}/{ref.key}")
+
+df = mod.read_rds_s3(bucket, ref.key)
+
+print("\nRaw rows:", len(df))
+print("Columns:", list(df.columns))
+
+print("\nForm types:")
+print(df["form_type"].astype(str).str.upper().value_counts().head(10))
+
+print("\nItems:")
+print(df["item"].astype(str).str.lower().value_counts().head(20))
+
+wide = mod.long_to_wide(df, include_amended=False)
+
+print("\nWide filing rows:", len(wide))
+print("Missing Item 1:", int((wide["has_item1"] == False).sum()))
+print("Missing Item 7:", int((wide["has_item7"] == False).sum()))
+
+print("\nCombined chars summary:")
+print(wide["combined_chars"].describe())
+
+print("\nFirst few filings:")
+cols = ["accession_number", "cik", "year", "form_type", "has_item1", "has_item7", "combined_chars"]
+print(wide[cols].head(10).to_string(index=False))
+PY
+```
+
+Pass condition:
+
+```text
+Raw rows > 0
+Columns include item, year, accession_number, cik, form_type, text
+Form types include 10-K
+Items include item1 and item7
+Wide filing rows > 0
+Combined text lengths are plausible
+```
+
+Observed successful example for chunk 1:
+
+```text
+Raw rows: 2000
+item1: 1000
+item7: 1000
+Wide filing rows: 1000
+Missing Item 1: 0
+Missing Item 7: 2
+```
+
+### Test 5: One-Filing LLM Test
+
+```bash
+python3 get_llama_score.py \
+  --s3-bucket jupyter.notebook.uktrade.io \
+  --s3-prefix-env S3_PREFIX_TEAM_EFFECT_OF_AI \
+  --chunk-ids 1 \
+  --max-filings-per-chunk 1 \
+  --prefilter-mode off \
+  --max-prompt-chars 1500 \
+  --max-new-tokens 80 \
+  --retries 0 \
+  --out-dir output/test_small_prompt \
+  --log-level INFO
+```
+
+Inspect output:
+
+```bash
+CSV=$(find output/test_small_prompt -name '*_llama_scores.csv' | sort | tail -1)
+
+python3 -c "import pandas as pd; df=pd.read_csv('$CSV'); print(df[['accession_number','keyword_hits','snippet_chars','llm_called','endpoint_attempts','ai_adoption_score','score_status','explanation']].to_string(index=False)); print(df['score_status'].value_counts(dropna=False))"
+```
+
+Pass condition:
+
+```text
+score_status = ok
+ai_adoption_score is between 0 and 1
+explanation is not blank
+```
+
+### Test 6: 25-Filing Hard-Zero Test
+
+```bash
+python3 get_llama_score.py \
+  --s3-bucket jupyter.notebook.uktrade.io \
+  --s3-prefix-env S3_PREFIX_TEAM_EFFECT_OF_AI \
+  --chunk-ids 1 \
+  --max-filings-per-chunk 25 \
+  --prefilter-mode hard_zero \
+  --max-prompt-chars 1500 \
+  --max-new-tokens 80 \
+  --retries 0 \
+  --out-dir output/test_25_hard_zero \
+  --log-level INFO
+```
+
+Inspect output:
+
+```bash
+CSV=$(find output/test_25_hard_zero -name '*_llama_scores.csv' | sort | tail -1)
+
+python3 -c "import pandas as pd; df=pd.read_csv('$CSV'); print(df[['accession_number','keyword_hits','llm_called','ai_adoption_score','score_status','explanation']].to_string(index=False)); print('\nscore_status:'); print(df['score_status'].value_counts(dropna=False)); print('\nllm_called:'); print(df['llm_called'].value_counts(dropna=False)); print('\nkeyword_hits:'); print(df['keyword_hits'].describe())"
+```
+
+Pass condition:
+
+```text
+No-keyword filings have score_status = prefilter_zero_no_keyword
+Keyword-hit filings have llm_called = True
+Most LLM-called rows have score_status = ok
+```
+
+Observed test result:
+
+```text
+prefilter_zero_no_keyword: 16
+ok: 7
+no_json_found: 2
+```
+
+This means the process works, but the LLM parsing failure rate still needs review before full-scale running.
+
+## Output QA Checklist
+
+Before scaling up, inspect:
 
 ```text
 score_status
@@ -188,217 +490,141 @@ ai_adoption_score
 explanation
 has_item1
 has_item7
+endpoint_attempts
 ```
 
-Expected signs of a healthy run:
-
-- most LLM-called rows have `score_status = ok`
-- explanations are specific to the filing text
-- `snippet_chars` is greater than zero when `llm_called = True`
-- missing Item 1 or Item 7 rates are plausible
-- low scores are not mostly parser or endpoint failures
-
-4. Run a prefilter audit.
-
-```bash
-python3 get_llm_score_qa.py \
-  --chunk-dir /path/to/chunks \
-  --chunk-ids 1 \
-  --max-filings-per-chunk 200 \
-  --prefilter-mode audit \
-  --prefilter-audit-rate 0.10 \
-  --prefilter-audit-limit 25 \
-  --out-dir /path/to/output/prefilter_audit
-```
-
-Review rows where:
+Good signs:
 
 ```text
-score_status = prefilter_audit_ok
-keyword_hits = 0
-ai_adoption_score > 0
+Most LLM-called rows have score_status = ok
+No-keyword hard-zero rows are clearly marked
+Scores are between 0 and 1
+Explanations are filing-specific
+snippet_chars > 0 when llm_called = True
+Manifest status is ok for each processed chunk
 ```
 
-If many no-keyword audit rows receive nonzero scores, do not use `hard_zero` yet.
+Red flags:
 
-5. Run a small production-style batch.
+```text
+Many endpoint_error rows
+Many no_json_found rows
+Many no_valid_score_json rows
+Blank or repeated explanations
+Scores missing for many LLM-called rows
+Unexpectedly high missing Item 1 or Item 7
+Unexpectedly high number of LLM calls
+```
+
+## Performance Notes
+
+The endpoint can be slow. In testing, one LLM call took about 9 minutes.
+
+This means `--prefilter-mode off` is not suitable for full chunks.
+
+Approximate runtime:
+
+```text
+10 LLM calls   = about 1.5 hours
+100 LLM calls  = about 15 hours
+1000 LLM calls = not practical
+```
+
+Therefore, before running all chunks:
+
+1. Estimate how many filings have keyword hits.
+2. Use `--prefilter-mode hard_zero` for production-style tests.
+3. Use `--prefilter-mode audit` to test false-zero risk.
+4. Do not run `--all-chunks` until output quality and runtime are acceptable.
+
+## Estimate LLM Calls For One Chunk
+
+This does not call the LLM:
 
 ```bash
-python3 get_llm_score_qa.py \
-  --chunk-dir /path/to/chunks \
-  --chunk-range 1 5 \
+python3 - <<'PY'
+import importlib.util
+import sys
+
+SCRIPT = "get_llama_score.py"
+BUCKET = "jupyter.notebook.uktrade.io"
+PREFIX_ENV = "S3_PREFIX_TEAM_EFFECT_OF_AI"
+
+spec = importlib.util.spec_from_file_location("scoreqa", SCRIPT)
+mod = importlib.util.module_from_spec(spec)
+sys.modules["scoreqa"] = mod
+spec.loader.exec_module(mod)
+
+bucket, prefix = mod.parse_s3_location(BUCKET, None, PREFIX_ENV)
+chunks = mod.list_chunks_s3(bucket, prefix)
+
+ref = chunks["extract_df_chunk_00001.rds"]
+df = mod.read_rds_s3(bucket, ref.key)
+wide = mod.long_to_wide(df, include_amended=False)
+
+wide["keyword_hits"] = wide["combined_text"].apply(mod.count_ai_keywords)
+
+print("filings:", len(wide))
+print("keyword-hit filings:", int((wide["keyword_hits"] > 0).sum()))
+print("no-keyword filings:", int((wide["keyword_hits"] == 0).sum()))
+print("keyword-hit rate:", round((wide["keyword_hits"] > 0).mean(), 4))
+
+print("\nkeyword_hits summary:")
+print(wide["keyword_hits"].describe())
+
+print("\ntop keyword-hit filings:")
+cols = ["accession_number", "cik", "year", "form_type", "keyword_hits", "combined_chars"]
+print(wide[cols].sort_values("keyword_hits", ascending=False).head(20).to_string(index=False))
+PY
+```
+
+## Recommended Scale-Up Order
+
+Use this order before running all chunks:
+
+```text
+1 filing, prefilter off
+25 filings, hard_zero
+50 filings, hard_zero
+200 filings, hard_zero
+200 filings, audit
+1 full chunk, hard_zero
+2-3 full chunks, hard_zero
+all chunks only after QA approval
+```
+
+## Current Known Issues
+
+The process is currently in QA.
+
+Known issues to monitor:
+
+```text
+Some LLM outputs may fail with no_json_found.
+The endpoint is slow.
+The hard-zero prefilter should be audited before final use.
+The SageMaker output folder path may need a symlink in this environment.
+```
+
+## Full Run Example
+
+Only run after QA approval:
+
+```bash
+python3 get_llama_score.py \
+  --s3-bucket jupyter.notebook.uktrade.io \
+  --s3-prefix-env S3_PREFIX_TEAM_EFFECT_OF_AI \
+  --all-chunks \
   --prefilter-mode hard_zero \
+  --max-prompt-chars 1500 \
+  --max-new-tokens 80 \
   --checkpoint-every 25 \
-  --retries 2 \
-  --out-dir /path/to/output/production_test
+  --retries 0 \
+  --out-dir output/full_run \
+  --log-level INFO
 ```
 
-6. Scale up after reviewing summaries and manifest files.
+## Project Status
 
-## Key Output Columns
-
-`ai_adoption_score`
-
-Continuous score from `0.00` to `1.00`.
-
-`explanation`
-
-Short model explanation for the assigned score.
-
-`score_status`
-
-Status of the score generation. Important values include:
-
-```text
-ok
-prefilter_audit_ok
-prefilter_zero_no_keyword
-empty_text_zero
-endpoint_error
-missing_output
-no_json_found
-json_parse_error
-no_valid_score_json
-snippet_extraction_failed
+This project is under active QA. The data reading, reshaping, S3 access, and hard-zero prefilter have passed initial tests. Further QA is needed on LLM response quality, JSON parse reliability, runtime, and prefilter false-zero risk before running the full production process.
 ```
-
-`llm_called`
-
-Whether the LLM endpoint was called for the filing.
-
-`keyword_hits`
-
-Number of AI keyword matches in the combined Item 1 and Item 7 text.
-
-`prefilter_mode`
-
-The selected prefilter mode for the run.
-
-`prefilter_decision`
-
-The filing-level decision made by the prefilter logic.
-
-`prefilter_audit_sample`
-
-Whether the row was selected for no-keyword audit scoring.
-
-`snippet_chars`
-
-Number of characters sent to the prompt after snippet extraction.
-
-`snippet_sha256`
-
-Hash of the snippet sent to the LLM. This supports auditability without storing the snippet itself.
-
-`raw_json_sha256`
-
-Hash of the raw parsed JSON returned by the model.
-
-`endpoint_attempts`
-
-Number of endpoint attempts used for the filing.
-
-## Summary JSON
-
-Each chunk summary includes:
-
-```text
-n_filings
-n_unique_cik
-n_llm_called
-n_ok
-n_prefilter_audit_ok
-n_prefilter_zero
-n_missing_item1
-n_missing_item7
-status_counts
-score_min
-score_mean
-score_max
-```
-
-Use `status_counts` as the first QA check after every run.
-
-## Run Manifest
-
-Each run writes a manifest:
-
-```text
-run_manifest_<RUN_ID>.csv
-```
-
-This records each selected chunk, whether it completed, output paths, row counts, and any chunk-level error.
-
-## Checkpointing And Retries
-
-The script writes partial checkpoint CSVs while a chunk is running:
-
-```bash
---checkpoint-every 25
-```
-
-If the run completes successfully, the partial file is removed and replaced by the final CSV.
-
-Endpoint calls retry by default:
-
-```bash
---retries 2
---retry-sleep 5
-```
-
-The sleep time doubles after each failed attempt.
-
-## Recommended Production Pattern
-
-Start with:
-
-```bash
---prefilter-mode off
-```
-
-for a small validation sample.
-
-Then use:
-
-```bash
---prefilter-mode audit
-```
-
-to estimate the false-zero risk from the keyword filter.
-
-Only use:
-
-```bash
---prefilter-mode hard_zero
-```
-
-once the no-keyword audit sample shows that false zeroes are rare enough for the research design.
-
-## Notes On Interpretation
-
-The model is instructed to score only operational, firm-specific AI adoption described in the filing text. It should not score highly for generic AI mentions, industry trends, future plans, experiments, risk factors, or third-party tools unless the filing shows operational integration by the firm.
-
-The score is filing-time evidence, not present-day adoption. A 2018 filing should be interpreted as evidence about the firm as described in that 2018 filing, not as evidence about the firm today.
-
-## Common Failure Modes
-
-High `endpoint_error`
-
-Check endpoint availability, credentials, retry settings, and batch size.
-
-High `no_json_found` or `no_valid_score_json`
-
-The model may not be following the JSON-only instruction. Consider lowering temperature, increasing `--max-new-tokens`, or checking raw endpoint responses with `--save-raw-json`.
-
-Many `snippet_extraction_failed`
-
-Check whether the input text is empty or malformed.
-
-Unexpectedly high missing Item 1 or Item 7 rates
-
-Check the original `item` labels. The script expects normalized values of `item1` and `item7`.
-
-Many nonzero scores in no-keyword audit rows
-
-The keyword prefilter is too narrow for the sample. Keep `--prefilter-mode off` or expand the keyword pattern before using `hard_zero`.
-
