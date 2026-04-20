@@ -1,63 +1,50 @@
-```markdown
-# get_ai_adoption
+# S3 Filing-Level AI Adoption Scoring
 
-Filing-level AI adoption scoring for SEC 10-K filings.
-
-This project scores EDGAR filing chunks using a Llama endpoint. It reads `.rds` files from S3, reshapes Item 1 and Item 7 text into one row per filing, extracts relevant AI-related snippets, sends those snippets to an LLM, and writes filing-level AI adoption scores.
-
-The main scoring script is:
+This folder contains a simplified S3-only scoring script:
 
 ```bash
-llm_score/get_llama_score.py
+/Users/piomedolla/Documents/Codex/2026-04-17-check-and-qa-this-process-usr/get_llm_score_qa.py
 ```
 
-## What The Process Does
+The script reads EDGAR chunk files from S3, optionally filters filings to a research lookup of `cik`/`year` pairs, scores each remaining filing for AI adoption using the Llama endpoint, and writes CSV/JSON outputs locally.
 
-For each selected chunk file:
+There is no local chunk input mode in this version.
 
-1. Reads `extract_df_chunk_XXXXX.rds` from S3.
-2. Keeps 10-K filings and Item 1 / Item 7 sections.
-3. Converts the data to one row per filing.
-4. Detects AI-related keyword mentions.
-5. Optionally skips no-keyword filings with a hard-zero prefilter.
-6. Sends relevant filing snippets to the Llama endpoint.
-7. Parses the model response into:
-   - `ai_adoption_score`
-   - `explanation`
-   - `score_status`
-8. Writes a per-chunk CSV, summary JSON, and run manifest.
+## Input Location
 
-## Input Data
-
-Input files are stored in S3.
-
-Expected file pattern:
+Your files should look like this in S3:
 
 ```text
-extract_df_chunk_00001.rds
-extract_df_chunk_00002.rds
-extract_df_chunk_00003.rds
+s3://jupyter.notebook.uktrade.io/some/path/to/chunks/extract_df_chunk_00001.rds
+s3://jupyter.notebook.uktrade.io/some/path/to/chunks/extract_df_chunk_00002.rds
+s3://jupyter.notebook.uktrade.io/some/path/to/chunks/extract_df_chunk_00003.rds
 ```
 
-Current S3 bucket:
+In that example:
 
 ```text
-jupyter.notebook.uktrade.io
+bucket = jupyter.notebook.uktrade.io
+prefix = some/path/to/chunks
 ```
 
-Current prefix is stored in the environment variable:
+Do not include the filename in the prefix.
 
-```text
-S3_PREFIX_TEAM_EFFECT_OF_AI
+You can provide the bucket and prefix separately:
+
+```bash
+--s3-bucket jupyter.notebook.uktrade.io \
+--s3-prefix some/path/to/chunks
 ```
 
-The prefix should point to the folder containing the chunk files, for example:
+Or you can paste the full S3 prefix:
 
-```text
-teams/_team_effect_of_ai
+```bash
+--s3-prefix s3://jupyter.notebook.uktrade.io/some/path/to/chunks
 ```
 
-Each `.rds` file must contain a data frame with these columns:
+## Required Input Columns
+
+Each `.rds` chunk must contain a data frame with:
 
 ```text
 item
@@ -68,478 +55,67 @@ form_type
 text
 ```
 
-The script expects:
+The script keeps:
 
 ```text
 form_type = 10-K
 item = item1 or item7
 ```
 
-## Outputs
+Add `--include-amended` if you also want `10-K/A`.
 
-Outputs are written locally under:
+## Research Lookup Filter
 
-```text
-<out-dir>/<RUN_ID>/
-```
+Use the lookup filter when the research sample is smaller than the full EDGAR chunk universe.
 
-For each chunk, the script writes:
+The lookup file should contain at least:
 
 ```text
-extract_df_chunk_00001_llama_scores.csv
-extract_df_chunk_00001_summary.json
-run_manifest_<RUN_ID>.csv
-```
-
-Important CSV columns:
-
-```text
-accession_number
 cik
 year
-form_type
-has_item1
-has_item7
-combined_chars
-keyword_hits
-prefilter_mode
-prefilter_decision
-snippet_chars
-llm_called
-endpoint_attempts
-ai_adoption_score
-explanation
-score_status
-job_id
-snippet_sha256
-raw_json_sha256
 ```
 
-Important `score_status` values:
+In the current project, the lookup is:
 
 ```text
-ok
-prefilter_zero_no_keyword
-prefilter_audit_ok
-empty_text_zero
-endpoint_error
-no_json_found
-no_valid_score_json
-snippet_extraction_failed
+../lookup/cik_year.csv
 ```
 
-## Setup
+When `--lookup-csv` is provided, the script filters each chunk after reshaping to filing level and before making any LLM calls. Only rows whose `cik` and `year` appear in the lookup are scored.
 
-From the project folder:
-
-```bash
-cd ~/get_ai_adoption/llm_score
-```
-
-Install requirements if needed:
-
-```bash
-pip install -r requirements.txt
-```
-
-At minimum, the process needs:
+This is the recommended workflow if the lookup has already applied the research sample restrictions, for example:
 
 ```text
-pandas
-pyreadr
-boto3
-dwutils
-dwutils[ml]
+exclude SIC between 4900 and 4999
+keep SIC below 6000
 ```
 
-Check that the S3 prefix variable is available:
+The script does not apply the SIC rule directly unless SIC is present in the input data. It assumes `../lookup/cik_year.csv` already represents the final research sample.
 
-```bash
-echo "$S3_PREFIX_TEAM_EFFECT_OF_AI"
-```
-
-Expected output should be something like:
-
-```text
-teams/_team_effect_of_ai
-```
-
-## SageMaker Output Folder Check
-
-The `dwutils` endpoint helper may wait for outputs under:
-
-```text
-/home/dw-user-efs/sagemaker/outputs
-```
-
-In this environment, outputs may actually appear under:
-
-```text
-/home/dw-user/sagemaker/outputs
-```
-
-Before running LLM tests, check:
-
-```bash
-ls -ld /home/dw-user-efs/sagemaker/outputs
-ls -ld /home/dw-user/sagemaker/outputs
-```
-
-If `/home/dw-user-efs/sagemaker/outputs` does not exist but `/home/dw-user/sagemaker/outputs` does, create a symlink:
-
-```bash
-ln -s /home/dw-user/sagemaker/outputs /home/dw-user-efs/sagemaker/outputs
-```
-
-Then confirm:
-
-```bash
-ls -lt /home/dw-user-efs/sagemaker/outputs | head
-```
-
-## Basic Commands
-
-List available chunks:
-
-```bash
-python3 get_llama_score.py \
-  --s3-bucket jupyter.notebook.uktrade.io \
-  --s3-prefix-env S3_PREFIX_TEAM_EFFECT_OF_AI \
-  --list-only
-```
-
-Run one filing with a small prompt:
-
-```bash
-python3 get_llama_score.py \
-  --s3-bucket jupyter.notebook.uktrade.io \
-  --s3-prefix-env S3_PREFIX_TEAM_EFFECT_OF_AI \
-  --chunk-ids 1 \
-  --max-filings-per-chunk 1 \
-  --prefilter-mode off \
-  --max-prompt-chars 1500 \
-  --max-new-tokens 80 \
-  --retries 0 \
-  --out-dir output/test_small_prompt \
-  --log-level INFO
-```
-
-Run 25 filings with hard-zero prefilter:
-
-```bash
-python3 get_llama_score.py \
-  --s3-bucket jupyter.notebook.uktrade.io \
-  --s3-prefix-env S3_PREFIX_TEAM_EFFECT_OF_AI \
-  --chunk-ids 1 \
-  --max-filings-per-chunk 25 \
-  --prefilter-mode hard_zero \
-  --max-prompt-chars 1500 \
-  --max-new-tokens 80 \
-  --retries 0 \
-  --out-dir output/test_25_hard_zero \
-  --log-level INFO
-```
-
-## Prefilter Modes
-
-### `off`
-
-Calls the LLM for every non-empty filing.
-
-Use for small QA tests only.
-
-```bash
---prefilter-mode off
-```
-
-Given current endpoint speed, this is not recommended for full chunks.
-
-### `hard_zero`
-
-Assigns `0.0` to filings with no AI keyword hits and skips the LLM.
-
-```bash
---prefilter-mode hard_zero
-```
-
-This is the likely production mode, because the endpoint is slow.
-
-### `audit`
-
-Assigns zero to most no-keyword filings but sends a sample of no-keyword filings to the LLM.
-
-Use this to test whether the hard-zero prefilter creates false zeroes.
-
-```bash
---prefilter-mode audit \
---prefilter-audit-rate 0.10 \
---prefilter-audit-limit 25
-```
-
-## QA Test Plan
-
-### Test 1: Syntax Check
-
-```bash
-python3 -m py_compile get_llama_score.py
-```
-
-Pass condition:
-
-```text
-No output and no error.
-```
-
-### Test 2: Dependency Check
+Check the lookup:
 
 ```bash
 python3 - <<'PY'
-import pandas
-import pyreadr
-import boto3
-from dwutils import sm
+import pandas as pd
 
-print("pandas ok")
-print("pyreadr ok")
-print("boto3 ok")
-print("dwutils.sm ok")
+lookup = pd.read_csv("../lookup/cik_year.csv")
+
+print("Rows:", len(lookup))
+print("Columns:", list(lookup.columns))
+print("Unique CIKs:", lookup["cik"].nunique())
+print("Year range:", lookup["year"].min(), lookup["year"].max())
+print("Duplicate cik/year rows:", lookup.duplicated(["cik", "year"]).sum())
+print(lookup.head(10).to_string(index=False))
 PY
-```
-
-Pass condition:
-
-```text
-All imports print ok.
-```
-
-### Test 3: S3 Chunk Listing
-
-```bash
-python3 get_llama_score.py \
-  --s3-bucket jupyter.notebook.uktrade.io \
-  --s3-prefix-env S3_PREFIX_TEAM_EFFECT_OF_AI \
-  --list-only
-```
-
-Pass condition:
-
-```text
-The command lists files like extract_df_chunk_00001.rds.
-```
-
-### Test 4: Read And Reshape One Chunk
-
-Run this from `llm_score/`:
-
-```bash
-python3 - <<'PY'
-import importlib.util
-import sys
-
-SCRIPT = "get_llama_score.py"
-BUCKET = "jupyter.notebook.uktrade.io"
-PREFIX_ENV = "S3_PREFIX_TEAM_EFFECT_OF_AI"
-
-spec = importlib.util.spec_from_file_location("scoreqa", SCRIPT)
-mod = importlib.util.module_from_spec(spec)
-sys.modules["scoreqa"] = mod
-spec.loader.exec_module(mod)
-
-bucket, prefix = mod.parse_s3_location(BUCKET, None, PREFIX_ENV)
-chunks = mod.list_chunks_s3(bucket, prefix)
-
-first_name = sorted(chunks)[0]
-ref = chunks[first_name]
-
-print("Testing chunk:", first_name)
-print("S3 path:", f"s3://{bucket}/{ref.key}")
-
-df = mod.read_rds_s3(bucket, ref.key)
-
-print("\nRaw rows:", len(df))
-print("Columns:", list(df.columns))
-
-print("\nForm types:")
-print(df["form_type"].astype(str).str.upper().value_counts().head(10))
-
-print("\nItems:")
-print(df["item"].astype(str).str.lower().value_counts().head(20))
-
-wide = mod.long_to_wide(df, include_amended=False)
-
-print("\nWide filing rows:", len(wide))
-print("Missing Item 1:", int((wide["has_item1"] == False).sum()))
-print("Missing Item 7:", int((wide["has_item7"] == False).sum()))
-
-print("\nCombined chars summary:")
-print(wide["combined_chars"].describe())
-
-print("\nFirst few filings:")
-cols = ["accession_number", "cik", "year", "form_type", "has_item1", "has_item7", "combined_chars"]
-print(wide[cols].head(10).to_string(index=False))
-PY
-```
-
-Pass condition:
-
-```text
-Raw rows > 0
-Columns include item, year, accession_number, cik, form_type, text
-Form types include 10-K
-Items include item1 and item7
-Wide filing rows > 0
-Combined text lengths are plausible
-```
-
-Observed successful example for chunk 1:
-
-```text
-Raw rows: 2000
-item1: 1000
-item7: 1000
-Wide filing rows: 1000
-Missing Item 1: 0
-Missing Item 7: 2
-```
-
-### Test 5: One-Filing LLM Test
-
-```bash
-python3 get_llama_score.py \
-  --s3-bucket jupyter.notebook.uktrade.io \
-  --s3-prefix-env S3_PREFIX_TEAM_EFFECT_OF_AI \
-  --chunk-ids 1 \
-  --max-filings-per-chunk 1 \
-  --prefilter-mode off \
-  --max-prompt-chars 1500 \
-  --max-new-tokens 80 \
-  --retries 0 \
-  --out-dir output/test_small_prompt \
-  --log-level INFO
-```
-
-Inspect output:
-
-```bash
-CSV=$(find output/test_small_prompt -name '*_llama_scores.csv' | sort | tail -1)
-
-python3 -c "import pandas as pd; df=pd.read_csv('$CSV'); print(df[['accession_number','keyword_hits','snippet_chars','llm_called','endpoint_attempts','ai_adoption_score','score_status','explanation']].to_string(index=False)); print(df['score_status'].value_counts(dropna=False))"
-```
-
-Pass condition:
-
-```text
-score_status = ok
-ai_adoption_score is between 0 and 1
-explanation is not blank
-```
-
-### Test 6: 25-Filing Hard-Zero Test
-
-```bash
-python3 get_llama_score.py \
-  --s3-bucket jupyter.notebook.uktrade.io \
-  --s3-prefix-env S3_PREFIX_TEAM_EFFECT_OF_AI \
-  --chunk-ids 1 \
-  --max-filings-per-chunk 25 \
-  --prefilter-mode hard_zero \
-  --max-prompt-chars 1500 \
-  --max-new-tokens 80 \
-  --retries 0 \
-  --out-dir output/test_25_hard_zero \
-  --log-level INFO
-```
-
-Inspect output:
-
-```bash
-CSV=$(find output/test_25_hard_zero -name '*_llama_scores.csv' | sort | tail -1)
-
-python3 -c "import pandas as pd; df=pd.read_csv('$CSV'); print(df[['accession_number','keyword_hits','llm_called','ai_adoption_score','score_status','explanation']].to_string(index=False)); print('\nscore_status:'); print(df['score_status'].value_counts(dropna=False)); print('\nllm_called:'); print(df['llm_called'].value_counts(dropna=False)); print('\nkeyword_hits:'); print(df['keyword_hits'].describe())"
-```
-
-Pass condition:
-
-```text
-No-keyword filings have score_status = prefilter_zero_no_keyword
-Keyword-hit filings have llm_called = True
-Most LLM-called rows have score_status = ok
-```
-
-Observed test result:
-
-```text
-prefilter_zero_no_keyword: 16
-ok: 7
-no_json_found: 2
-```
-
-This means the process works, but the LLM parsing failure rate still needs review before full-scale running.
-
-## Output QA Checklist
-
-Before scaling up, inspect:
-
-```text
-score_status
-llm_called
-keyword_hits
-prefilter_decision
-snippet_chars
-ai_adoption_score
-explanation
-has_item1
-has_item7
-endpoint_attempts
 ```
 
 Good signs:
 
-```text
-Most LLM-called rows have score_status = ok
-No-keyword hard-zero rows are clearly marked
-Scores are between 0 and 1
-Explanations are filing-specific
-snippet_chars > 0 when llm_called = True
-Manifest status is ok for each processed chunk
-```
+- columns include `cik` and `year`
+- duplicate `cik`/`year` rows are zero or understood
+- the year range matches the research period
 
-Red flags:
-
-```text
-Many endpoint_error rows
-Many no_json_found rows
-Many no_valid_score_json rows
-Blank or repeated explanations
-Scores missing for many LLM-called rows
-Unexpectedly high missing Item 1 or Item 7
-Unexpectedly high number of LLM calls
-```
-
-## Performance Notes
-
-The endpoint can be slow. In testing, one LLM call took about 9 minutes.
-
-This means `--prefilter-mode off` is not suitable for full chunks.
-
-Approximate runtime:
-
-```text
-10 LLM calls   = about 1.5 hours
-100 LLM calls  = about 15 hours
-1000 LLM calls = not practical
-```
-
-Therefore, before running all chunks:
-
-1. Estimate how many filings have keyword hits.
-2. Use `--prefilter-mode hard_zero` for production-style tests.
-3. Use `--prefilter-mode audit` to test false-zero risk.
-4. Do not run `--all-chunks` until output quality and runtime are acceptable.
-
-## Estimate LLM Calls For One Chunk
-
-This does not call the LLM:
+Estimate how many filings in one chunk match the lookup before calling the LLM:
 
 ```bash
 python3 - <<'PY'
@@ -549,6 +125,7 @@ import sys
 SCRIPT = "get_llama_score.py"
 BUCKET = "jupyter.notebook.uktrade.io"
 PREFIX_ENV = "S3_PREFIX_TEAM_EFFECT_OF_AI"
+LOOKUP = "../lookup/cik_year.csv"
 
 spec = importlib.util.spec_from_file_location("scoreqa", SCRIPT)
 mod = importlib.util.module_from_spec(spec)
@@ -561,70 +138,280 @@ chunks = mod.list_chunks_s3(bucket, prefix)
 ref = chunks["extract_df_chunk_00001.rds"]
 df = mod.read_rds_s3(bucket, ref.key)
 wide = mod.long_to_wide(df, include_amended=False)
+lookup = mod.load_cik_year_lookup(LOOKUP)
+filtered = mod.filter_wide_to_lookup(wide, lookup)
 
-wide["keyword_hits"] = wide["combined_text"].apply(mod.count_ai_keywords)
+print("Chunk:", ref.name)
+print("Rows before lookup:", len(wide))
+print("Rows after lookup:", len(filtered))
 
-print("filings:", len(wide))
-print("keyword-hit filings:", int((wide["keyword_hits"] > 0).sum()))
-print("no-keyword filings:", int((wide["keyword_hits"] == 0).sum()))
-print("keyword-hit rate:", round((wide["keyword_hits"] > 0).mean(), 4))
-
-print("\nkeyword_hits summary:")
-print(wide["keyword_hits"].describe())
-
-print("\ntop keyword-hit filings:")
-cols = ["accession_number", "cik", "year", "form_type", "keyword_hits", "combined_chars"]
-print(wide[cols].sort_values("keyword_hits", ascending=False).head(20).to_string(index=False))
+if len(filtered):
+    filtered["keyword_hits"] = filtered["combined_text"].apply(mod.count_ai_keywords)
+    print("Keyword-hit rows after lookup:", int((filtered["keyword_hits"] > 0).sum()))
+    print("No-keyword rows after lookup:", int((filtered["keyword_hits"] == 0).sum()))
+    print(filtered[["accession_number", "cik", "year", "keyword_hits", "combined_chars"]].head(20).to_string(index=False))
 PY
 ```
 
-## Recommended Scale-Up Order
+This test is fast because it does not call SageMaker.
 
-Use this order before running all chunks:
+## Dependencies
 
-```text
-1 filing, prefilter off
-25 filings, hard_zero
-50 filings, hard_zero
-200 filings, hard_zero
-200 filings, audit
-1 full chunk, hard_zero
-2-3 full chunks, hard_zero
-all chunks only after QA approval
-```
-
-## Current Known Issues
-
-The process is currently in QA.
-
-Known issues to monitor:
-
-```text
-Some LLM outputs may fail with no_json_found.
-The endpoint is slow.
-The hard-zero prefilter should be audited before final use.
-The SageMaker output folder path may need a symlink in this environment.
-```
-
-## Full Run Example
-
-Only run after QA approval:
+Install these if they are missing:
 
 ```bash
-python3 get_llama_score.py \
+pip install pandas pyreadr boto3 dwutils 'dwutils[ml]'
+```
+
+You also need S3 credentials available in the environment where you run the script.
+
+## Step 1: Find Your S3 Prefix
+
+If you do not know the prefix, search the bucket:
+
+```bash
+aws s3 ls s3://jupyter.notebook.uktrade.io --recursive | rg 'extract_df_chunk_[0-9]{5}\.rds$'
+```
+
+If that prints:
+
+```text
+2026-04-18 10:00:00  123456  users/piomedolla/edgar/chunks/extract_df_chunk_00001.rds
+```
+
+then your prefix is:
+
+```text
+users/piomedolla/edgar/chunks
+```
+
+## Step 2: List Chunks
+
+Use `--list-only` before scoring:
+
+```bash
+python3 /Users/piomedolla/Documents/Codex/2026-04-17-check-and-qa-this-process-usr/get_llm_score_qa.py \
   --s3-bucket jupyter.notebook.uktrade.io \
-  --s3-prefix-env S3_PREFIX_TEAM_EFFECT_OF_AI \
-  --all-chunks \
+  --s3-prefix users/piomedolla/edgar/chunks \
+  --list-only
+```
+
+Or with a full S3 prefix:
+
+```bash
+python3 /Users/piomedolla/Documents/Codex/2026-04-17-check-and-qa-this-process-usr/get_llm_score_qa.py \
+  --s3-prefix s3://jupyter.notebook.uktrade.io/users/piomedolla/edgar/chunks \
+  --list-only
+```
+
+## Step 3: Run A Small Smoke Test
+
+This scores only the first 10 filings in chunk 1.
+
+```bash
+python3 /Users/piomedolla/Documents/Codex/2026-04-17-check-and-qa-this-process-usr/get_llm_score_qa.py \
+  --s3-prefix s3://jupyter.notebook.uktrade.io/users/piomedolla/edgar/chunks \
+  --chunk-ids 1 \
+  --lookup-csv ../lookup/cik_year.csv \
+  --max-filings-per-chunk 10 \
+  --prefilter-mode off \
+  --out-dir /Users/piomedolla/Documents/Codex/llama_scores_qa
+```
+
+`--prefilter-mode off` means every non-empty filing goes to the LLM. This is safest for testing.
+
+## Step 4: Inspect The Output
+
+By default the script writes to:
+
+```text
+<out-dir>/<RUN_ID>/
+```
+
+Inside that folder you will see:
+
+```text
+extract_df_chunk_00001_llama_scores.csv
+extract_df_chunk_00001_summary.json
+run_manifest_<RUN_ID>.csv
+```
+
+The summary JSON includes lookup counts when `--lookup-csv` is used:
+
+```text
+n_filings_before_lookup
+n_filings_after_lookup
+lookup_csv
+```
+
+These are important QA fields. For example, if a chunk has 1000 filing rows before the lookup and 12 after the lookup, only those 12 are considered for scoring.
+
+Check these CSV columns first:
+
+```text
+score_status
+llm_called
+keyword_hits
+prefilter_decision
+snippet_chars
+ai_adoption_score
+explanation
+has_item1
+has_item7
+```
+
+Healthy signs:
+
+- most LLM-called rows have `score_status = ok`
+- explanations are specific to the filing text
+- `snippet_chars` is greater than zero when `llm_called = True`
+- missing Item 1 and Item 7 rates look plausible
+- low scores are not mostly parser or endpoint failures
+
+Also check the summary JSON:
+
+```bash
+SUMMARY=$(find /path/to/output -name '*_summary.json' | sort | tail -1)
+cat "$SUMMARY"
+```
+
+Good lookup signs:
+
+- `n_filings_before_lookup` is plausible for the chunk
+- `n_filings_after_lookup` is less than or equal to `n_filings_before_lookup`
+- `n_filings_after_lookup` is greater than zero for chunks expected to contain research-sample firms
+
+## Prefilter Modes
+
+`off`
+
+Calls the LLM on every non-empty filing. Use this for smoke tests and validation samples.
+
+```bash
+--prefilter-mode off
+```
+
+`audit`
+
+Assigns zero to most no-keyword filings, but sends a deterministic sample of no-keyword filings to the LLM. Use this to test whether the keyword filter is creating false zeroes.
+
+```bash
+--prefilter-mode audit \
+--prefilter-audit-rate 0.10 \
+--prefilter-audit-limit 25
+```
+
+`hard_zero`
+
+Assigns zero to every no-keyword filing and skips the LLM call. Use this only after the audit shows false zeroes are rare enough.
+
+```bash
+--prefilter-mode hard_zero
+```
+
+## Recommended QA Run
+
+Run an audit sample:
+
+```bash
+python3 /Users/piomedolla/Documents/Codex/2026-04-17-check-and-qa-this-process-usr/get_llm_score_qa.py \
+  --s3-prefix s3://jupyter.notebook.uktrade.io/users/piomedolla/edgar/chunks \
+  --chunk-ids 1 \
+  --lookup-csv ../lookup/cik_year.csv \
+  --max-filings-per-chunk 200 \
+  --prefilter-mode audit \
+  --prefilter-audit-rate 0.10 \
+  --prefilter-audit-limit 25 \
+  --out-dir /Users/piomedolla/Documents/Codex/llama_scores_prefilter_audit
+```
+
+Then review rows where:
+
+```text
+score_status = prefilter_audit_ok
+keyword_hits = 0
+ai_adoption_score > 0
+```
+
+If many no-keyword audit rows get nonzero scores, keep using `--prefilter-mode off` or revise the keyword list before using `hard_zero`.
+
+## Production-Style Test
+
+After validation:
+
+```bash
+python3 /Users/piomedolla/Documents/Codex/2026-04-17-check-and-qa-this-process-usr/get_llm_score_qa.py \
+  --s3-prefix s3://jupyter.notebook.uktrade.io/users/piomedolla/edgar/chunks \
+  --chunk-range 1 5 \
+  --lookup-csv ../lookup/cik_year.csv \
   --prefilter-mode hard_zero \
-  --max-prompt-chars 1500 \
-  --max-new-tokens 80 \
   --checkpoint-every 25 \
-  --retries 0 \
-  --out-dir output/full_run \
-  --log-level INFO
+  --retries 2 \
+  --out-dir /Users/piomedolla/Documents/Codex/llama_scores_production_test
 ```
 
-## Project Status
+Review the summaries and manifest before scaling up to more chunks.
 
-This project is under active QA. The data reading, reshaping, S3 access, and hard-zero prefilter have passed initial tests. Further QA is needed on LLM response quality, JSON parse reliability, runtime, and prefilter false-zero risk before running the full production process.
+## Useful Selection Options
+
+Score specific chunk IDs:
+
+```bash
+--chunk-ids 1 2 18 37
 ```
+
+Score a range:
+
+```bash
+--chunk-range 1 5
+```
+
+Score by exact filename:
+
+```bash
+--chunk-names extract_df_chunk_00001.rds extract_df_chunk_00002.rds
+```
+
+Score everything under the prefix:
+
+```bash
+--all-chunks
+```
+
+Use `--all-chunks` carefully.
+
+## Common Problems
+
+No chunks found:
+
+- check that the prefix does not include the filename
+- check that the chunk names match `extract_df_chunk_00001.rds`
+- check S3 permissions
+
+Access denied:
+
+- check AWS credentials
+- check that the environment can read the bucket and prefix
+
+Many `endpoint_error` rows:
+
+- check endpoint availability
+- try a smaller test run
+- keep `--retries 2`
+
+Many `no_json_found` or `no_valid_score_json` rows:
+
+- use `--save-raw-json` on a small run
+- check whether the endpoint is returning prompt text or malformed output
+
+Unexpectedly many missing Item 1 or Item 7 rows:
+
+- check the original `item` labels in the RDS files
+- this script expects `item1` and `item7`
+
+No filings after lookup:
+
+- check that `--lookup-csv ../lookup/cik_year.csv` points to the right file
+- check that lookup `cik` and `year` values match the chunk contents
+- try another chunk, because not every chunk must contain research-sample firms
+- confirm the SIC filtering was applied when creating the lookup
