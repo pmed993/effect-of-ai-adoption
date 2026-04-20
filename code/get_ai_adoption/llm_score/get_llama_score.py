@@ -11,13 +11,15 @@ What it does
 3. Sends relevant filing snippets to a Llama endpoint.
 4. Writes one score CSV and one summary JSON per chunk.
 
-Because the file chunks live in a S3 buckets, the only input location you need is:
+This version intentionally removes all local-file input logic. If your chunks
+live in S3, the only input location you need is:
 
     s3://BUCKET/PREFIX/extract_df_chunk_00001.rds
 
-Use --s3-bucket BUCKET and --s3-prefix PREFIX. Or paste a full S3 URI
+Use --s3-bucket BUCKET and --s3-prefix PREFIX. You can also paste a full S3 URI
 into --s3-prefix, for example:
-  --s3-prefix s3://jupyter.notebook.uktrade.io/path/to/chunks
+
+    --s3-prefix s3://jupyter.notebook.uktrade.io/path/to/chunks
 """
 
 from __future__ import annotations
@@ -42,10 +44,10 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # Configuration and text patterns
 # ---------------------------------------------------------------------------
-# Make output produced tracable, if i.e., the prompt or script logic
+# These constants make the output traceable. If the prompt or script logic
 # changes, bump these values so later CSVs show exactly which version produced
 # them.
-SCRIPT_VERSION = "2026-04-18"
+SCRIPT_VERSION = "2026-04-20-s3-only-lookup"
 PROMPT_VERSION = "llama_ai_adoption_v3_filing_time"
 
 DEFAULT_ENDPOINT = "jupyterhub-llama-3-3b-instruct-endpoint"
@@ -165,6 +167,18 @@ def count_ai_keywords(text: str) -> int:
     return len(list(AI_KEYWORDS.finditer(text))) if text else 0
 
 
+def normalize_cik_for_match(value: Any) -> str:
+    """Normalize CIK values so 1750 and 0001750 match the same firm."""
+
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    text = str(value).strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    text = re.sub(r"\D", "", text)
+    return text.lstrip("0") or ("0" if text else "")
+
+
 def preferred_output_columns(save_raw_json: bool) -> List[str]:
     """Define the CSV column order so every output chunk has the same shape."""
 
@@ -207,14 +221,13 @@ def preferred_output_columns(save_raw_json: bool) -> List[str]:
 # Prompt construction and model-output parsing
 # ---------------------------------------------------------------------------
 def build_ai_prompt(text: str) -> str:
-  
     """
     Build the instruction sent to the model.
 
     The prompt is deliberately long because it defines the scoring concept,
     what should not count, and the required JSON output format.
     """
-    
+
     return (
         "You are an academic research assistant measuring firm-level artificial intelligence adoption from SEC Form 10-K disclosures.\n\n"
         "TASK\n"
@@ -263,8 +276,8 @@ def build_ai_prompt(text: str) -> str:
         "{\"score\": NUMBER_BETWEEN_0_AND_1, \"explanation\": \"ONE_SHORT_PARAGRAPH\"}\n"
         "Do not copy the template. Replace NUMBER_BETWEEN_0_AND_1 with a numeric score between 0.00 and 1.00.\n"
         "Do not return markdown, bullets, headings, or any text before or after the JSON."
-        )
-      
+    )
+
 
 def extract_text_from_response(resp: Any) -> str:
     """
@@ -715,6 +728,66 @@ def long_to_wide(df: pd.DataFrame, include_amended: bool) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Lookup filtering
+# ---------------------------------------------------------------------------
+def load_cik_year_lookup(path: Optional[str]) -> Optional[pd.DataFrame]:
+    """
+    Read an optional cik/year lookup CSV.
+
+    The lookup is expected to contain at least two columns: cik and year. Extra
+    columns, including an unnamed row index column from R, are ignored.
+    """
+
+    if not path:
+        return None
+
+    lookup = pd.read_csv(path)
+    lookup.columns = [str(col).strip().lower() for col in lookup.columns]
+
+    required = {"cik", "year"}
+    missing = required - set(lookup.columns)
+    if missing:
+        raise ValueError(f"Lookup CSV is missing required columns: {sorted(missing)}")
+
+    lookup = lookup[["cik", "year"]].copy()
+    lookup["cik_match"] = lookup["cik"].apply(normalize_cik_for_match)
+    lookup["year_match"] = pd.to_numeric(lookup["year"], errors="coerce").astype("Int64")
+    lookup = lookup[(lookup["cik_match"] != "") & lookup["year_match"].notna()]
+    lookup = lookup.drop_duplicates(["cik_match", "year_match"]).reset_index(drop=True)
+
+    if lookup.empty:
+        raise ValueError(f"Lookup CSV contains no usable cik/year pairs: {path}")
+
+    logging.info("Loaded lookup %s with %d unique cik/year pairs", path, len(lookup))
+    return lookup[["cik_match", "year_match"]]
+
+
+def filter_wide_to_lookup(wide: pd.DataFrame, lookup: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """
+    Keep only filing rows whose cik/year pair appears in the lookup.
+
+    This should happen before LLM scoring so the endpoint is only called for
+    filings needed by the research sample.
+    """
+
+    if lookup is None or wide.empty:
+        return wide
+
+    work = wide.copy()
+    work["cik_match"] = work["cik"].apply(normalize_cik_for_match)
+    work["year_match"] = pd.to_numeric(work["year"], errors="coerce").astype("Int64")
+
+    before = len(work)
+    filtered = work.merge(lookup, on=["cik_match", "year_match"], how="inner")
+    filtered = filtered.drop(columns=["cik_match", "year_match"])
+    filtered = filtered.drop_duplicates(["accession_number", "cik", "year", "form_type"])
+    filtered = filtered.reset_index(drop=True)
+
+    logging.info("Lookup filter kept %d/%d filing rows", len(filtered), before)
+    return filtered
+
+
+# ---------------------------------------------------------------------------
 # Endpoint scoring
 # ---------------------------------------------------------------------------
 def get_dwutils_sm() -> Any:
@@ -956,6 +1029,7 @@ def process_chunk(
     run_id: str,
     sm: Any,
     bucket: str,
+    lookup: Optional[pd.DataFrame],
 ) -> Dict[str, Any]:
     """
     Process one S3 chunk from download through final CSV and summary JSON.
@@ -989,6 +1063,9 @@ def process_chunk(
     # Read and reshape the source data before row-level scoring.
     df = read_rds_s3(bucket, ref.key)
     wide = long_to_wide(df, include_amended=args.include_amended)
+    n_filings_before_lookup = len(wide)
+    wide = filter_wide_to_lookup(wide, lookup)
+    n_filings_after_lookup = len(wide)
 
     if args.max_filings_per_chunk > 0:
         wide = wide.head(args.max_filings_per_chunk).copy()
@@ -1058,6 +1135,9 @@ def process_chunk(
         "prefilter_mode": args.prefilter_mode,
         "prefilter_audit_rate": args.prefilter_audit_rate,
         "prefilter_audit_limit": args.prefilter_audit_limit,
+        "lookup_csv": args.lookup_csv,
+        "n_filings_before_lookup": int(n_filings_before_lookup),
+        "n_filings_after_lookup": int(n_filings_after_lookup),
         "n_filings": int(len(out_df)),
         "n_unique_cik": int(out_df["cik"].nunique()) if not out_df.empty else 0,
         "n_llm_called": int(out_df["llm_called"].sum()) if not out_df.empty else 0,
@@ -1081,6 +1161,8 @@ def process_chunk(
         "status": "ok",
         "output_csv": out_csv,
         "output_summary": out_json,
+        "n_filings_before_lookup": int(n_filings_before_lookup),
+        "n_filings_after_lookup": int(n_filings_after_lookup),
         "n_filings": int(len(out_df)),
         "n_ok": int((out_df["score_status"] == "ok").sum()) if not out_df.empty else 0,
         "n_prefilter_audit_ok": int((out_df["score_status"] == "prefilter_audit_ok").sum()) if not out_df.empty else 0,
@@ -1119,6 +1201,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--list-only", action="store_true", help="List available chunks under the S3 prefix and exit.")
     ap.add_argument("--max-chunks", type=int, default=0, help="Cap number of selected chunks after resolution.")
     ap.add_argument("--max-filings-per-chunk", type=int, default=0, help="For QA/testing, only score first N filings per chunk.")
+    ap.add_argument(
+        "--lookup-csv",
+        default=None,
+        help="Optional CSV with cik and year columns. Only matching cik/year filing rows are scored.",
+    )
     ap.add_argument("--include-amended", action="store_true", help="Include 10-K/A rows. Default keeps only 10-K.")
     ap.add_argument(
         "--prefilter-mode",
@@ -1165,6 +1252,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         ap.error("--prefilter-audit-rate must be between 0 and 1")
     if args.prefilter_audit_limit < 0:
         ap.error("--prefilter-audit-limit must be >= 0")
+    if args.lookup_csv and not os.path.exists(args.lookup_csv):
+        ap.error(f"--lookup-csv does not exist: {args.lookup_csv}")
 
     return args
 
@@ -1210,13 +1299,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     run_out_dir = output_dir_for_run(args, run_id)
     os.makedirs(run_out_dir, exist_ok=True)
 
+    lookup = load_cik_year_lookup(args.lookup_csv)
     sm = get_dwutils_sm()
 
     manifest_rows = []
     for ref in selected:
         # Keep going if one chunk fails; the manifest records the failure.
         try:
-            row = process_chunk(ref, args=args, run_id=run_id, sm=sm, bucket=bucket)
+            row = process_chunk(ref, args=args, run_id=run_id, sm=sm, bucket=bucket, lookup=lookup)
         except Exception as exc:
             logging.exception("Failed processing %s", ref.name)
             row = {
