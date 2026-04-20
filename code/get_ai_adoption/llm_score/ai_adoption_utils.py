@@ -532,7 +532,7 @@ def extract_relevant_snippets(full_text: str, max_chars: int, sentence_window: i
             break
         chunks.append(candidate)
         used += len(candidate)
-        last_i = iwhat 
+        last_i = i 
 
     return "".join(chunks).strip() or full_text[:max_chars]
 
