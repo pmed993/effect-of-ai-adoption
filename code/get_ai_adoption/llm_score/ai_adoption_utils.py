@@ -1,0 +1,1014 @@
+"""Utility functions for filing-level AI adoption scoring.
+
+Helper functions for S3/Data Workspace access, RDS reading, lookup filtering,
+prompt construction, snippet extraction, model-output parsing, and output formatting.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import re
+import tempfile
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable, Optional, Sequence
+
+import pandas as pd
+
+
+# ---------------------------------------------------------------------------
+# Versions, defaults, and text-matching patterns
+# ---------------------------------------------------------------------------
+# These values are written into every output file so results can be traced back
+# to the exact script and prompt version that produced them.
+SCRIPT_VERSION = "2026-04-20-bulk-v1"
+PROMPT_VERSION = "llama_ai_adoption_v4_json_after_text"
+
+DEFAULT_ENDPOINT = "jupyterhub-llama-3-3b-instruct-endpoint"
+DEFAULT_BUCKET = "jupyter.notebook.uktrade.io"
+
+# Chunk files must follow this exact naming pattern to be picked up.
+CHUNK_RE = re.compile(r"^extract_df_chunk_(\d{5})\.rds$")
+
+# Generic text cleanup and rough sentence splitting patterns.
+WHITESPACE_RE = re.compile(r"\s+")
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[\.\!\?\;])\s+|\n+")
+
+# Keywords used to decide whether a filing may contain AI adoption evidence.
+# Lowercase "ml" is deliberately excluded because it often means millilitres.
+AI_KEYWORDS = re.compile(
+    r"(?i:"
+    r"\bartificial intelligence\b|"
+    r"\bmachine learning\b|"
+    r"\bdeep learning\b|"
+    r"\bneural networks?\b|"
+    r"\bpredictive models?\b|"
+    r"\balgorithmic\b|"
+    r"\bautomated decisions?\b|"
+    r"\bautomated underwriting\b|"
+    r"\brecommendation engines?\b|"
+    r"\brecommendation systems?\b|"
+    r"\bdecision engines?\b|"
+    r"\bpersonalization engines?\b|"
+    r"\bcomputer vision\b|"
+    r"\bnatural language processing\b|"
+    r"\bnatural language generation\b|"
+    r"\bgenerative ai\b|"
+    r"\bgenai\b|"
+    r"\blarge language models?\b|"
+    r"\bllms?\b|"
+    r"\bnlp\b|"
+    r"\brobotic process automation\b|"
+    r"\bautonomous systems?\b|"
+    r"\bfraud detection models?\b|"
+    r"\boptimization engines?\b"
+    r")|"
+    r"\bAI\b|"
+    r"\bA\.I\.\b|"
+    r"\bML\b|"
+    r"\bRPA\b"
+)
+
+# These words help rank snippets. They do not determine the final score.
+# They only make operational evidence more likely to be sent to the LLM.
+OPERATIONAL_CUES = re.compile(
+    r"(?i)\b("
+    r"use|uses|used|using|deploy|deploys|deployed|deployment|implemented|implements|"
+    r"integrated|integrates|embedded|operates|operational|automate|automates|automated|"
+    r"recommend|recommends|detect|detects|forecast|forecasts|predict|predicts|"
+    r"underwrite|underwrites|optimize|optimizes|personalize|personalizes"
+    r")\b"
+)
+
+# These words are common in risk factors, future plans, or generic discussion.
+# Snippets dominated by these cues are down-ranked during excerpt selection.
+LOW_VALUE_CUES = re.compile(
+    r"(?i)\b("
+    r"risk|risks|could|may|might|intend|intends|plan|plans|future|potential|"
+    r"regulation|regulatory|competition|competitors|cybersecurity|pilot|pilots|"
+    r"proof of concept|experiment|experiments|research"
+    r")\b"
+)
+
+
+# ---------------------------------------------------------------------------
+# Lightweight data structures
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class ChunkRef:
+    """A chunk file available in the Data Workspace team S3 prefix."""
+
+    name: str
+    path: str
+
+
+# ---------------------------------------------------------------------------
+# Small generic helpers
+# ---------------------------------------------------------------------------
+# These helpers keep formatting, hashing, CIK matching, and keyword counting
+# consistent across the main script and output QA.
+def utc_now() -> str:
+    """Return a compact UTC timestamp used as the run id."""
+
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def sha256_text(text: str) -> str:
+    """Hash text so snippets can be audited without storing the full text."""
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def stable_unit_interval(value: str) -> float:
+    """Map a string to a stable 0-to-1 value for reproducible audit sampling."""
+
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return int(digest[:16], 16) / float(16 ** 16)
+
+
+def normalize_whitespace(text: Any) -> str:
+    """Convert missing values to empty strings and collapse noisy whitespace."""
+
+    if text is None or (isinstance(text, float) and pd.isna(text)):
+        return ""
+    return WHITESPACE_RE.sub(" ", str(text).replace("\x00", " ")).strip()
+
+
+def normalize_cik(value: Any) -> str:
+    """Normalize CIK values so 1750 and 0001750 match the same firm."""
+
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    text = str(value).strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    text = re.sub(r"\D", "", text)
+    return text.lstrip("0") or ("0" if text else "")
+
+
+def count_ai_keywords(text: str) -> int:
+    """Count AI keyword hits in filing text."""
+
+    return len(list(AI_KEYWORDS.finditer(text))) if text else 0
+
+
+def chunk_name_from_id(chunk_id: int) -> str:
+    """Convert chunk id 1 to extract_df_chunk_00001.rds."""
+
+    if chunk_id < 1:
+        raise ValueError("Chunk ids must be positive integers.")
+    return f"extract_df_chunk_{chunk_id:05d}.rds"
+
+
+# ---------------------------------------------------------------------------
+# Output formatting helpers
+# ---------------------------------------------------------------------------
+# These functions keep the per-filing CSV columns stable and write JSON summary
+# files in a readable format.
+def preferred_output_columns(save_raw_json: bool) -> list[str]:
+    """Return the preferred CSV column order."""
+
+    cols = [
+        "run_id",
+        "script_version",
+        "prompt_version",
+        "source_label",
+        "chunk_id",
+        "accession_number",
+        "cik",
+        "year",
+        "form_type",
+        "has_item1",
+        "has_item7",
+        "item1_chars",
+        "item7_chars",
+        "combined_chars",
+        "keyword_hits",
+        "prefilter_mode",
+        "prefilter_decision",
+        "prefilter_audit_sample",
+        "snippet_chars",
+        "llm_called",
+        "endpoint_attempts",
+        "ai_adoption_score",
+        "explanation",
+        "score_status",
+        "endpoint",
+        "job_id",
+        "snippet_sha256",
+        "raw_json_sha256",
+    ]
+    if save_raw_json:
+        cols.append("raw_json")
+    return cols
+
+
+def order_columns(df: pd.DataFrame, save_raw_json: bool) -> pd.DataFrame:
+    """Put key QA columns first while preserving any extra columns at the end."""
+
+    preferred = preferred_output_columns(save_raw_json)
+    if df.empty:
+        return pd.DataFrame(columns=preferred)
+    existing = [col for col in preferred if col in df.columns]
+    extra = [col for col in df.columns if col not in existing]
+    return df[existing + extra]
+
+
+def write_json(path: str, payload: dict[str, Any]) -> None:
+    """Write a JSON file with stable formatting."""
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False, default=str)
+
+
+# ---------------------------------------------------------------------------
+# Data Workspace S3 helpers
+# ---------------------------------------------------------------------------
+# Data Workspace exposes team S3 folders through dwutils.s3. Reading uses
+# dwutils.s3.read. Listing still uses boto3 because dwutils.s3 has read/write
+# helpers but no object-listing helper
+def get_team_prefix(team: str) -> str:
+    """Return the Data Workspace S3 key prefix for a team folder."""
+
+    from dwutils import s3
+
+    teams = s3.list_team_folders()
+    if team not in teams:
+        raise ValueError(f"Unknown team {team!r}. Available teams: {sorted(teams)}")
+    return teams[team]["s3_key"].strip("/")
+
+
+def list_chunks(team: str, chunk_prefix: str = "", bucket: str = DEFAULT_BUCKET) -> dict[str, ChunkRef]:
+    """List valid chunk files under a Data Workspace team folder."""
+
+    import boto3
+
+    team_prefix = get_team_prefix(team)
+    prefix = "/".join(part.strip("/") for part in [team_prefix, chunk_prefix] if part.strip("/"))
+    paginator = boto3.client("s3").get_paginator("list_objects_v2")
+
+    refs: dict[str, ChunkRef] = {}
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix.rstrip("/") + "/"):
+        for obj in page.get("Contents", []):
+            path = obj["Key"][len(team_prefix) :].strip("/")
+            name = Path(path).name
+            if CHUNK_RE.match(name):
+                refs[name] = ChunkRef(name=name, path=path)
+    return dict(sorted(refs.items()))
+
+
+# ---------------------------------------------------------------------------
+# Chunk selection helpers
+# ---------------------------------------------------------------------------
+# Users can select chunks by exact filename, numeric id, numeric range, or all
+# available chunks. This function turns that choice into concrete ChunkRef rows.
+def select_chunks(
+    available: dict[str, ChunkRef],
+    chunk_names: Optional[Sequence[str]],
+    chunk_ids: Optional[Sequence[int]],
+    chunk_range: Optional[Sequence[int]],
+    all_chunks: bool,
+    max_chunks: Optional[int],
+) -> list[ChunkRef]:
+    if chunk_names:
+        names = [Path(name).name for name in chunk_names]
+        bad = [name for name in names if not CHUNK_RE.match(name)]
+        if bad:
+            raise ValueError(f"Invalid chunk filename(s): {bad}")
+    elif chunk_ids:
+        names = [chunk_name_from_id(int(chunk_id)) for chunk_id in chunk_ids]
+    elif chunk_range:
+        start, end = int(chunk_range[0]), int(chunk_range[1])
+        if end < start:
+            raise ValueError("--chunk-range requires START <= END")
+        names = [chunk_name_from_id(chunk_id) for chunk_id in range(start, end + 1)]
+    elif all_chunks:
+        selected = list(available.values())
+        return selected[:max_chunks] if max_chunks else selected
+    else:
+        raise ValueError("No chunks selected. Use --chunk-ids, --chunk-range, --chunk-names, or --all-chunks.")
+
+    selected = []
+    seen = set()
+    for name in names:
+        if name not in available:
+            raise FileNotFoundError(f"Chunk not found under the team prefix: {name}")
+        ref = available[name]
+        if ref.path not in seen:
+            selected.append(ref)
+            seen.add(ref.path)
+
+    return selected[:max_chunks] if max_chunks else selected
+
+
+# ---------------------------------------------------------------------------
+# RDS reading
+# ---------------------------------------------------------------------------
+# pyreadr reads from a file path, while dwutils.s3.read returns bytes. This
+# helper bridges those two APIs using a temporary file.
+def read_rds_from_team_s3(path: str, team: str) -> pd.DataFrame:
+    """Read one RDS object from Data Workspace team S3 using dwutils.s3."""
+
+    from dwutils import s3
+    import pyreadr
+
+    with s3.read(path=path, team=team) as stream:
+        with tempfile.NamedTemporaryFile(suffix=".rds", delete=True) as tmp:
+            tmp.write(stream.read())
+            tmp.flush()
+            result = pyreadr.read_r(tmp.name)
+
+    if not result:
+        raise ValueError(f"No readable objects found in team={team}, path={path}")
+
+    df = next(iter(result.values()))
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(f"First object in team={team}, path={path} is not a DataFrame")
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Lookup loading and filing-level data reshaping
+# ---------------------------------------------------------------------------
+# The lookup filter is where the research sample enters the process. The LLM is
+# only called for filing rows that survive this cik/year filter.
+def load_cik_year_lookup(path: Optional[str]) -> Optional[pd.DataFrame]:
+    """Read the optional research lookup and normalize cik/year match keys."""
+
+    if not path:
+        return None
+
+    lookup = pd.read_csv(path)
+    lookup.columns = [str(col).strip().lower() for col in lookup.columns]
+    missing = {"cik", "year"} - set(lookup.columns)
+    if missing:
+        raise ValueError(f"Lookup CSV is missing required columns: {sorted(missing)}")
+
+    lookup = lookup[["cik", "year"]].copy()
+    lookup["cik_match"] = lookup["cik"].apply(normalize_cik)
+    lookup["year_match"] = pd.to_numeric(lookup["year"], errors="coerce").astype("Int64")
+    lookup = lookup[(lookup["cik_match"] != "") & lookup["year_match"].notna()]
+    lookup = lookup.drop_duplicates(["cik_match", "year_match"]).reset_index(drop=True)
+    if lookup.empty:
+        raise ValueError(f"Lookup CSV contains no usable cik/year pairs: {path}")
+
+    logging.info("Loaded lookup %s with %d unique cik/year pairs", path, len(lookup))
+    return lookup[["cik_match", "year_match"]]
+
+
+def long_to_wide(df: pd.DataFrame, include_amended: bool) -> pd.DataFrame:
+    """
+    Convert long-format Item 1 / Item 7 rows into one row per filing.
+
+    The scoring methodology works at filing level, so each accession number
+    needs its Item 1 and Item 7 text side by side.
+    """
+
+    required = {"item", "year", "accession_number", "cik", "form_type", "text"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing required columns: {sorted(missing)}")
+
+    # Standardise key fields before filtering and grouping.
+    work = df.copy()
+    work["item"] = work["item"].astype(str).str.strip().str.lower()
+    work["form_type"] = work["form_type"].astype(str).str.upper().str.strip()
+    work["accession_number"] = work["accession_number"].astype(str).str.strip()
+    work["cik"] = work["cik"].astype(str).str.strip()
+    work["text"] = work["text"].apply(normalize_whitespace)
+
+    # Keep annual filings and the two disclosure sections used in the score.
+    keep_forms = {"10-K", "10-K/A"} if include_amended else {"10-K"}
+    work = work[work["form_type"].isin(keep_forms)]
+    work = work[work["item"].isin(["item1", "item7"])]
+
+    base_cols = [
+        "accession_number",
+        "cik",
+        "year",
+        "form_type",
+        "item1_text",
+        "item7_text",
+        "has_item1",
+        "has_item7",
+        "item1_chars",
+        "item7_chars",
+        "combined_text",
+        "combined_chars",
+    ]
+    if work.empty:
+        return pd.DataFrame(columns=base_cols)
+
+    # Collapse duplicate section rows, then pivot item1/item7 into columns.
+    collapsed = (
+        work.groupby(["accession_number", "cik", "year", "form_type", "item"], as_index=False)
+        .agg(text=("text", lambda x: " ".join([t for t in pd.unique(x) if t])))
+    )
+
+    wide = collapsed.pivot_table(
+        index=["accession_number", "cik", "year", "form_type"],
+        columns="item",
+        values="text",
+        aggfunc="first",
+        fill_value="",
+    ).reset_index()
+    wide.columns.name = None
+
+    for col in ["item1", "item7"]:
+        if col not in wide.columns:
+            wide[col] = ""
+
+    wide = wide.rename(columns={"item1": "item1_text", "item7": "item7_text"})
+    wide["year"] = pd.to_numeric(wide["year"], errors="coerce").astype("Int64")
+    wide["has_item1"] = wide["item1_text"].astype(str).str.len().gt(0)
+    wide["has_item7"] = wide["item7_text"].astype(str).str.len().gt(0)
+    wide["item1_chars"] = wide["item1_text"].astype(str).str.len()
+    wide["item7_chars"] = wide["item7_text"].astype(str).str.len()
+    # Add section labels before concatenation so the model sees the source.
+    wide["combined_text"] = (
+        "ITEM 1 BUSINESS:\n"
+        + wide["item1_text"].fillna("").astype(str)
+        + "\n\nITEM 7 MD&A:\n"
+        + wide["item7_text"].fillna("").astype(str)
+    )
+    wide["combined_chars"] = wide["combined_text"].astype(str).str.len()
+    return wide[base_cols].sort_values(["accession_number"]).reset_index(drop=True)
+
+
+def filter_to_lookup(wide: pd.DataFrame, lookup: Optional[pd.DataFrame]) -> pd.DataFrame:
+    """Keep only filing rows whose normalized cik/year appears in the lookup."""
+
+    if lookup is None or wide.empty:
+        return wide
+
+    work = wide.copy()
+    work["cik_match"] = work["cik"].apply(normalize_cik)
+    work["year_match"] = pd.to_numeric(work["year"], errors="coerce").astype("Int64")
+    filtered = work.merge(lookup, on=["cik_match", "year_match"], how="inner")
+    filtered = filtered.drop(columns=["cik_match", "year_match"])
+    dedupe_cols = [col for col in ["accession_number", "cik", "year", "form_type"] if col in filtered.columns]
+    filtered = filtered.drop_duplicates(dedupe_cols)
+    return filtered.reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Snippet extraction
+# ---------------------------------------------------------------------------
+# Full filings are too long for practical prompting. These functions find
+# AI-related sentences, keep a small context window, and prioritise operational
+# evidence over boilerplate.
+def split_into_sentences(text: str) -> list[str]:
+    """Split text into rough sentences for keyword-window selection."""
+
+    text = normalize_whitespace(text)
+    if not text:
+        return []
+    return [part.strip() for part in SENTENCE_SPLIT_RE.split(text) if part and part.strip()] or [text]
+
+
+def extract_relevant_snippets(full_text: str, max_chars: int, sentence_window: int) -> str:
+    """Extract a prompt-sized excerpt from the filing text."""
+
+    full_text = normalize_whitespace(full_text)
+    if not full_text:
+        return ""
+
+    sentences = split_into_sentences(full_text)
+    hit_idx = [i for i, sentence in enumerate(sentences) if AI_KEYWORDS.search(sentence)]
+    if not hit_idx:
+        return full_text[:max_chars]
+
+    # Build context windows around every AI keyword hit.
+    windows = []
+    for idx in hit_idx:
+        lo = max(0, idx - sentence_window)
+        hi = min(len(sentences), idx + sentence_window + 1)
+        indices = list(range(lo, hi))
+        window_text = " ".join(sentences[i] for i in indices)
+        # Rank windows with operational cues above risk/future-looking text.
+        score = 0
+        if OPERATIONAL_CUES.search(window_text):
+            score += 4
+        if OPERATIONAL_CUES.search(sentences[idx]):
+            score += 2
+        if LOW_VALUE_CUES.search(sentences[idx]):
+            score -= 2
+        if LOW_VALUE_CUES.search(window_text):
+            score -= 1
+        windows.append((score, idx, indices))
+
+    windows.sort(key=lambda item: (-item[0], item[1]))
+
+    # Select best-ranked windows without repeating sentences.
+    selected = set()
+    approx_chars = 0
+    for _, _, indices in windows:
+        new_indices = [i for i in indices if i not in selected]
+        if not new_indices:
+            continue
+        new_chars = sum(len(sentences[i]) for i in new_indices) + 2 * len(new_indices)
+        if approx_chars and approx_chars + new_chars > max_chars:
+            continue
+        selected.update(new_indices)
+        approx_chars += new_chars
+        if approx_chars >= max_chars:
+            break
+
+    # Return selected sentences in original filing order for readability.
+    chunks = []
+    used = 0
+    last_i = None
+    for i in sorted(selected):
+        prefix = " " if chunks and last_i is not None and i == last_i + 1 else "\n\n"
+        candidate = (prefix + sentences[i]) if chunks else sentences[i]
+        if used + len(candidate) > max_chars:
+            remaining = max_chars - used
+            if remaining > 150:
+                chunks.append(candidate[:remaining].rstrip())
+            break
+        chunks.append(candidate)
+        used += len(candidate)
+        last_i = iwhat 
+
+    return "".join(chunks).strip() or full_text[:max_chars]
+
+
+# ---------------------------------------------------------------------------
+# Prompt construction
+# ---------------------------------------------------------------------------
+# The scoring instructions are kept in one function so prompt changes are easy
+# to review and version through PROMPT_VERSION.
+def build_ai_prompt(text: str) -> str:
+    """Build the LLM prompt for one filing excerpt."""
+
+    return (
+        "You are an academic research assistant measuring firm-level artificial intelligence adoption from SEC Form 10-K disclosures.\n\n"
+        "TASK\n"
+        "Read the filing text and estimate the firm's level of AI adoption as described in this filing, at the time covered by the filing text.\n"
+        "After reading the filing text, return exactly two fields in valid JSON: score and explanation.\n\n"
+        "CONCEPT TO MEASURE\n"
+        "AI adoption means the extent to which AI, machine learning, algorithmic systems, or automated decision systems are already implemented and embedded in the firm's core business activities.\n"
+        "This includes adoption in products, services, operations, production, logistics, underwriting, forecasting, recommendations, fraud detection, pricing, internal decision systems, or other strategically relevant processes.\n\n"
+        "IMPORTANT: FOCUS ONLY ON FIRM-SPECIFIC, OPERATIONAL USE DURING THE FILING PERIOD\n"
+        "Score only based on evidence that the firm itself is using AI in a meaningful way in the business described by the filing.\n\n"
+        "DO NOT SCORE HIGHLY FOR THE FOLLOWING ALONE\n"
+        "- mere mention of AI, machine learning, or automation\n"
+        "- generic discussion of industry trends\n"
+        "- speculative future plans or intentions\n"
+        "- research, experiments, pilots, or proofs of concept with no evidence of deployment\n"
+        "- boilerplate innovation language\n"
+        "- risk factors mentioning AI competition, regulation, or cybersecurity\n"
+        "- references to third-party technology unless the text shows the firm has operationally integrated it\n\n"
+        "WHAT SHOULD INCREASE THE SCORE\n"
+        "- clear evidence that AI is already deployed in products, services, or internal operations\n"
+        "- AI tied to revenue generation, product delivery, cost reduction, efficiency, or decision-making\n"
+        "- distinct evidence of deployment across meaningful business functions\n"
+        "- AI embedded in core business segments rather than peripheral activities\n"
+        "- AI described as strategically important to how the firm operates or competes\n\n"
+        "SCORING GUIDANCE\n"
+        "0.00 = no explicit evidence of AI adoption in the filing text\n"
+        "0.01 to 0.10 = very weak evidence; vague references, early exploration, or non-operational discussion\n"
+        "0.11 to 0.30 = limited adoption; some specific use cases but narrow, tentative, or not central\n"
+        "0.31 to 0.50 = moderate adoption; clear operational use in some relevant business areas\n"
+        "0.51 to 0.70 = substantial adoption; AI is integrated into multiple important functions or products\n"
+        "0.71 to 0.90 = extensive adoption; AI is deeply embedded in operations and materially relevant to the business\n"
+        "0.91 to 1.00 = AI is fundamental to the firm's core business model and competitive functioning\n\n"
+        "DECISION RULES\n"
+        "- Use the full 0.00 to 1.00 range.\n"
+        "- Avoid coarse rounding such as only 0.2, 0.5, or 0.8.\n"
+        "- Base the score only on the text provided.\n"
+        "- Do not infer adoption from the industry the firm operates in.\n"
+        "- If there is no explicit evidence of firm-specific operational AI adoption, assign 0.10 or below.\n\n"
+        "TEXT TO EVALUATE:\n"
+        "<filing_text>\n"
+        f"{text}\n"
+        "</filing_text>\n\n"
+        "Now produce the score for the filing text above.\n"
+        "Return ONLY one valid JSON object and no other text.\n"
+        "The JSON object must have this shape:\n"
+        "{\"score\": NUMBER_BETWEEN_0_AND_1, \"explanation\": \"ONE_SHORT_PARAGRAPH\"}\n"
+        "Do not copy the template. Replace NUMBER_BETWEEN_0_AND_1 with a numeric score between 0.00 and 1.00.\n"
+        "Do not return markdown, bullets, headings, or any text before or after the JSON."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Model response parsing
+# ---------------------------------------------------------------------------
+# Model endpoints can return strings, dictionaries, lists, prompt echoes, or
+# repeated JSON. These helpers extract the generated text and then parse the
+# last valid JSON score object.
+def extract_text_from_response(resp: Any) -> str:
+    """Extract generated text from common endpoint response shapes."""
+
+    if resp is None:
+        return ""
+    if isinstance(resp, str):
+        return resp
+    if isinstance(resp, list):
+        for item in resp:
+            text = extract_text_from_response(item)
+            if text:
+                return text
+        return json.dumps(resp, ensure_ascii=False)
+    if isinstance(resp, dict):
+        for key in ["generated_text", "text", "output", "response", "completion", "content"]:
+            if key in resp and resp[key] is not None:
+                text = extract_text_from_response(resp[key])
+                if text:
+                    return text
+        for key in ["choices", "message", "outputs"]:
+            if key in resp:
+                text = extract_text_from_response(resp[key])
+                if text:
+                    return text
+        return json.dumps(resp, ensure_ascii=False)
+    return str(resp)
+
+
+def extract_balanced_json_objects(text: str) -> list[str]:
+    """Find balanced JSON-looking objects while respecting quoted strings."""
+
+    objects: list[str] = []
+    start = 0
+    while start < len(text):
+        if text[start] != "{":
+            start += 1
+            continue
+
+        depth = 0
+        in_string = False
+        escape = False
+        found_end = None
+
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    found_end = i
+                    break
+
+        if found_end is None:
+            start += 1
+        else:
+            objects.append(text[start : found_end + 1])
+            start = found_end + 1
+    return objects
+
+
+def parse_score_object(obj: Any) -> tuple[Any, str, str]:
+    """Validate one parsed JSON object as a score/explanation response."""
+
+    if not isinstance(obj, dict):
+        return pd.NA, "Parsed JSON was not an object.", "json_not_object"
+    try:
+        score = float(obj.get("score"))
+    except Exception:
+        return pd.NA, "Score field was not numeric.", "non_numeric_score"
+    if not 0.0 <= score <= 1.0:
+        return pd.NA, "Score was outside [0,1].", "score_out_of_bounds"
+
+    explanation = obj.get("explanation", "")
+    if not isinstance(explanation, str):
+        explanation = "" if explanation is None else str(explanation)
+    explanation = " ".join(explanation.split()).strip() or "No explanation returned."
+    return score, explanation, "ok"
+
+
+def parse_model_output(text: str) -> tuple[Any, str, str, str]:
+    """Parse raw model output into score, explanation, status, and raw JSON."""
+
+    if not text:
+        return pd.NA, "No model output returned.", "missing_output", ""
+
+    candidates = extract_balanced_json_objects(text)
+    if not candidates:
+        return pd.NA, "Model output did not contain valid JSON.", "no_json_found", ""
+
+    for candidate in reversed(candidates):
+        try:
+            obj = json.loads(candidate)
+        except Exception:
+            continue
+        score, explanation, status = parse_score_object(obj)
+        if status == "ok":
+            return score, explanation, "ok", candidate
+
+    return pd.NA, "Model output did not contain usable score JSON.", "no_valid_score_json", candidates[-1]
+
+
+# ---------------------------------------------------------------------------
+# Per-filing record preparation
+# ---------------------------------------------------------------------------
+# These helpers create the output row for each filing, apply empty-text and
+# prefilter rules, and build prompts only for filings that need the LLM.
+def base_score_record(
+    row: pd.Series,
+    *,
+    run_id: str,
+    source_label: str,
+    chunk_id: str,
+    endpoint: str,
+    prefilter_mode: str,
+    prefilter_audit_sample: bool,
+) -> dict[str, Any]:
+    """Create the standard output record before scoring decisions are applied."""
+
+    year = row.get("year", pd.NA)
+    year = int(year) if pd.notna(year) else pd.NA
+    return {
+        "run_id": run_id,
+        "script_version": SCRIPT_VERSION,
+        "prompt_version": PROMPT_VERSION,
+        "source_label": source_label,
+        "chunk_id": chunk_id,
+        "accession_number": str(row.get("accession_number", "")).strip(),
+        "cik": str(row.get("cik", "")).strip(),
+        "year": year,
+        "form_type": str(row.get("form_type", "")).strip(),
+        "has_item1": bool(row.get("has_item1", False)),
+        "has_item7": bool(row.get("has_item7", False)),
+        "item1_chars": int(row.get("item1_chars", 0) or 0),
+        "item7_chars": int(row.get("item7_chars", 0) or 0),
+        "combined_chars": int(row.get("combined_chars", 0) or 0),
+        "keyword_hits": 0,
+        "prefilter_mode": prefilter_mode,
+        "prefilter_decision": "not_applicable",
+        "prefilter_audit_sample": bool(prefilter_audit_sample),
+        "snippet_chars": 0,
+        "llm_called": False,
+        "endpoint_attempts": 0,
+        "ai_adoption_score": pd.NA,
+        "explanation": "",
+        "score_status": "",
+        "endpoint": endpoint,
+        "job_id": "",
+        "snippet_sha256": "",
+        "raw_json_sha256": "",
+    }
+
+
+def build_sagemaker_payload(prompt: str, parameters: dict[str, Any]) -> str:
+    """Wrap a prompt and generation parameters in the JSON SageMaker expects."""
+
+    return json.dumps({"inputs": prompt, "parameters": parameters})
+
+
+# ---------------------------------------------------------------------------
+# Bulk invocation argument preparation
+# ---------------------------------------------------------------------------
+# bulk_invoke_endpoint_async expects an iterable of (linked object, kwargs)
+# pairs. The linked object is a row identifier that lets us join results back to
+# the correct output record after SageMaker returns.
+def iter_bulk_invoke_args(
+    pending: dict[str, dict[str, Any]],
+    *,
+    endpoint: str,
+    temperature: float,
+    max_new_tokens: int,
+) -> Iterable[tuple[str, dict[str, Any]]]:
+    """Yield arguments for dwutils.sm.bulk_invoke_endpoint_async."""
+
+    parameters = {
+        "temperature": temperature,
+        "max_new_tokens": max_new_tokens,
+        "return_full_text": False,
+    }
+    for linked_obj, item in pending.items():
+        yield (
+            linked_obj,
+            {
+                "EndpointName": endpoint,
+                "Input": build_sagemaker_payload(item["prompt"], parameters),
+                "ContentType": "application/json",
+            },
+        )
+
+
+def prepare_records_and_prompts(
+    wide: pd.DataFrame,
+    *,
+    run_id: str,
+    chunk_id: str,
+    source_label: str,
+    endpoint: str,
+    prefilter_mode: str,
+    audit_seed: str,
+    prefilter_audit_rate: float,
+    prefilter_audit_limit: int,
+    max_prompt_chars: int,
+    sentence_window: int,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    """
+    Prepare output records and collect pending LLM prompts.
+
+    Returns:
+        records: one output row per filing, including prefilter-zero rows
+        pending: only rows that need a bulk LLM call
+    """
+
+    records: list[dict[str, Any]] = []
+    pending: dict[str, dict[str, Any]] = {}
+    audit_calls = 0
+
+    for row_number, (_, row) in enumerate(wide.iterrows(), start=1):
+        # Work out whether this filing should be skipped, audited, or sent to
+        # the LLM.
+        accession = str(row.get("accession_number", "")).strip()
+        full_text = normalize_whitespace(row.get("combined_text", ""))
+        keyword_hits = count_ai_keywords(full_text)
+
+        # Audit mode sends a stable sample of no-keyword filings to the LLM so
+        # the false-zero risk of the prefilter can be measured.
+        audit_sample = False
+        if prefilter_mode == "audit" and keyword_hits == 0:
+            sampled = stable_unit_interval(f"{audit_seed}|{accession}") < prefilter_audit_rate
+            under_limit = prefilter_audit_limit <= 0 or audit_calls < prefilter_audit_limit
+            audit_sample = sampled and under_limit
+            if audit_sample:
+                audit_calls += 1
+
+        # Start with the standard output fields, then fill in the scoring path.
+        record = base_score_record(
+            row,
+            run_id=run_id,
+            source_label=source_label,
+            chunk_id=chunk_id,
+            endpoint=endpoint,
+            prefilter_mode=prefilter_mode,
+            prefilter_audit_sample=audit_sample,
+        )
+        record["keyword_hits"] = keyword_hits
+
+        # Empty filings get a transparent zero without an LLM call.
+        if not full_text:
+            record.update(
+                ai_adoption_score=0.0,
+                explanation="No text was available after combining Item 1 and Item 7.",
+                score_status="empty_text_zero",
+                prefilter_decision="empty_text",
+            )
+        # No-keyword filings are skipped in hard_zero mode and mostly skipped
+        # in audit mode.
+        elif keyword_hits == 0 and prefilter_mode in {"hard_zero", "audit"} and not audit_sample:
+            record.update(
+                ai_adoption_score=0.0,
+                explanation="No AI-related keywords were detected by the prefilter, so the filing was assigned zero without an LLM call.",
+                score_status="prefilter_zero_no_keyword",
+                prefilter_decision=f"{prefilter_mode}_zero_no_keyword",
+            )
+        # All remaining filings need snippets and LLM prompts.
+        else:
+            snippet = extract_relevant_snippets(full_text, max_prompt_chars, sentence_window)
+            if not snippet:
+                record.update(
+                    explanation="Snippet extraction returned empty text.",
+                    score_status="snippet_extraction_failed",
+                )
+            else:
+                job_id = f"{run_id}_{chunk_id}_{row_number:06d}"
+                record.update(
+                    prefilter_decision="audit_call_no_keyword"
+                    if audit_sample
+                    else ("llm_call_no_keyword_prefilter_off" if keyword_hits == 0 else "keyword_hit_llm_call"),
+                    snippet_chars=len(snippet),
+                    llm_called=True,
+                    endpoint_attempts=1,
+                    job_id=job_id,
+                    snippet_sha256=sha256_text(snippet),
+                )
+                # linked_obj is the bridge between the bulk result and this row.
+                linked_obj = str(len(records))
+                pending[linked_obj] = {"record_index": len(records), "prompt": build_ai_prompt(snippet)}
+
+        records.append(record)
+
+    return records, pending
+
+
+# ---------------------------------------------------------------------------
+# Bulk result handling
+# ---------------------------------------------------------------------------
+# This function takes the iterator returned by bulk_invoke_endpoint_async,
+# matches each result back to the correct filing row, and fills in the score
+# status, score, explanation, and raw JSON hashes.
+def apply_bulk_results(
+    records: list[dict[str, Any]],
+    pending: dict[str, dict[str, Any]],
+    results: Iterable[tuple[Any, Any, Any, Any, str, str]],
+    *,
+    save_raw_json: bool,
+) -> None:
+    """Apply SageMaker bulk results to the prepared output records in place."""
+
+    for linked_obj, _invoke_kwargs, _job_id, _inference_id, response_type, result_body in results:
+        item = pending[str(linked_obj)]
+        record = records[item["record_index"]]
+        if _job_id:
+            record["job_id"] = str(_job_id)
+        if _inference_id:
+            record["inference_id"] = str(_inference_id)
+
+        # Non-success responses are kept as endpoint_error rows rather than
+        # stopping the whole chunk.
+        if response_type != "success":
+            try:
+                body = json.loads(result_body)
+                error = body.get("error", result_body)
+            except Exception:
+                error = result_body
+            record.update(
+                ai_adoption_score=pd.NA,
+                explanation=f"Endpoint error: {str(error)[:500]}",
+                score_status="endpoint_error",
+            )
+            continue
+
+        # Successful responses still need JSON parsing and validation.
+        try:
+            response_body = json.loads(result_body)
+        except Exception:
+            response_body = result_body
+        raw_text = extract_text_from_response(response_body)
+        score, explanation, status, raw_json = parse_model_output(raw_text)
+        if record.get("prefilter_audit_sample") and status == "ok":
+            status = "prefilter_audit_ok"
+
+        record.update(
+            ai_adoption_score=score,
+            explanation=explanation,
+            score_status=status,
+            raw_json_sha256=sha256_text(raw_json) if raw_json else "",
+        )
+        if save_raw_json:
+            record["raw_json"] = raw_json
+
+
+# ---------------------------------------------------------------------------
+# Chunk summary
+# ---------------------------------------------------------------------------
+# The JSON summary gives reviewers a quick chunk-level QA view without opening
+# the full filing-level CSV.
+def summarize_output(
+    out_df: pd.DataFrame,
+    *,
+    run_id: str,
+    chunk_name: str,
+    source_label: str,
+    endpoint: str,
+    prefilter_mode: str,
+    prefilter_audit_rate: float,
+    prefilter_audit_limit: int,
+    lookup_csv: Optional[str],
+    n_filings_before_lookup: int,
+    n_filings_after_lookup: int,
+    output_csv: str,
+) -> dict[str, Any]:
+    """Build the per-chunk JSON summary."""
+
+    score_series = pd.to_numeric(out_df["ai_adoption_score"], errors="coerce") if not out_df.empty else pd.Series(dtype=float)
+    return {
+        "run_id": run_id,
+        "chunk_name": chunk_name,
+        "source_label": source_label,
+        "script_version": SCRIPT_VERSION,
+        "prompt_version": PROMPT_VERSION,
+        "endpoint": endpoint,
+        "prefilter_mode": prefilter_mode,
+        "prefilter_audit_rate": prefilter_audit_rate,
+        "prefilter_audit_limit": prefilter_audit_limit,
+        "lookup_csv": lookup_csv,
+        "n_filings_before_lookup": int(n_filings_before_lookup),
+        "n_filings_after_lookup": int(n_filings_after_lookup),
+        "n_filings": int(len(out_df)),
+        "n_unique_cik": int(out_df["cik"].nunique()) if not out_df.empty else 0,
+        "n_llm_called": int(out_df["llm_called"].sum()) if not out_df.empty else 0,
+        "n_ok": int((out_df["score_status"] == "ok").sum()) if not out_df.empty else 0,
+        "n_prefilter_audit_ok": int((out_df["score_status"] == "prefilter_audit_ok").sum()) if not out_df.empty else 0,
+        "n_prefilter_zero": int((out_df["score_status"] == "prefilter_zero_no_keyword").sum()) if not out_df.empty else 0,
+        "n_missing_item1": int((~out_df["has_item1"]).sum()) if not out_df.empty else 0,
+        "n_missing_item7": int((~out_df["has_item7"]).sum()) if not out_df.empty else 0,
+        "status_counts": out_df["score_status"].value_counts(dropna=False).to_dict() if not out_df.empty else {},
+        "score_min": None if score_series.dropna().empty else float(score_series.min()),
+        "score_mean": None if score_series.dropna().empty else float(score_series.mean()),
+        "score_max": None if score_series.dropna().empty else float(score_series.max()),
+        "output_csv": output_csv,
+    }
