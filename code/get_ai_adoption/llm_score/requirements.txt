@@ -1,0 +1,5 @@
+pandas>=1.5
+pyreadr>=0.4
+boto3>=1.26
+dwutils
+dwutils[ml]
