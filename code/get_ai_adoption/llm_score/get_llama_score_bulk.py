@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Bulk LLM scoring for filing-level AI adoption.
 
-This is the main script. Methodology and workflow should be readable here;
-implementation details live in ai_adoption_utils.py.
+The process estimates firm-level AI adoption from SEC Form 10-K disclosures. 
+It reads EDGAR extract chunks from the Data Workspace team S3 folder, 
+converts Item 1 and Item 7 text into one row per filing,
+optionally filters to a research lookup of `cik` and `year`, 
+and sends relevant filing snippets to a Data Workspace SageMaker Llama endpoint.
 """
 
 from __future__ import annotations
@@ -236,7 +239,7 @@ def process_chunk(
 
 
 # ---------------------------------------------------------------------------
-# Main orchestration
+# Main process
 # ---------------------------------------------------------------------------
 # This controls the whole run: parse arguments, list/select chunks, load the
 # lookup once, process each chunk, and write the run manifest.
