@@ -26,7 +26,7 @@ import pandas as pd
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
 SCRIPT_VERSION = "2026-04-20-bulk-v1"
-PROMPT_VERSION = "llama_ai_adoption_v4_json_after_text"
+PROMPT_VERSION = "llama_ai_adoption_v5"
 
 DEFAULT_ENDPOINT = "jupyterhub-llama-3-3b-instruct-endpoint"
 DEFAULT_BUCKET = "jupyter.notebook.uktrade.io"
@@ -39,38 +39,49 @@ WHITESPACE_RE = re.compile(r"\s+")
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[\.\!\?\;])\s+|\n+")
 
 # Keywords used to decide whether a filing may contain AI adoption evidence.
-# Lowercase "ml" is deliberately excluded because it often means millilitres.
+# List obtained from
+# - Cao et al. (2025, Table A2) Specifically designed for AI-related terms in K-10 disclosure
+# - Mikalef and Gupta (2022, Internet Appendix III)
+# I retained only terms that are specific to AI and exluded broad or ambiugous terms such as:
+# business intelligence, big data, Python, automation, robotics
+# and standalone terms like AI and ML which generate false positive i.e., ML can mean milliliters
+# or AI meant Avian Influenza in some dislcosures 
 AI_KEYWORDS = re.compile(
     r"(?i:"
     r"\bartificial intelligence\b|"
+    r"\bA\.I\.\b|"
+    r"\bAI/ML\b|"
     r"\bmachine learning\b|"
     r"\bdeep learning\b|"
     r"\bneural networks?\b|"
-    r"\bpredictive models?\b|"
-    r"\balgorithmic\b|"
-    r"\bautomated decisions?\b|"
-    r"\bautomated underwriting\b|"
-    r"\brecommendation engines?\b|"
-    r"\brecommendation systems?\b|"
-    r"\bdecision engines?\b|"
-    r"\bpersonalization engines?\b|"
+    r"\bartificial neural networks?\b|"
     r"\bcomputer vision\b|"
     r"\bnatural language processing\b|"
-    r"\bnatural language generation\b|"
+    r"\bnatural language understanding\b|"
+    r"\bmachine translation\b|"
     r"\bgenerative ai\b|"
     r"\bgenai\b|"
     r"\blarge language models?\b|"
-    r"\bllms?\b|"
-    r"\bnlp\b|"
-    r"\brobotic process automation\b|"
-    r"\bautonomous systems?\b|"
-    r"\bfraud detection models?\b|"
-    r"\boptimization engines?\b"
-    r")|"
-    r"\bAI\b|"
-    r"\bA\.I\.\b|"
-    r"\bML\b|"
-    r"\bRPA\b"
+    r"\bchatbots?\b|"
+    r"\bimage recognition\b|"
+    r"\bobject recognition\b|"
+    r"\bspeech recognition\b|"
+    r"\bfacial recognition\b|"
+    r"\bhandwriting recognition\b|"
+    r"\bsupport vector machines?\b|"
+    r"\bsupervised learning\b|"
+    r"\bunsupervised learning\b|"
+    r"\bclassification algorithms?\b|"
+    r"\bclustering algorithms?\b|"
+    r"\brecommender systems?\b|"
+    r"\binformation extraction\b|"
+    r"\bdimensionality reduction\b|"
+    r"\bkernel methods?\b|"
+    r"\bnamed entity recognition\b|"
+    r"\bentity recognition\b|"
+    r"\bintent classification\b|"
+    r"\brobotic process automation\b"
+    r")"
 )
 
 # These words help rank snippets. They do not determine the final score.
@@ -532,7 +543,7 @@ def extract_relevant_snippets(full_text: str, max_chars: int, sentence_window: i
             break
         chunks.append(candidate)
         used += len(candidate)
-        last_i = i 
+        last_i = i
 
     return "".join(chunks).strip() or full_text[:max_chars]
 
@@ -544,55 +555,55 @@ def extract_relevant_snippets(full_text: str, max_chars: int, sentence_window: i
 # to review and version through PROMPT_VERSION.
 def build_ai_prompt(text: str) -> str:
     """Build the LLM prompt for one filing excerpt."""
-
-    return (
-        "You are an academic research assistant measuring firm-level artificial intelligence adoption from SEC Form 10-K disclosures.\n\n"
-        "TASK\n"
-        "Read the filing text and estimate the firm's level of AI adoption as described in this filing, at the time covered by the filing text.\n"
-        "After reading the filing text, return exactly two fields in valid JSON: score and explanation.\n\n"
-        "CONCEPT TO MEASURE\n"
-        "AI adoption means the extent to which AI, machine learning, algorithmic systems, or automated decision systems are already implemented and embedded in the firm's core business activities.\n"
-        "This includes adoption in products, services, operations, production, logistics, underwriting, forecasting, recommendations, fraud detection, pricing, internal decision systems, or other strategically relevant processes.\n\n"
-        "IMPORTANT: FOCUS ONLY ON FIRM-SPECIFIC, OPERATIONAL USE DURING THE FILING PERIOD\n"
-        "Score only based on evidence that the firm itself is using AI in a meaningful way in the business described by the filing.\n\n"
-        "DO NOT SCORE HIGHLY FOR THE FOLLOWING ALONE\n"
-        "- mere mention of AI, machine learning, or automation\n"
-        "- generic discussion of industry trends\n"
-        "- speculative future plans or intentions\n"
-        "- research, experiments, pilots, or proofs of concept with no evidence of deployment\n"
-        "- boilerplate innovation language\n"
-        "- risk factors mentioning AI competition, regulation, or cybersecurity\n"
-        "- references to third-party technology unless the text shows the firm has operationally integrated it\n\n"
-        "WHAT SHOULD INCREASE THE SCORE\n"
-        "- clear evidence that AI is already deployed in products, services, or internal operations\n"
-        "- AI tied to revenue generation, product delivery, cost reduction, efficiency, or decision-making\n"
-        "- distinct evidence of deployment across meaningful business functions\n"
-        "- AI embedded in core business segments rather than peripheral activities\n"
-        "- AI described as strategically important to how the firm operates or competes\n\n"
-        "SCORING GUIDANCE\n"
-        "0.00 = no explicit evidence of AI adoption in the filing text\n"
-        "0.01 to 0.10 = very weak evidence; vague references, early exploration, or non-operational discussion\n"
-        "0.11 to 0.30 = limited adoption; some specific use cases but narrow, tentative, or not central\n"
-        "0.31 to 0.50 = moderate adoption; clear operational use in some relevant business areas\n"
-        "0.51 to 0.70 = substantial adoption; AI is integrated into multiple important functions or products\n"
-        "0.71 to 0.90 = extensive adoption; AI is deeply embedded in operations and materially relevant to the business\n"
-        "0.91 to 1.00 = AI is fundamental to the firm's core business model and competitive functioning\n\n"
-        "DECISION RULES\n"
-        "- Use the full 0.00 to 1.00 range.\n"
-        "- Avoid coarse rounding such as only 0.2, 0.5, or 0.8.\n"
-        "- Base the score only on the text provided.\n"
-        "- Do not infer adoption from the industry the firm operates in.\n"
-        "- If there is no explicit evidence of firm-specific operational AI adoption, assign 0.10 or below.\n\n"
-        "TEXT TO EVALUATE:\n"
-        "<filing_text>\n"
-        f"{text}\n"
-        "</filing_text>\n\n"
-        "Now produce the score for the filing text above.\n"
-        "Return ONLY one valid JSON object and no other text.\n"
-        "The JSON object must have this shape:\n"
-        "{\"score\": NUMBER_BETWEEN_0_AND_1, \"explanation\": \"ONE_SHORT_PARAGRAPH\"}\n"
-        "Do not copy the template. Replace NUMBER_BETWEEN_0_AND_1 with a numeric score between 0.00 and 1.00.\n"
-        "Do not return markdown, bullets, headings, or any text before or after the JSON."
+    return(
+    "You are an academic research assistant measuring firm-level artificial intelligence adoption from SEC Form 10-K disclosures.\n\n"
+    "TASK\n"
+    "Read the filing text and estimate the firm's level of AI adoption as described in this filing, at the time covered by the filing text.\n"
+    "After reading the filing text, return exactly two fields in valid JSON: score and explanation.\n\n"
+    "CONCEPT TO MEASURE\n"
+    "AI adoption means the extent to which AI, machine learning, algorithmic systems, or automated decision systems are already implemented and embedded in the firm's core business activities.\n"
+    "This includes adoption in products, services, operations, production, logistics, underwriting, forecasting, recommendations, fraud detection, pricing, internal decision systems, or other strategically relevant processes.\n\n"
+    "IMPORTANT: FOCUS ONLY ON FIRM-SPECIFIC, OPERATIONAL USE DURING THE FILING PERIOD\n"
+    "Score only based on evidence that the firm itself is using AI in a meaningful way in the business described by the filing.\n\n"
+    "DO NOT SCORE HIGHLY FOR THE FOLLOWING ALONE\n"
+    "- mere mention of AI, machine learning, or automation\n"
+    "- generic discussion of industry trends\n"
+    "- speculative future plans or intentions\n"
+    "- research, experiments, pilots, or proofs of concept with no evidence of deployment\n"
+    "- boilerplate innovation language\n"
+    "- risk factors mentioning AI competition, regulation, or cybersecurity\n"
+    "- references to third-party technology unless the text shows the firm has operationally integrated it\n\n"
+    "WHAT SHOULD INCREASE THE SCORE\n"
+    "- clear evidence that AI is already deployed in products, services, or internal operations\n"
+    "- AI tied to revenue generation, product delivery, cost reduction, efficiency, or decision-making\n"
+    "- distinct evidence of deployment across meaningful business functions\n"
+    "- AI embedded in core business segments rather than peripheral activities\n"
+    "- AI described as strategically important to how the firm operates or competes\n\n"
+    "SCORING GUIDANCE\n"
+    "0.00 = no explicit evidence of AI adoption in the filing text\n"
+    "0.01 to 0.10 = very weak evidence; vague references, early exploration, or non-operational discussion\n"
+    "0.11 to 0.30 = limited adoption; some specific use cases but narrow, tentative, or not central\n"
+    "0.31 to 0.50 = moderate adoption; clear operational use in some relevant business areas\n"
+    "0.51 to 0.70 = substantial adoption; AI is integrated into multiple important functions or products\n"
+    "0.71 to 0.90 = extensive adoption; AI is deeply embedded in operations and materially relevant to the business\n"
+    "0.91 to 1.00 = AI is fundamental to the firm's core business model and competitive functioning\n\n"
+    "DECISION RULES\n"
+    "- Use the full 0.00 to 1.00 range.\n"
+    "- Avoid coarse rounding such as only 0.2, 0.5, or 0.8.\n"
+    "- Base the score only on the text provided.\n"
+    "- Do not infer adoption from the industry the firm operates in.\n"
+    "- If there is no explicit, firm-specific evidence of operational AI adoption during the filing period described, the score must be 0.00.\n"
+    "- Do not assign 0.10, 0.20, or 0.30 for generic technology language, automation, innovation, analytics, autonomous systems, digital transformation, cyber security or industry trends unless the filing explicitly describes the firm's own AI use in operations, products, or services.\n\n"
+    "TEXT TO EVALUATE:\n"
+    "<filing_text>\n"
+    f"{text}\n"
+    "</filing_text>\n\n"
+    "Now produce the score for the filing text above.\n"
+    "Return ONLY one valid JSON object and no other text.\n"
+    "The JSON object must have this shape:\n"
+    "{\"score\": NUMBER_BETWEEN_0_AND_1, \"explanation\": \"ONE_SHORT_PARAGRAPH\"}\n"
+    "Do not copy the template. Replace NUMBER_BETWEEN_0_AND_1 with a numeric score between 0.00 and 1.00.\n"
+    "Do not return markdown, bullets, headings, or any text before or after the JSON."
     )
 
 
