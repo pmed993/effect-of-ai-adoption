@@ -63,7 +63,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--audit-seed", default="ai-adoption-prefilter-audit-v1")
 
     # LLM and bulk invocation settings.
-    ap.add_argument("--endpoint", default=u.DEFAULT_ENDPOINT)
+    ap.add_argument("--model-label", choices=["llama", "mistral"], default="llama", help="Short label used for endpoint defaulting and output naming.")
+    ap.add_argument("--endpoint", default=None, help="Overrise SageMaker endpoint. If omitted, uses the default for --model-label.")
     ap.add_argument("--max-prompt-chars", type=int, default=1500)
     ap.add_argument("--sentence-window", type=int, default=1)
     ap.add_argument("--temperature", type=float, default=0.0)
@@ -81,6 +82,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     args = ap.parse_args(argv)
 
     # Fail early for invalid arguments so the run does not start half-configured.
+    if args.endpoint is None:
+        args.endpoint = u.DEFAULT_ENDPOINTS[args.model_label]  
     if args.max_chunks < 0:
         ap.error("--max-chunks must be >= 0")
     if args.max_filings_per_chunk < 0:
@@ -132,8 +135,8 @@ def process_chunk(
     run_out_dir = output_dir_for_run(args, run_id)
     os.makedirs(run_out_dir, exist_ok=True)
 
-    out_csv = os.path.join(run_out_dir, f"{chunk_id}_llama_scores.csv")
-    out_json = os.path.join(run_out_dir, f"{chunk_id}_summary.json")
+    out_csv = os.path.join(run_out_dir, f"{chunk_id}_{args.model_label}_scores.csv")
+    out_json = os.path.join(run_out_dir, f"{chunk_id}_{args.model_label}_summary.json")
     source_label = f"team={args.team}:{ref.path}"
 
     # Optional resume behaviour: skip this chunk if final outputs already exist.

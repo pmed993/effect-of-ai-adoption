@@ -11,10 +11,10 @@ The output is one score per filing, identified by `accession_number`, with trans
 Current implementation:
 
 ```text
-Main script: get_llama_score_bulk.py
+Main script: get_ai_score_bulk.py
 Utilities: ai_adoption_utils.py
 Script version: 2026-04-20-bulk-v1
-Prompt version: llama_ai_adoption_v4_json_after_text
+Prompt version: get_ai_adoption_v5
 Default endpoint: jupyterhub-llama-3-3b-instruct-endpoint
 Invocation method: dwutils.sm.bulk_invoke_endpoint_async
 ```
@@ -464,11 +464,12 @@ Before all-chunk production, the next recommended gate is a full single-chunk ru
 For tested production-style runs:
 
 ```bash
-python3 get_llama_score_bulk.py \
+python3 get_ai_score_bulk.py \
   --team effect_of_ai \
   --chunk-ids 1 \
   --lookup-csv ../lookup/cik_year.csv \
   --prefilter-mode hard_zero \
+  --model-label llama \
   --max-prompt-chars 1500 \
   --max-new-tokens 120 \
   --max-concurrent-invocations 10 \
@@ -480,11 +481,12 @@ python3 get_llama_score_bulk.py \
 After reviewing the full single-chunk output, scale to a small chunk range:
 
 ```bash
-python3 get_llama_score_bulk.py \
+python3 get_ai_score_bulk.py \
   --team effect_of_ai \
   --chunk-range 1 3 \
   --lookup-csv ../lookup/cik_year.csv \
   --prefilter-mode hard_zero \
+  --model-label llama \
   --max-prompt-chars 1500 \
   --max-new-tokens 120 \
   --max-concurrent-invocations 10 \

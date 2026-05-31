@@ -25,10 +25,16 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
-SCRIPT_VERSION = "2026-04-20-bulk-v1"
-PROMPT_VERSION = "llama_ai_adoption_v5"
+SCRIPT_VERSION = "2026-04-20-get_ai_score_bulk-v1"
+PROMPT_VERSION = "get_ai_adoption_v5"
 
-DEFAULT_ENDPOINT = "jupyterhub-llama-3-3b-instruct-endpoint"
+DEFAULT_ENDPOINTS = {
+    "llama": "jupyterhub-llama-3-3b-instruct-endpoint",
+    "mistral": "jupyterhub-mistral-7b-instruct-endpoint"
+}
+
+DEFAULT_ENDPOINT = DEFAULT_ENDPOINTS["llama"]
+
 DEFAULT_BUCKET = "jupyter.notebook.uktrade.io"
 
 # Chunk files must follow this exact naming pattern to be picked up.
