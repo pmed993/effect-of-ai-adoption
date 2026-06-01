@@ -1,0 +1,50 @@
+SELECT
+    f.costat,
+    f.curcd,
+    f.fyear,
+    f.datafmt,
+    f.indfmt,
+    f.popsrc,
+    f.consol,
+    f.gvkey,
+    f.datadate,
+    EXTRACT(YEAR FROM f.datadate) AS cyear,
+    f.tic,
+    f.exchg,
+
+    c.cik,
+    c.conm,
+    c.naics,
+    c.sic,
+
+    f.act,
+    f.at,
+    f.che,
+    f.csho,
+    f.dlc,
+    f.dltt,
+    f.dv,
+    f.intan,
+    f.ni,
+    f.xrd,
+    f.xsga,
+    f.capx,
+    f.oancf,
+    f.prstkc,
+    f.prcc_f,
+    f.tstk
+
+FROM comp.funda AS f
+
+LEFT JOIN comp.company AS c
+    ON f.gvkey = c.gvkey
+
+WHERE f.indfmt = 'INDL'
+  AND f.datafmt = 'STD'
+  AND f.popsrc = 'D'
+  AND f.consol = 'C'
+  AND f.costat = 'A'
+  AND f.datadate >= '2010-01-01'
+  AND c.sic IS NOT NULL
+  AND c.sic::integer NOT BETWEEN 4900 AND 4999
+  AND c.sic::integer < 6000;

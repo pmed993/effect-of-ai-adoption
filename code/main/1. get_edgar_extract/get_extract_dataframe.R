@@ -9,7 +9,7 @@ suppressPackageStartupMessages({
 # CONFIG
 # =========================================================
 
-ROOT <- "/Users/piomedolla/Desktop/effect-of-genai/cache/edgar_metrics_parser"
+ROOT <- "effect-of-genai/cache/edgar_metrics_parser"
 
 IDX_PATH  <- file.path(ROOT, "index", "submissions_index.idx")
 ITEM1_DIR <- file.path(ROOT, "extract", "10-K", "item1")
