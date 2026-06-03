@@ -9,6 +9,15 @@
 .RData
 .RDataTmp
 
+# Data files
+*.rds
+*.csv
+*.xlsx
+*.zip
+
+# Folder
+cache/
+
 # User-specific files
 .Ruserdata
 
