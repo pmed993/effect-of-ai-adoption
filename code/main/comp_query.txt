@@ -32,7 +32,11 @@ SELECT
     f.oancf,
     f.prstkc,
     f.prcc_f,
-    f.tstk
+    f.tstk,
+    f.sale,
+    f.emp,
+    f.xlr,
+    f.oibdp
 
 FROM comp.funda AS f
 
