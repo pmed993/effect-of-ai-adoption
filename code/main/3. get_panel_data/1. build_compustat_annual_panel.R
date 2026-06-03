@@ -13,7 +13,7 @@
 # 7. optionally saves the finished annual panel to disk.
 #
 # Recommended filename:
-#   code/main/3. get_panel data/1. build_compustat_annual_panel.R
+#   code/main/3. get_panel_data/1. build_compustat_annual_panel.R
 # ------------------------------------------------------------------------------
 
 
@@ -79,7 +79,7 @@ if (REFRESH_FROM_WRDS) {
   )
   on.exit(dbDisconnect(con), add = TRUE)
 
-  query <- readLines("code/main/comp_query.txt") %>% paste(collapse = " ")
+  query <- readLines("code/main/3. get_panel_data/comp_query.txt") %>% paste(collapse = " ")
   data <- dbGetQuery(con, query)
   write_csv(data, RAW_COMPUSTAT_FILE)
 }

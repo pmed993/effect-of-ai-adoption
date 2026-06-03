@@ -12,7 +12,7 @@
 # 6. optionally saves the merged outputs to disk.
 #
 # Recommended filename:
-#   code/main/3. get_panel data/2. build_compustat_ai_panel.R
+#   code/main/3. get_panel_data/2. build_compustat_ai_panel.R
 # ------------------------------------------------------------------------------
 
 
@@ -56,12 +56,12 @@ if (!exists("OUTPUT_UNMATCHED_CSV", inherits = FALSE)) {
 
 # ---- Build or load annual panel ----------------------------------------------
 if (REBUILD_ANNUAL_PANEL) {
-  source("code/main/3. get_panel data/1. build_compustat_annual_panel.R")
+  source("code/main/3. get_panel_data/1. build_compustat_annual_panel.R")
 } else {
   if (!file.exists(ANNUAL_PANEL_RDS)) {
     stop(
       "Annual panel not found: ", ANNUAL_PANEL_RDS, ". ",
-      "Either build it first with code/main/3. get_panel data/1. build_compustat_annual_panel.R ",
+      "Either build it first with code/main/3. get_panel_data/1. build_compustat_annual_panel.R ",
       "or set REBUILD_ANNUAL_PANEL <- TRUE."
     )
   }

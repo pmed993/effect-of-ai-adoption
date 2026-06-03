@@ -102,7 +102,7 @@ coverage_table <- function(data, vars) {
 
 # ---- Build or load annual panel ----------------------------------------------
 if (REBUILD_ANNUAL_PANEL || !file.exists(ANNUAL_PANEL_RDS)) {
-  source("code/main/3. get_panel data/1. build_compustat_annual_panel.R")
+  source("code/main/3. get_panel_data/1. build_compustat_annual_panel.R")
 }
 comp <- readRDS(ANNUAL_PANEL_RDS)
 setDT(comp)
@@ -110,7 +110,7 @@ setDT(comp)
 
 # ---- Build or load merged panel ----------------------------------------------
 if (REBUILD_MERGED_PANEL || !file.exists(MERGED_PANEL_RDS)) {
-  source("code/main/3. get_panel data/2. build_compustat_ai_panel.R")
+  source("code/main/3. get_panel_data/2. build_compustat_ai_panel.R")
 }
 panel <- readRDS(MERGED_PANEL_RDS)
 setDT(panel)
