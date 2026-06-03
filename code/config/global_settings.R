@@ -7,3 +7,4 @@ invisible(lapply(packages, require, character.only = TRUE))
 
 # ---- Config ----
 INPUT_DIR <- file.path("data/")
+OUTPUT_DIR <- file.path("output/")
