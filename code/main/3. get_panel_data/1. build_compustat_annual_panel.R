@@ -86,7 +86,7 @@ if (REFRESH_FROM_WRDS) {
   )
   on.exit(dbDisconnect(con), add = TRUE)
 
-  query <- readLines("code/main/3. get_panel_data/comp_query.txt") %>% paste(collapse = " ")
+  query <- readLines("code/main/3. get_panel_data/comp_query.txt") |> paste(collapse = " ")
   data <- dbGetQuery(con, query)
   write_csv(data, RAW_COMPUSTAT_FILE)
 }

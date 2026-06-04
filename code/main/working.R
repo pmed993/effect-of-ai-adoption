@@ -33,7 +33,7 @@ library(patchwork)
 
 # ---- Small helpers ------------------------------------------------------------
 round_df <- function(data, digits = 3) {
-  data %>%
+  data |>
     mutate(across(where(is.numeric), ~round(.x, digits)))
 }
 
@@ -47,34 +47,34 @@ safe_cor <- function(x, y, min_n = 5) {
 
 
 score_corr_by_group <- function(data, group_var) {
-  data %>%
+  data |>
     filter(
       !is.na(.data[[group_var]]),
       !is.na(llama_score),
       !is.na(aiie)
-    ) %>%
-    group_by(.data[[group_var]]) %>%
+    ) |>
+    group_by(.data[[group_var]]) |>
     summarise(
       n = n(),
       corr_llama_aiie = safe_cor(llama_score, aiie),
       mean_llama_score = mean(llama_score, na.rm = TRUE),
       mean_aiie = mean(aiie, na.rm = TRUE),
       .groups = "drop"
-    ) %>%
-    arrange(desc(n)) %>%
+    ) |>
+    arrange(desc(n)) |>
     round_df()
 }
 
 
 firm_char_summary_table <- function(data, vars, labels) {
-  data %>%
-    select(ai_adoption, all_of(vars)) %>%
+  data |>
+    select(ai_adoption, all_of(vars)) |>
     pivot_longer(
       cols = all_of(vars),
       names_to = "characteristic",
       values_to = "value"
-    ) %>%
-    group_by(ai_adoption, characteristic) %>%
+    ) |>
+    group_by(ai_adoption, characteristic) |>
     summarise(
       n = sum(!is.na(value)),
       mean = safe_mean(value),
@@ -83,21 +83,21 @@ firm_char_summary_table <- function(data, vars, labels) {
       p25 = safe_quantile(value, 0.25),
       p75 = safe_quantile(value, 0.75),
       .groups = "drop"
-    ) %>%
-    mutate(characteristic = recode(characteristic, !!!labels)) %>%
+    ) |>
+    mutate(characteristic = recode(characteristic, !!!labels)) |>
     round_df()
 }
 
 
 firm_char_density_plot <- function(data, vars, labels) {
-  plot_data <- data %>%
-    select(ai_adoption_f, all_of(vars)) %>%
+  plot_data <- data |>
+    select(ai_adoption_f, all_of(vars)) |>
     pivot_longer(
       cols = all_of(vars),
       names_to = "characteristic",
       values_to = "value"
-    ) %>%
-    filter(!is.na(value)) %>%
+    ) |>
+    filter(!is.na(value)) |>
     mutate(characteristic = recode(characteristic, !!!labels))
 
   ggplot(plot_data, aes(x = value, fill = ai_adoption_f, colour = ai_adoption_f)) +
@@ -135,24 +135,24 @@ firm_char_density_plot <- function(data, vars, labels) {
 # tstk: Treasury Stock - Total (All Capital)
 
 # ---- 1. Correlation between AI adoption and AI exposure -----------------------
-overall_corr <- panel %>%
+overall_corr <- panel |>
   summarise(
     n = sum(!is.na(llama_score) & !is.na(aiie)),
     corr_llama_aiie = cor(llama_score, aiie, use = "complete.obs")
-  ) %>%
+  ) |>
   round_df()
 
 corr_by_sic <- score_corr_by_group(panel, "sic")
 corr_by_naics4 <- score_corr_by_group(panel, "naics4")
 
-top_corr_by_sic <- corr_by_sic %>% slice_head(n = 20)
-top_corr_by_naics4 <- corr_by_naics4 %>% slice_head(n = 20)
+top_corr_by_sic <- corr_by_sic |> slice_head(n = 20)
+top_corr_by_naics4 <- corr_by_naics4 |> slice_head(n = 20)
 
 
 # ---- 2. AI adoption over time -------------------------------------------------
-ai_trend <- panel_ai %>%
-  filter(!is.na(llama_score), !is.na(year)) %>%
-  group_by(year) %>%
+ai_trend <- panel_ai |>
+  filter(!is.na(llama_score), !is.na(year)) |>
+  group_by(year) |>
   summarise(
     n = n(),
     mean_llama = mean(llama_score, na.rm = TRUE),
@@ -161,16 +161,16 @@ ai_trend <- panel_ai %>%
     p90_llama = safe_quantile(llama_score, 0.90),
     share_positive = mean(llama_score > 0, na.rm = TRUE),
     .groups = "drop"
-  ) %>%
+  ) |>
   round_df()
 
-trend_levels <- ai_trend %>%
-  select(year, mean_llama, p90_llama) %>%
+trend_levels <- ai_trend |>
+  select(year, mean_llama, p90_llama) |>
   pivot_longer(
     cols = c(mean_llama, p90_llama),
     names_to = "series",
     values_to = "value"
-  ) %>%
+  ) |>
   mutate(
     series = recode(
       series,
@@ -222,27 +222,27 @@ firm_char_labels <- c(
   labor_productivity_log = "Labour productivity (log)"
 )
 
-analysis_panel <- panel_ai %>%
-  filter(!is.na(llama_score)) %>%
+analysis_panel <- panel_ai |>
+  filter(!is.na(llama_score)) |>
   mutate(
     ai_adoption = if_else(llama_score > ai_threshold, 1L, 0L),
     ai_adoption_f = factor(ai_adoption, levels = c(0, 1), labels = c("0", "1"))
   )
 
-ai_adoption_counts <- analysis_panel %>%
-  group_by(ai_adoption) %>%
+ai_adoption_counts <- analysis_panel |>
+  group_by(ai_adoption) |>
   summarise(
     n_firm_years = n(),
     n_firms = n_distinct(gvkey),
     mean_llama_score = mean(llama_score, na.rm = TRUE),
     median_llama_score = median(llama_score, na.rm = TRUE),
     .groups = "drop"
-  ) %>%
+  ) |>
   round_df()
 
 firm_char_summary <- firm_char_summary_table(analysis_panel, firm_chars, firm_char_labels)
 
-firm_char_summary_wide <- firm_char_summary %>%
+firm_char_summary_wide <- firm_char_summary |>
   pivot_wider(
     names_from = ai_adoption,
     values_from = c(n, mean, sd, median, p25, p75),

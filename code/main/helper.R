@@ -33,7 +33,7 @@ safe_quantile <- function(x, probs) {
 
 
 summary_stats <- function(data, vars) {
-  summary <- data %>%
+  summary <- data |>
     summarise(
       across(
         all_of(vars),
@@ -46,14 +46,14 @@ summary_stats <- function(data, vars) {
         ),
         .names = "{.col}&&{.fn}"
       )
-    ) %>%
+    ) |>
     pivot_longer(
       cols = everything(),
       names_to = c("variable", "stat"),
       names_sep = "&&",
       values_to = "value"
-    ) %>%
-    pivot_wider(names_from = stat, values_from = value) %>%
+    ) |>
+    pivot_wider(names_from = stat, values_from = value) |>
     select(variable, mean, sd, min, max, count)
 
   return(summary)

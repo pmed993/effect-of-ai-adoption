@@ -74,10 +74,10 @@ if (!file.exists(AI_EXPOSURE_FILE)) {
 }
 
 sheets <- excel_sheets(AI_EXPOSURE_FILE)
-ai_naics <- read_excel(AI_EXPOSURE_FILE, sheet = sheets[[3]]) %>%
-  clean_names() %>%
-  mutate(naics4 = as.character(naics)) %>%
-  select(-naics) %>%
+ai_naics <- read_excel(AI_EXPOSURE_FILE, sheet = sheets[[3]]) |>
+  clean_names() |>
+  mutate(naics4 = as.character(naics)) |>
+  select(-naics) |>
   as.data.table()
 
 comp_panel <- copy(comp)
