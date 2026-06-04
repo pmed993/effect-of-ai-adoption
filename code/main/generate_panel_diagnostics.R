@@ -16,7 +16,7 @@
 
 # ---- Source dependencies ------------------------------------------------------
 source("code/config/global_settings.R")
-source("code/support/helper.R")
+source("code/main/helper.R")
 
 
 # ---- User options -------------------------------------------------------------

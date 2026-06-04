@@ -60,15 +60,6 @@ summary_stats <- function(data, vars) {
 }
 
 
-
-winsorize_vec <- function(x, p_lo = 0.01, p_hi = 0.99) {
-  if (all(is.na(x))) return(x)
-  q <- quantile(x, probs = c(p_lo, p_hi), na.rm = TRUE, names = FALSE)
-  pmin(pmax(x, q[1]), q[2])
-}
-
-
-
 quick_stats <- function(x) {
   c(
     N = safe_count(x),

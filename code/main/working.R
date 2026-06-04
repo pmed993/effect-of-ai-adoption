@@ -1,11 +1,11 @@
 #!/usr/bin/env Rscript
 
-# ------------------------------------------------------------------------------
-# Lightweight exploratory analysis for the merged Compustat + AI panel
-# ------------------------------------------------------------------------------
+# -------------------------------------------------------------------------------
+# Working on the analysis for the merged Compustat + AI panel
+# -------------------------------------------------------------------------------
 
 
-# ---- Build options ------------------------------------------------------------
+# ---- Build/Load panel with options --------------------------------------------
 if (!exists("REBUILD_ANNUAL_PANEL", inherits = FALSE)) {
   REBUILD_ANNUAL_PANEL <- FALSE
 }
@@ -13,15 +13,14 @@ if (!exists("REFRESH_FROM_WRDS", inherits = FALSE)) {
   REFRESH_FROM_WRDS <- FALSE
 }
 if (!exists("SAVE_OUTPUTS", inherits = FALSE)) {
-  SAVE_OUTPUTS <- TRUE
+  SAVE_OUTPUTS <- FALSE
 }
 if (!exists("SAVE_MERGED_OUTPUTS", inherits = FALSE)) {
-  SAVE_MERGED_OUTPUTS <- TRUE
+  SAVE_MERGED_OUTPUTS <- FALSE
 }
 
-
-# ---- Load merged panel --------------------------------------------------------
 source("code/main/3. get_panel_data/2. build_compustat_ai_panel.R")
+source("code/main/helper.R")
 
 
 # ---- Analysis packages --------------------------------------------------------
