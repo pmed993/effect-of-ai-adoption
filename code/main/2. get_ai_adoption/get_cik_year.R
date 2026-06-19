@@ -1,67 +1,105 @@
-setwd("/Users/piomedolla/Desktop/effect-of-genai")
+#!/usr/bin/env Rscript
 
-# ---- Packages ----
-packages <- c("data.table", "DBI", "RPostgres", "httr", "tidyverse")
-install.packages(setdiff(packages,rownames(installed.packages())))
-sapply(packages, require, character.only=TRUE)
+# ------------------------------------------------------------------------------
+# Build the CIK-year lookup used by the EDGAR AI-adoption pipeline
+# ------------------------------------------------------------------------------
+# This script intentionally reads the WRDS SQL from:
+#   code/main/comp_query.txt
+# so the EDGAR lookup uses the same Compustat sample definition as the main
+# annual panel. In particular, comp_query.txt is the source of truth.
+# ------------------------------------------------------------------------------
 
-# ---- Helpers ----
+
+# ---- Packages ----------------------------------------------------------------
+packages <- c("DBI", "RPostgres", "data.table", "readr")
+to_install <- setdiff(packages, rownames(installed.packages()))
+if (length(to_install) > 0) install.packages(to_install)
+invisible(lapply(packages, require, character.only = TRUE))
+
+
+# ---- Helpers -----------------------------------------------------------------
 normalize_cik <- function(x) {
-  # CIKs in master.idx are numeric-ish; this normalizes and removes leading zeros
-  out <- suppressWarnings(as.integer(x))
-  as.character(out)
+  x <- trimws(as.character(x))
+  x[x == ""] <- NA_character_
+  suppressWarnings(as.character(as.integer(as.numeric(x))))
 }
 
-# ---- Config -----
-OUTDIR <- "cache/"
-if (!dir.exists(OUTDIR)) {dir.create(OUTDIR, recursive = TRUE)}
-setwd(OUTDIR)
 
-# ---- WRDS / Compustat connection ----
+# ---- User options -------------------------------------------------------------
+if (!exists("LOOKUP_DIR", inherits = FALSE)) {
+  LOOKUP_DIR <- file.path("code", "main", "2. get_ai_adoption", "lookup")
+}
+
+if (!exists("LOOKUP_RDS", inherits = FALSE)) {
+  LOOKUP_RDS <- file.path(LOOKUP_DIR, "cik_year.rds")
+}
+
+if (!exists("LOOKUP_CSV", inherits = FALSE)) {
+  LOOKUP_CSV <- file.path(LOOKUP_DIR, "cik_year.csv")
+}
+
+if (!exists("COMPUSTAT_QUERY_FILE", inherits = FALSE)) {
+  COMPUSTAT_QUERY_FILE <- file.path("code", "main", "comp_query.txt")
+}
+
+
+# ---- WRDS connection ----------------------------------------------------------
+ua <- Sys.getenv("COMPUSTAT_USER")
+psw <- Sys.getenv("COMPUSTAT_PSW")
+
+if (!nzchar(ua) || !nzchar(psw)) {
+  stop("COMPUSTAT_USER and COMPUSTAT_PSW must be set to pull the CIK-year lookup from WRDS.")
+}
+
+if (!file.exists(COMPUSTAT_QUERY_FILE)) {
+  stop("Compustat query file not found: ", COMPUSTAT_QUERY_FILE)
+}
+
 con <- dbConnect(
-  Postgres(),
+  RPostgres::Postgres(),
   host = "wrds-pgdata.wharton.upenn.edu",
   port = 9737,
-  user = Sys.getenv("COMPUSTAT_USER"),
-  password = Sys.getenv("COMPUSTAT_PSW"),
+  user = ua,
+  password = psw,
   sslmode = "require",
   dbname = "wrds"
 )
-on.exit(try(dbDisconnect(con), silent = TRUE), add = TRUE)
 
-# ---- Pull Compustat + CIK list ----
-comp_query <- "
-SELECT 
-  a.gvkey,
-  b.cik,
-  a.datadate,
-  EXTRACT(YEAR FROM a.datadate) AS cyear,
-  a.fyear,
-  b.conm,
-  b.sic
-FROM comp.funda AS a
-LEFT JOIN comp.company AS b
-  ON a.gvkey = b.gvkey
-WHERE a.indfmt = 'INDL'
-  AND a.datafmt = 'STD'
-  AND a.popsrc = 'D'
-  AND a.consol = 'C'
-  AND a.datadate >= '2010-01-01'
-  AND b.sic IS NOT NULL
-  AND b.sic::integer NOT BETWEEN 4900 AND 4999
-  AND b.sic::integer < 6000
-"
 
-# Extract data from Compustat
+# ---- Pull Compustat sample using the project SQL ------------------------------
+comp_query <- readLines(COMPUSTAT_QUERY_FILE, warn = FALSE) |>
+  paste(collapse = " ")
+
 comp_data <- dbGetQuery(con, comp_query)
 setDT(comp_data)
 
-# Normalise cik and tidy data
+
+# ---- Keep only normalized unique CIK-year keys --------------------------------
 comp_data[, cik := normalize_cik(cik)]
-comp_data <- comp_data[!is.na(cik) & !is.na(cyear)] # important: drop bad CIKs early
+comp_data[, cyear := as.integer(cyear)]
 
-cik_year <- unique(comp_data[, .(cik, year = as.integer(cyear))])
+cik_year <- unique(
+  comp_data[
+    !is.na(cik) & cik != "" & !is.na(cyear),
+    .(cik, year = cyear)
+  ],
+  by = c("cik", "year")
+)
 
-# Cannot run the full extraction as will occupy around 120GB of memory
-saveRDS(cik_year, "cik_year.rds")
-message("cik_year rows: ", nrow(cik_year))
+setorder(cik_year, year, cik)
+
+
+# ---- Save outputs -------------------------------------------------------------
+dir.create(LOOKUP_DIR, recursive = TRUE, showWarnings = FALSE)
+saveRDS(cik_year, LOOKUP_RDS)
+fwrite(cik_year, LOOKUP_CSV)
+try(dbDisconnect(con), silent = TRUE)
+
+
+# ---- Friendly console output --------------------------------------------------
+cat("\nBuilt CIK-year lookup from comp_query.txt.\n")
+cat("Rows:", nrow(cik_year), "\n")
+cat("Unique CIKs:", uniqueN(cik_year$cik), "\n")
+cat("Year span:", min(cik_year$year), "to", max(cik_year$year), "\n")
+cat("Saved RDS to:", LOOKUP_RDS, "\n")
+cat("Saved CSV to:", LOOKUP_CSV, "\n")
