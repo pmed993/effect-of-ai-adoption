@@ -26,7 +26,7 @@ import pandas as pd
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
 SCRIPT_VERSION = "2026-04-20-get_ai_score_bulk-v1"
-PROMPT_VERSION = "get_ai_adoption_v5"
+PROMPT_VERSION = "get_ai_adoption_v6"
 
 DEFAULT_ENDPOINTS = {
     "llama": "jupyterhub-llama-3-3b-instruct-endpoint",
@@ -242,6 +242,7 @@ def preferred_output_columns(save_raw_json: bool) -> list[str]:
         "llm_called",
         "endpoint_attempts",
         "ai_adoption_score",
+        "explicit_operational_ai",
         "explanation",
         "score_status",
         "endpoint",
@@ -595,14 +596,21 @@ def build_ai_prompt(text: str) -> str:
     "You are an academic research assistant measuring firm-level artificial intelligence adoption from SEC Form 10-K disclosures.\n\n"
     "TASK\n"
     "Read the filing text and estimate the firm's level of AI adoption as described in this filing, at the time covered by the filing text.\n"
-    "After reading the filing text, return exactly two fields in valid JSON: score and explanation.\n\n"
+    "After reading the filing text, return exactly three fields in valid JSON: explicit_operational_ai, score, and explanation.\n\n"
     "CONCEPT TO MEASURE\n"
-    "AI adoption means the extent to which AI, machine learning, algorithmic systems, or automated decision systems are already implemented and embedded in the firm's core business activities.\n"
-    "This includes adoption in products, services, operations, production, logistics, underwriting, forecasting, recommendations, fraud detection, pricing, internal decision systems, or other strategically relevant processes.\n\n"
+    "AI adoption here means the firm's own operational use of technologies that the filing explicitly identifies as artificial intelligence, machine learning, deep learning, neural networks, natural language processing, computer vision, generative AI, large language models, foundation models, or similarly explicit AI systems.\n"
+    "A business function such as forecasting, recommendations, fraud detection, pricing, automation, or internal decision support counts only if the filing explicitly states that AI or machine learning is being used in that function.\n\n"
     "IMPORTANT: FOCUS ONLY ON FIRM-SPECIFIC, OPERATIONAL USE DURING THE FILING PERIOD\n"
     "Score only based on evidence that the firm itself is using AI in a meaningful way in the business described by the filing.\n\n"
+    "STEP 1: BINARY GATE\n"
+    "Decide whether the excerpt contains explicit, firm-specific evidence that the firm is already using AI operationally during the filing period.\n"
+    "- Set explicit_operational_ai = true only if the filing clearly describes the firm's own operational use of AI in products, services, or internal operations.\n"
+    "- Set explicit_operational_ai = false if the text only mentions AI as an industry trend, future opportunity, customer demand, risk factor, third-party technology, marketing language, or generic innovation theme.\n\n"
+    "STEP 2: CONDITIONAL SCORING\n"
+    "- Only if explicit_operational_ai = true may the score be positive.\n"
+    "- If explicit_operational_ai = false, the score must be exactly 0.00.\n\n"
     "DO NOT SCORE HIGHLY FOR THE FOLLOWING ALONE\n"
-    "- mere mention of AI, machine learning, or automation\n"
+    "- mere mention of AI, machine learning, generative AI, or automation\n"
     "- generic discussion of industry trends\n"
     "- speculative future plans or intentions\n"
     "- research, experiments, pilots, or proofs of concept with no evidence of deployment\n"
@@ -616,8 +624,7 @@ def build_ai_prompt(text: str) -> str:
     "- AI embedded in core business segments rather than peripheral activities\n"
     "- AI described as strategically important to how the firm operates or competes\n\n"
     "SCORING GUIDANCE\n"
-    "0.00 = no explicit evidence of AI adoption in the filing text\n"
-    "0.01 to 0.10 = very weak evidence; vague references, early exploration, or non-operational discussion\n"
+    "0.00 = explicit_operational_ai is false; no explicit, firm-specific operational AI adoption in the filing text\n"
     "0.11 to 0.30 = limited adoption; some specific use cases but narrow, tentative, or not central\n"
     "0.31 to 0.50 = moderate adoption; clear operational use in some relevant business areas\n"
     "0.51 to 0.70 = substantial adoption; AI is integrated into multiple important functions or products\n"
@@ -625,11 +632,11 @@ def build_ai_prompt(text: str) -> str:
     "0.91 to 1.00 = AI is fundamental to the firm's core business model and competitive functioning\n\n"
     "DECISION RULES\n"
     "- Use the full 0.00 to 1.00 range.\n"
-    "- Avoid coarse rounding such as only 0.2, 0.5, or 0.8.\n"
     "- Base the score only on the text provided.\n"
     "- Do not infer adoption from the industry the firm operates in.\n"
-    "- If there is no explicit, firm-specific evidence of operational AI adoption during the filing period described, the score must be 0.00.\n"
-    "- Do not assign 0.10, 0.20, or 0.30 for generic technology language, automation, innovation, analytics, autonomous systems, digital transformation, cyber security or industry trends unless the filing explicitly describes the firm's own AI use in operations, products, or services.\n\n"
+    "- If there is no explicit, firm-specific evidence of operational AI adoption during the filing period described, explicit_operational_ai must be false and the score must be 0.00.\n"
+    "- Do not assign any positive score for generic technology language, automation, innovation, analytics, autonomous systems, digital transformation, cyber security, customer demand, or industry trends unless the filing explicitly describes the firm's own AI use in operations, products, or services.\n"
+    "- Do not use 0.01 to 0.10. If the binary gate is false, use 0.00. If the binary gate is true, use 0.11 or above.\n\n"
     "TEXT TO EVALUATE:\n"
     "<filing_text>\n"
     f"{text}\n"
@@ -637,8 +644,8 @@ def build_ai_prompt(text: str) -> str:
     "Now produce the score for the filing text above.\n"
     "Return ONLY one valid JSON object and no other text.\n"
     "The JSON object must have this shape:\n"
-    "{\"score\": NUMBER_BETWEEN_0_AND_1, \"explanation\": \"ONE_SHORT_PARAGRAPH\"}\n"
-    "Do not copy the template. Replace NUMBER_BETWEEN_0_AND_1 with a numeric score between 0.00 and 1.00.\n"
+    "{\"explicit_operational_ai\": true_or_false, \"score\": NUMBER_BETWEEN_0_AND_1, \"explanation\": \"ONE_SHORT_PARAGRAPH\"}\n"
+    "Do not copy the template. Replace true_or_false with a JSON boolean and NUMBER_BETWEEN_0_AND_1 with a numeric score between 0.00 and 1.00.\n"
     "Do not return markdown, bullets, headings, or any text before or after the JSON."
     )
 
@@ -721,45 +728,58 @@ def extract_balanced_json_objects(text: str) -> list[str]:
     return objects
 
 
-def parse_score_object(obj: Any) -> tuple[Any, str, str]:
-    """Validate one parsed JSON object as a score/explanation response."""
+def parse_score_object(obj: Any) -> tuple[Any, Any, str, str]:
+    """Validate one parsed JSON object as a gated score/explanation response."""
 
     if not isinstance(obj, dict):
-        return pd.NA, "Parsed JSON was not an object.", "json_not_object"
+        return pd.NA, pd.NA, "Parsed JSON was not an object.", "json_not_object"
+
+    explicit_operational_ai = obj.get("explicit_operational_ai")
+    if isinstance(explicit_operational_ai, str):
+        lowered = explicit_operational_ai.strip().lower()
+        if lowered in {"true", "yes"}:
+            explicit_operational_ai = True
+        elif lowered in {"false", "no"}:
+            explicit_operational_ai = False
+    if not isinstance(explicit_operational_ai, bool):
+        return pd.NA, pd.NA, "explicit_operational_ai field was not a boolean.", "non_boolean_gate"
+
     try:
         score = float(obj.get("score"))
     except Exception:
-        return pd.NA, "Score field was not numeric.", "non_numeric_score"
+        return pd.NA, explicit_operational_ai, "Score field was not numeric.", "non_numeric_score"
     if not 0.0 <= score <= 1.0:
-        return pd.NA, "Score was outside [0,1].", "score_out_of_bounds"
+        return pd.NA, explicit_operational_ai, "Score was outside [0,1].", "score_out_of_bounds"
 
     explanation = obj.get("explanation", "")
     if not isinstance(explanation, str):
         explanation = "" if explanation is None else str(explanation)
     explanation = " ".join(explanation.split()).strip() or "No explanation returned."
-    return score, explanation, "ok"
+    if not explicit_operational_ai:
+        score = 0.0
+    return score, explicit_operational_ai, explanation, "ok"
 
 
-def parse_model_output(text: str) -> tuple[Any, str, str, str]:
-    """Parse raw model output into score, explanation, status, and raw JSON."""
+def parse_model_output(text: str) -> tuple[Any, Any, str, str, str]:
+    """Parse raw model output into score, gate, explanation, status, and raw JSON."""
 
     if not text:
-        return pd.NA, "No model output returned.", "missing_output", ""
+        return pd.NA, pd.NA, "No model output returned.", "missing_output", ""
 
     candidates = extract_balanced_json_objects(text)
     if not candidates:
-        return pd.NA, "Model output did not contain valid JSON.", "no_json_found", ""
+        return pd.NA, pd.NA, "Model output did not contain valid JSON.", "no_json_found", ""
 
     for candidate in reversed(candidates):
         try:
             obj = json.loads(candidate)
         except Exception:
             continue
-        score, explanation, status = parse_score_object(obj)
+        score, explicit_operational_ai, explanation, status = parse_score_object(obj)
         if status == "ok":
-            return score, explanation, "ok", candidate
+            return score, explicit_operational_ai, explanation, "ok", candidate
 
-    return pd.NA, "Model output did not contain usable score JSON.", "no_valid_score_json", candidates[-1]
+    return pd.NA, pd.NA, "Model output did not contain usable score JSON.", "no_valid_score_json", candidates[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -804,6 +824,7 @@ def base_score_record(
         "llm_called": False,
         "endpoint_attempts": 0,
         "ai_adoption_score": pd.NA,
+        "explicit_operational_ai": pd.NA,
         "explanation": "",
         "score_status": "",
         "endpoint": endpoint,
@@ -995,12 +1016,13 @@ def apply_bulk_results(
         except Exception:
             response_body = result_body
         raw_text = extract_text_from_response(response_body)
-        score, explanation, status, raw_json = parse_model_output(raw_text)
+        score, explicit_operational_ai, explanation, status, raw_json = parse_model_output(raw_text)
         if record.get("prefilter_audit_sample") and status == "ok":
             status = "prefilter_audit_ok"
 
         record.update(
             ai_adoption_score=score,
+            explicit_operational_ai=explicit_operational_ai,
             explanation=explanation,
             score_status=status,
             raw_json_sha256=sha256_text(raw_json) if raw_json else "",
