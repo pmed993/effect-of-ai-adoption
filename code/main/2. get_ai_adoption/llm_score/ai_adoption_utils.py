@@ -97,7 +97,7 @@ AI_KEYWORDS = re.compile(
     r"\bnamed entity recognition\b|"
     r"\bentity recognition\b|"
     r"\bintent classification\b|"
-    r"\brobotic process automation\b"
+    r"\brobotic process automation\b|"
     r"\breinforcement learning\b|"
     r"\bpredictive analytics?\b|"
     r"\brecommendation engines?\b|"
@@ -116,7 +116,7 @@ AI_KEYWORDS = re.compile(
     r"\bcopilots?\b|"
     r"\bai assistants?\b|"
     r"\bai agents?\b|"
-    r"\bagentic ai\b|"
+    r"\bagentic ai\b"
     r")"
 )
 
