@@ -109,7 +109,7 @@ AI_KEYWORDS = re.compile(
     r"\banomaly detection\b|"
     r"\blanguage models?\b|"
     r"\bfoundation models?\b|"
-    r"\btransformer models?”\b|"
+    r"\btransformer models?\b|"
     r"\bgenerative models?\b|"
     r"\balgorithmic decision-making\b|"
     r"\bautomated decision-making\b|"
