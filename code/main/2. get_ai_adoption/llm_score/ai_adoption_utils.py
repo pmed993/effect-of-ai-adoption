@@ -60,7 +60,7 @@ AI_KEYWORDS = re.compile(
 #    r"\bautomation\b|"
     r"\bbig data\b|"
     r"\bbusiness intelligence\b|"
-    r"\brobotics?\b|"
+#    r"\brobotics?\b|"
     r"\bmachine learning\b|"
     r"\bdeep learning\b|"
     r"\bneural networks?\b|"

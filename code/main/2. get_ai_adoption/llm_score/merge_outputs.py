@@ -6,8 +6,10 @@ It:
 1. collects all chunk CSVs under a model output folder,
 2. builds a filing-level master dataset,
 3. optionally merges in a second model's scores,
-4. builds a firm-year panel for Compustat joins, and
-5. optionally merges that panel into a Compustat CSV.
+4. optionally re-filters the merged outputs to a research cik-year lookup,
+5. writes one all-chunk merged output file,
+6. builds a firm-year panel for Compustat joins, and
+7. optionally merges that panel into a Compustat CSV.
 
 Typical usage:
     python3 merge_outputs.py \
@@ -52,6 +54,11 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--llama-dir", required=True, help="Root folder containing Llama chunk outputs.")
     ap.add_argument("--mistral-dir", default=None, help="Optional root folder containing Mistral chunk outputs.")
     ap.add_argument("--out-dir", required=True, help="Folder for merged outputs.")
+    ap.add_argument(
+        "--lookup-csv",
+        default=None,
+        help="Optional cik-year lookup CSV. If provided, merged outputs are filtered to lookup keys after concatenation.",
+    )
     ap.add_argument(
         "--filing-duplicate-rule",
         choices=["error", "best_context", "max_llama"],
@@ -108,6 +115,55 @@ def ensure_identity_types(df: pd.DataFrame) -> pd.DataFrame:
         out["cik"] = pd.to_numeric(out["cik"], errors="coerce").astype("Int64")
     if "year" in out.columns:
         out["year"] = pd.to_numeric(out["year"], errors="coerce").astype("Int64")
+    return out
+
+
+def normalize_cik(value: object) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).strip()
+    if text.endswith(".0"):
+        text = text[:-2]
+    text = "".join(ch for ch in text if ch.isdigit())
+    return text.lstrip("0") or ("0" if text else "")
+
+
+def load_lookup(path: str | None) -> pd.DataFrame | None:
+    if not path:
+        return None
+
+    lookup = pd.read_csv(path)
+    lookup.columns = [str(col).strip().lower() for col in lookup.columns]
+    missing = {"cik", "year"} - set(lookup.columns)
+    if missing:
+        raise ValueError(f"Lookup CSV is missing required columns: {sorted(missing)}")
+
+    lookup = lookup[["cik", "year"]].copy()
+    lookup["cik_match"] = lookup["cik"].apply(normalize_cik)
+    lookup["year_match"] = pd.to_numeric(lookup["year"], errors="coerce").astype("Int64")
+    lookup = lookup[(lookup["cik_match"] != "") & lookup["year_match"].notna()]
+    lookup = lookup.drop_duplicates(["cik_match", "year_match"]).reset_index(drop=True)
+
+    if lookup.empty:
+        raise ValueError(f"Lookup CSV contains no usable cik/year pairs: {path}")
+
+    return lookup[["cik_match", "year_match"]]
+
+
+def filter_to_lookup(df: pd.DataFrame, lookup: pd.DataFrame | None, label: str) -> pd.DataFrame:
+    if lookup is None or df.empty:
+        return df
+
+    out = ensure_identity_types(df)
+    before = len(out)
+
+    out["cik_match"] = out["cik"].apply(normalize_cik)
+    out["year_match"] = pd.to_numeric(out["year"], errors="coerce").astype("Int64")
+    out = out.merge(lookup, on=["cik_match", "year_match"], how="inner")
+    out = out.drop(columns=["cik_match", "year_match"])
+    out = out.reset_index(drop=True)
+
+    print(f"Lookup filter kept {len(out)}/{before} {label} rows")
     return out
 
 
@@ -353,14 +409,21 @@ def merge_with_compustat(
 def main() -> int:
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
+    lookup = load_lookup(args.lookup_csv)
 
     llama_df = load_model_outputs(args.llama_dir, LLAMA_PATTERN, "llama")
+    llama_df = filter_to_lookup(llama_df, lookup, "Llama")
     mistral_df = None
     if args.mistral_dir:
         mistral_df = load_model_outputs(args.mistral_dir, MISTRAL_PATTERN, "mistral")
+        mistral_df = filter_to_lookup(mistral_df, lookup, "Mistral")
 
     filing_df = merge_models(llama_df, mistral_df, args.filing_duplicate_rule, args.out_dir)
     filing_df = filing_df.sort_values(["year", "cik", "accession_number"]).reset_index(drop=True)
+
+    all_chunks_out = os.path.join(args.out_dir, "ai_adoption_all_chunk_outputs.csv")
+    filing_df.to_csv(all_chunks_out, index=False)
+    print(f"Wrote all-chunk merged output: {all_chunks_out} ({len(filing_df)} rows)")
 
     filing_out = os.path.join(args.out_dir, "ai_adoption_filing_master.csv")
     filing_df.to_csv(filing_out, index=False)
