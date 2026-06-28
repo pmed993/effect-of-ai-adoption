@@ -232,13 +232,15 @@ Mostly behaves like `hard_zero`, but sends a deterministic sample of no-trigger-
 
 ## LLM Prompt Design
 
-The v2 prompt is shorter and more constrained so it remains reliable on `llama-3-3b`.
+The v2 prompt is shorter and more constrained so it remains reliable on `llama-3-3b`, while still giving enough context for a clean binary gate and score.
 
 The target concept is operational AI adoption:
 
 ```text
 the extent to which AI, machine learning, algorithmic systems, or automated decision systems are already implemented and embedded in the firm's core business activities
 ```
+
+The prompt explicitly tells the model that the excerpt comes from Form 10-K Item 1 (Business) and Item 7 (MD&A).
 
 The prompt distinguishes among three common cases:
 
@@ -262,6 +264,8 @@ The prompt increases the score when the text gives evidence that AI is:
 - present across meaningful business functions
 - embedded in core business segments
 - strategically important to how the firm operates or competes
+
+The prompt also asks for a short explanation of the evidence in `1-2 sentences`, but explicitly avoids step-by-step reasoning.
 
 The final JSON instruction remains at the end of the prompt. This reduces prompt-echo problems on smaller models.
 
