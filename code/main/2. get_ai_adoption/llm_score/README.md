@@ -13,8 +13,8 @@ Current implementation:
 ```text
 Main script: get_ai_score_bulk.py
 Utilities: ai_adoption_utils.py
-Script version: 2026-04-20-bulk-v1
-Prompt version: get_ai_adoption_v5
+Script version: 2026-06-28-get_ai_score_bulk-v2
+Prompt version: get_ai_adoption_v2
 Default endpoint: jupyterhub-llama-3-3b-instruct-endpoint
 Invocation method: dwutils.sm.bulk_invoke_endpoint_async
 ```
@@ -157,11 +157,12 @@ The snippet extraction logic:
 
 1. Normalizes whitespace.
 2. Splits the filing into sentence-like segments.
-3. Finds sentences containing AI-related keywords.
+3. Finds sentences containing AI trigger terms or broader AI-adjacent ranking terms.
 4. Includes nearby context using `--sentence-window`.
-5. Prioritizes windows with operational cues such as use, deployed, integrated, forecast, detect, recommend, optimize, or personalize.
-6. Downweights windows that look like risk-only, speculative, regulatory, future-plan, pilot, or research-only discussion.
-7. Returns selected sentences in filing order up to `--max-prompt-chars`.
+5. Prioritizes windows with explicit AI trigger terms over weaker adjacent terminology.
+6. Prioritizes windows with operational cues such as use, deployed, integrated, detect, optimize, or personalize.
+7. Downweights windows that look like risk-only, speculative, regulatory, market-theme, future-plan, pilot, or research-only discussion.
+8. Returns selected sentences in filing order up to `--max-prompt-chars`.
 
 Default QA setting:
 
@@ -169,32 +170,43 @@ Default QA setting:
 --max-prompt-chars 1500
 ```
 
-If no AI keywords are found and the LLM is still called, the snippet falls back to the start of the combined filing text.
+If no ranking keywords are found and the LLM is still called, the snippet falls back to the start of the combined filing text.
 
 ## Keyword Prefilter
 
-The prefilter is used to reduce unnecessary LLM calls. It searches the combined filing text for AI-related terms, including phrases such as:
+The v2 prefilter is used to reduce unnecessary LLM calls. It separates keywords into two groups.
+
+Trigger terms:
 
 ```text
 artificial intelligence
 machine learning
 deep learning
 neural network
-predictive model
-automated decision
-recommendation engine
 computer vision
 natural language processing
 generative AI
 large language model
 LLM
-robotic process automation
-autonomous systems
-fraud detection model
-optimization engine
 ```
 
-Bare lowercase `ml` is intentionally not matched because it can mean milliliters. Uppercase `ML` is matched.
+Ranking-only terms:
+
+```text
+big data
+business intelligence
+data science
+predictive analytics
+data mining
+pattern recognition
+anomaly detection
+recommendation engine
+expert systems
+```
+
+Trigger terms can justify an LLM call in `hard_zero` mode. Ranking-only terms can improve snippet selection, but they do not by themselves count as a positive prefilter hit.
+
+Bare lowercase `ml` is intentionally not matched because it can mean milliliters. The prefilter also avoids using very broad terms such as automation or robotics as trigger terms.
 
 The process supports three prefilter modes.
 
@@ -204,7 +216,7 @@ Calls the LLM for every non-empty filing.
 
 `hard_zero`:
 
-If no AI keyword is found, assigns:
+If no AI trigger keyword is found, assigns:
 
 ```text
 ai_adoption_score = 0.0
@@ -216,11 +228,11 @@ This is the intended production-style mode after QA.
 
 `audit`:
 
-Mostly behaves like `hard_zero`, but sends a deterministic sample of no-keyword filings to the LLM. This estimates whether the keyword prefilter is incorrectly assigning zero to filings that the LLM would score above zero.
+Mostly behaves like `hard_zero`, but sends a deterministic sample of no-trigger-keyword filings to the LLM. This estimates whether the trigger dictionary is incorrectly assigning zero to filings that the LLM would score above zero.
 
 ## LLM Prompt Design
 
-The prompt asks the model to estimate the firm's level of AI adoption as described in the filing, at the time covered by the filing text.
+The v2 prompt is shorter and more constrained so it remains reliable on `llama-3-3b`.
 
 The target concept is operational AI adoption:
 
@@ -228,17 +240,22 @@ The target concept is operational AI adoption:
 the extent to which AI, machine learning, algorithmic systems, or automated decision systems are already implemented and embedded in the firm's core business activities
 ```
 
-The prompt instructs the model not to score highly for:
+The prompt distinguishes among three common cases:
 
-- mere mentions of AI or automation
-- generic industry trends
+- the firm itself already uses AI in products, services, or internal operations
+- the firm sells into AI markets or supplies AI-related infrastructure
+- the firm only discusses AI trends, risks, strategy, or future plans
+
+The prompt tells the model not to treat the following as adoption by themselves:
+
+- selling into AI markets or supplying AI customers/infrastructure
+- generic industry trends or strategy language
 - speculative future plans
 - research, experiments, pilots, or proofs of concept with no evidence of deployment
-- boilerplate innovation language
 - risk-factor discussion about AI competition, regulation, or cybersecurity
 - third-party technology references without evidence of operational integration
 
-The prompt instructs the model to increase the score when the text gives evidence that AI is:
+The prompt increases the score when the text gives evidence that AI is:
 
 - deployed in products, services, or internal operations
 - tied to revenue generation, product delivery, cost reduction, efficiency, or decision-making
@@ -246,7 +263,7 @@ The prompt instructs the model to increase the score when the text gives evidenc
 - embedded in core business segments
 - strategically important to how the firm operates or competes
 
-The final JSON instruction appears after the filing text. This is deliberate. Earlier versions placed an example JSON object before the filing text, which increased the risk that the endpoint echoed the template or returned the wrong JSON object.
+The final JSON instruction remains at the end of the prompt. This reduces prompt-echo problems on smaller models.
 
 ## Score Scale
 
@@ -256,15 +273,13 @@ Scoring guidance:
 
 ```text
 0.00 = no explicit evidence of AI adoption in the filing text
-0.01 to 0.10 = very weak evidence; vague references, early exploration, or non-operational discussion
 0.11 to 0.30 = limited adoption; some specific use cases but narrow, tentative, or not central
 0.31 to 0.50 = moderate adoption; clear operational use in some relevant business areas
 0.51 to 0.70 = substantial adoption; AI is integrated into multiple important functions or products
-0.71 to 0.90 = extensive adoption; AI is deeply embedded in operations and materially relevant to the business
-0.91 to 1.00 = AI is fundamental to the firm's core business model and competitive functioning
+0.71 to 1.00 = AI is deeply embedded or core to the business
 ```
 
-The prompt tells the model to use the full range, avoid coarse rounding, and assign 0.10 or below when there is no explicit evidence of firm-specific operational AI adoption.
+The prompt tells the model not to use `0.01` to `0.10`. If the binary gate is false, the score must be `0.00`. If the gate is true, the score must be at least `0.11`.
 
 ## Model Invocation
 
@@ -294,7 +309,7 @@ parameters:
   return_full_text
 ```
 
-Current QA-approved generation setting:
+Current default generation setting:
 
 ```text
 --max-new-tokens 120
@@ -302,14 +317,14 @@ Current QA-approved generation setting:
 
 This controls the maximum length of the model response. It does not control the amount of filing text sent to the model. Filing text length is controlled by `--max-prompt-chars`.
 
-The 100-row QA test showed that `--max-new-tokens 80` produced occasional `no_json_found` parser failures, while `--max-new-tokens 120` produced 16 successful parses out of 16 LLM-called rows.
+Earlier QA showed that `--max-new-tokens 80` produced occasional `no_json_found` parser failures, while `--max-new-tokens 120` performed better. The v2 default is therefore `120`.
 
 ## Model Output Parsing
 
 The model is instructed to return exactly one JSON object:
 
 ```json
-{"score": 0.64, "explanation": "One short paragraph."}
+{"explicit_operational_ai": true, "score": 0.64, "explanation": "One short paragraph."}
 ```
 
 The parser:
@@ -320,17 +335,28 @@ The parser:
 4. Accepts the first object that has a numeric `score` in `[0, 1]`.
 5. Normalizes the explanation to a single paragraph.
 
-If parsing fails, the output keeps the row but records a failure status such as:
+If parsing fails on the first pass, the output keeps the row and records a failure status such as:
 
 ```text
 missing_output
 no_json_found
 no_valid_score_json
+non_boolean_gate
 non_numeric_score
 score_out_of_bounds
+positive_gate_below_minimum
 ```
 
-These rows should be reviewed during QA before production runs.
+In v2, parser-like failures automatically receive a second LLM call using a shorter JSON-only retry prompt. Successful rescues are recorded as:
+
+```text
+ok_after_retry
+prefilter_audit_ok_after_retry
+```
+
+Unsuccessful rescues are recorded with `retry_` status prefixes.
+
+The parser also enforces the gated score rule: if `explicit_operational_ai=true`, the score must be at least `0.11`.
 
 ## Output Files
 
@@ -380,6 +406,7 @@ item1_chars
 item7_chars
 combined_chars
 keyword_hits
+ranking_keyword_hits
 snippet_chars
 snippet_sha256
 ```
@@ -395,6 +422,10 @@ endpoint
 job_id
 raw_json_sha256
 score_status
+initial_score_status
+retry_attempted
+retry_score_status
+retry_job_id
 ```
 
 Scoring output:
@@ -459,6 +490,8 @@ Based on this evidence, the recommended QA/default generation setting is:
 
 Before all-chunk production, the next recommended gate is a full single-chunk run using the lookup filter and hard-zero prefilter.
 
+The v2 pipeline also runs an automatic retry pass for parser-like failures by default. Use `--no-retry-pass` only for debugging or strict ablation runs.
+
 ## Recommended Production-Style Settings
 
 For tested production-style runs:
@@ -505,6 +538,7 @@ For every QA run, inspect:
 score_status
 llm_called
 keyword_hits
+ranking_keyword_hits
 prefilter_decision
 snippet_chars
 ai_adoption_score

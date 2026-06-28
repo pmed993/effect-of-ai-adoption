@@ -68,9 +68,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--max-prompt-chars", type=int, default=1500)
     ap.add_argument("--sentence-window", type=int, default=1)
     ap.add_argument("--temperature", type=float, default=0.0)
-    ap.add_argument("--max-new-tokens", type=int, default=80)
+    ap.add_argument("--max-new-tokens", type=int, default=120)
     ap.add_argument("--max-concurrent-invocations", type=int, default=25)
     ap.add_argument("--max-workers", type=int, default=9)
+    ap.add_argument("--no-retry-pass", action="store_true", help="Disable the automatic second-pass retry for parser failures.")
 
     # Output and logging settings.
     ap.add_argument("--save-raw-json", action="store_true", help="Store parsed raw model JSON in the score CSV.")
@@ -201,6 +202,36 @@ def process_chunk(
             max_workers=args.max_workers,
         )
         u.apply_bulk_results(records, pending, results, save_raw_json=args.save_raw_json)
+
+        if not args.no_retry_pass:
+            retry_pending = {
+                linked_obj: {
+                    "record_index": item["record_index"],
+                    "prompt": item["retry_prompt"],
+                }
+                for linked_obj, item in pending.items()
+                if records[item["record_index"]].get("score_status") in u.RETRYABLE_SCORE_STATUSES
+            }
+            if retry_pending:
+                logging.info("Retrying %d parser-failure rows for %s with stricter JSON prompt", len(retry_pending), ref.name)
+                retry_invoke_args = u.iter_bulk_invoke_args(
+                    retry_pending,
+                    endpoint=args.endpoint,
+                    temperature=args.temperature,
+                    max_new_tokens=args.max_new_tokens,
+                )
+                retry_results = sm.bulk_invoke_endpoint_async(
+                    retry_invoke_args,
+                    max_concurrent_invocations=args.max_concurrent_invocations,
+                    max_workers=args.max_workers,
+                )
+                u.apply_bulk_results(
+                    records,
+                    retry_pending,
+                    retry_results,
+                    save_raw_json=args.save_raw_json,
+                    is_retry=True,
+                )
     else:
         logging.info("No LLM calls needed for %s", ref.name)
 
@@ -238,6 +269,8 @@ def process_chunk(
         "n_filings": int(len(out_df)),
         "n_llm_called": int(out_df["llm_called"].sum()) if not out_df.empty else 0,
         "n_ok": int((out_df["score_status"] == "ok").sum()) if not out_df.empty else 0,
+        "n_ok_after_retry": int((out_df["score_status"] == "ok_after_retry").sum()) if not out_df.empty else 0,
+        "n_retry_attempted": int(out_df["retry_attempted"].sum()) if not out_df.empty and "retry_attempted" in out_df.columns else 0,
     }
 
 

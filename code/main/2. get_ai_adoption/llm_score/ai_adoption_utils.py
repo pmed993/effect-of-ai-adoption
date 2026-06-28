@@ -25,8 +25,8 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
-SCRIPT_VERSION = "2026-04-20-get_ai_score_bulk-v1"
-PROMPT_VERSION = "get_ai_adoption_v6"
+SCRIPT_VERSION = "2026-06-28-get_ai_score_bulk-v2"
+PROMPT_VERSION = "get_ai_adoption_v2"
 
 DEFAULT_ENDPOINTS = {
     "llama": "jupyterhub-llama-3-3b-instruct-endpoint",
@@ -44,83 +44,85 @@ CHUNK_RE = re.compile(r"^extract_df_chunk_(\d{5})\.rds$")
 WHITESPACE_RE = re.compile(r"\s+")
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[\.\!\?\;])\s+|\n+")
 
-# Keywords used to decide whether a filing may contain AI adoption evidence.
-# List obtained from
-# - Cao et al. (2025, Table A2) Specifically designed for AI-related terms in K-10 disclosure
-# - Mikalef and Gupta (2022, Internet Appendix III)
-# I retained only terms that are specific to AI and exluded broad or ambiugous terms such as:
-# business intelligence, big data, Python, automation, robotics
-# and standalone terms like AI and ML which generate false positive i.e., ML can mean milliliters
-# or AI meant Avian Influenza in some dislcosures 
-AI_KEYWORDS = re.compile(
-    r"(?i:"
-    r"\bartificial intelligence\b|"
-    r"\bA\.I\.\b|"
-    r"\bAI/ML\b|"
-#    r"\bautomation\b|"
-    r"\bbig data\b|"
-    r"\bbusiness intelligence\b|"
-#    r"\brobotics?\b|"
-    r"\bmachine learning\b|"
-    r"\bdeep learning\b|"
-    r"\bneural networks?\b|"
-    r"\bdata science\b|"
-    r"\bdata scientists?\b|"
-#    r"\bforecasts?\b|"
-    r"\bartificial neural networks?\b|"
-    r"\bcomputer vision\b|"
-    r"\bnatural language processing\b|"
-    r"\bnatural language understanding\b|"
-    r"\bneural network\b|"
-    r"\bmachine translation\b|"
-    r"\bgenerative ai\b|"
-    r"\bgenai\b|"
-    r"\blarge language models?\b|"
-    r"\bllms?\b|"
-    r"\bchatbots?\b|"
-    r"\bimage recognition\b|"
-    r"\bobject recognition\b|"
-    r"\bspeech recognition\b|"
-    r"\bfacial recognition\b|"
-#    r"\bpredictive\b|"
-    r"\bdecision engines?\b|"
-#    r"\bforecasting\b|"
-    r"\bfraud detection\b|"
-    r"\bhandwriting recognition\b|"
-    r"\bsupport vector machines?\b|"
-    r"\bsupervised learning\b|"
-    r"\bunsupervised learning\b|"
-    r"\bclassification algorithms?\b|"
-    r"\bclustering algorithms?\b|"
-    r"\brecommender systems?\b|"
-    r"\binformation extraction\b|"
-    r"\bdimensionality reduction\b|"
-    r"\bkernel methods?\b|"
-    r"\bnamed entity recognition\b|"
-    r"\bentity recognition\b|"
-    r"\bintent classification\b|"
-    r"\brobotic process automation\b|"
-    r"\breinforcement learning\b|"
-    r"\bpredictive analytics?\b|"
-    r"\brecommendation engines?\b|"
-    r"\bexpert systems?\b|"
-    r"\bdata mining\b|"
-    r"\bpattern recognition\b|"
-    r"\banomaly detection\b|"
-    r"\blanguage models?\b|"
-    r"\bfoundation models?\b|"
-    r"\btransformer models?\b|"
-    r"\bgenerative models?\b|"
-    r"\balgorithmic decision-making\b|"
-    r"\bautomated decision-making\b|"
-    r"\bconversational ai\b|"
-    r"\bvirtual assistants?\b|"
-    r"\bcopilots?\b|"
-    r"\bai assistants?\b|"
-    r"\bai agents?\b|"
-    r"\bagentic ai\b"
-    r")"
-)
+# v2 uses a split dictionary:
+# - trigger terms: explicit AI language that can justify an LLM call
+# - ranking-only terms: broader adjacent language that can help snippet selection
+#   but should not, on their own, trigger a positive AI prefilter hit.
+AI_TRIGGER_PATTERNS = [
+    r"\bartificial intelligence\b",
+    r"\bA\.I\.\b",
+    r"\bAI/ML\b",
+    r"\bmachine learning\b",
+    r"\bdeep learning\b",
+    r"\bneural networks?\b",
+    r"\bartificial neural networks?\b",
+    r"\bcomputer vision\b",
+    r"\bnatural language processing\b",
+    r"\bnatural language understanding\b",
+    r"\bmachine translation\b",
+    r"\bgenerative ai\b",
+    r"\bgenai\b",
+    r"\blarge language models?\b",
+    r"\bllms?\b",
+    r"\bchatbots?\b",
+    r"\bsupport vector machines?\b",
+    r"\bsupervised learning\b",
+    r"\bunsupervised learning\b",
+    r"\bclassification algorithms?\b",
+    r"\bclustering algorithms?\b",
+    r"\brecommender systems?\b",
+    r"\binformation extraction\b",
+    r"\bdimensionality reduction\b",
+    r"\bkernel methods?\b",
+    r"\bnamed entity recognition\b",
+    r"\bentity recognition\b",
+    r"\bintent classification\b",
+    r"\breinforcement learning\b",
+    r"\bfoundation models?\b",
+    r"\btransformer models?\b",
+    r"\bgenerative models?\b",
+    r"\bconversational ai\b",
+    r"\bvirtual assistants?\b",
+    r"\bcopilots?\b",
+    r"\bai assistants?\b",
+    r"\bai agents?\b",
+    r"\bagentic ai\b",
+]
+
+AI_RANKING_ONLY_PATTERNS = [
+    r"\bbig data\b",
+    r"\bbusiness intelligence\b",
+    r"\bdata science\b",
+    r"\bdata scientists?\b",
+    r"\bimage recognition\b",
+    r"\bobject recognition\b",
+    r"\bspeech recognition\b",
+    r"\bfacial recognition\b",
+    r"\bdecision engines?\b",
+    r"\bfraud detection\b",
+    r"\bhandwriting recognition\b",
+    r"\brobotic process automation\b",
+    r"\bpredictive analytics?\b",
+    r"\brecommendation engines?\b",
+    r"\bexpert systems?\b",
+    r"\bdata mining\b",
+    r"\bpattern recognition\b",
+    r"\banomaly detection\b",
+    r"\blanguage models?\b",
+    r"\balgorithmic decision-making\b",
+    r"\bautomated decision-making\b",
+]
+
+
+def compile_keyword_patterns(patterns: Sequence[str]) -> re.Pattern[str]:
+    """Compile a case-insensitive union of keyword patterns."""
+
+    return re.compile(r"(?i:" + "|".join(patterns) + r")")
+
+
+AI_TRIGGER_KEYWORDS = compile_keyword_patterns(AI_TRIGGER_PATTERNS)
+AI_RANKING_ONLY_KEYWORDS = compile_keyword_patterns(AI_RANKING_ONLY_PATTERNS)
+AI_RANKING_KEYWORDS = compile_keyword_patterns(AI_TRIGGER_PATTERNS + AI_RANKING_ONLY_PATTERNS)
 
 # These words help rank snippets. They do not determine the final score.
 # They only make operational evidence more likely to be sent to the LLM.
@@ -139,9 +141,20 @@ LOW_VALUE_CUES = re.compile(
     r"(?i)\b("
     r"risk|risks|could|may|might|intend|intends|plan|plans|future|potential|"
     r"regulation|regulatory|competition|competitors|cybersecurity|pilot|pilots|"
-    r"proof of concept|experiment|experiments|research"
+    r"proof of concept|experiment|experiments|research|trend|trends|market|markets|"
+    r"opportunity|opportunities|demand|partner|partners|partnership|partnerships"
     r")\b"
 )
+
+RETRYABLE_SCORE_STATUSES = {
+    "missing_output",
+    "no_json_found",
+    "no_valid_score_json",
+    "non_boolean_gate",
+    "non_numeric_score",
+    "score_out_of_bounds",
+    "positive_gate_below_minimum",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -200,9 +213,15 @@ def normalize_cik(value: Any) -> str:
 
 
 def count_ai_keywords(text: str) -> int:
-    """Count AI keyword hits in filing text."""
+    """Count explicit AI trigger keyword hits in filing text."""
 
-    return len(list(AI_KEYWORDS.finditer(text))) if text else 0
+    return len(list(AI_TRIGGER_KEYWORDS.finditer(text))) if text else 0
+
+
+def count_ranking_keywords(text: str) -> int:
+    """Count broader AI-adjacent keyword hits used for snippet ranking QA."""
+
+    return len(list(AI_RANKING_KEYWORDS.finditer(text))) if text else 0
 
 
 def chunk_name_from_id(chunk_id: int) -> str:
@@ -237,18 +256,23 @@ def preferred_output_columns(save_raw_json: bool) -> list[str]:
         "item7_chars",
         "combined_chars",
         "keyword_hits",
+        "ranking_keyword_hits",
         "prefilter_mode",
         "prefilter_decision",
         "prefilter_audit_sample",
         "snippet_chars",
         "llm_called",
         "endpoint_attempts",
+        "initial_score_status",
+        "retry_attempted",
+        "retry_score_status",
         "ai_adoption_score",
         "explicit_operational_ai",
         "explanation",
         "score_status",
         "endpoint",
         "job_id",
+        "retry_job_id",
         "snippet_sha256",
         "raw_json_sha256",
     ]
@@ -528,7 +552,7 @@ def extract_relevant_snippets(full_text: str, max_chars: int, sentence_window: i
         return ""
 
     sentences = split_into_sentences(full_text)
-    hit_idx = [i for i, sentence in enumerate(sentences) if AI_KEYWORDS.search(sentence)]
+    hit_idx = [i for i, sentence in enumerate(sentences) if AI_RANKING_KEYWORDS.search(sentence)]
     if not hit_idx:
         return full_text[:max_chars]
 
@@ -541,6 +565,12 @@ def extract_relevant_snippets(full_text: str, max_chars: int, sentence_window: i
         window_text = " ".join(sentences[i] for i in indices)
         # Rank windows with operational cues above risk/future-looking text.
         score = 0
+        if AI_TRIGGER_KEYWORDS.search(window_text):
+            score += 5
+        if AI_TRIGGER_KEYWORDS.search(sentences[idx]):
+            score += 3
+        if AI_RANKING_ONLY_KEYWORDS.search(sentences[idx]):
+            score += 1
         if OPERATIONAL_CUES.search(window_text):
             score += 4
         if OPERATIONAL_CUES.search(sentences[idx]):
@@ -593,62 +623,51 @@ def extract_relevant_snippets(full_text: str, max_chars: int, sentence_window: i
 # The scoring instructions are kept in one function so prompt changes are easy
 # to review and version through PROMPT_VERSION.
 def build_ai_prompt(text: str) -> str:
-    """Build the LLM prompt for one filing excerpt."""
-    return(
-    "You are an academic research assistant measuring firm-level artificial intelligence adoption from SEC Form 10-K disclosures.\n\n"
-    "TASK\n"
-    "Read the filing text and estimate the firm's level of AI adoption as described in this filing, at the time covered by the filing text.\n"
-    "After reading the filing text, return exactly three fields in valid JSON: explicit_operational_ai, score, and explanation.\n\n"
-    "CONCEPT TO MEASURE\n"
-    "AI adoption here means the firm's own operational use of technologies that the filing explicitly identifies as artificial intelligence, machine learning, deep learning, neural networks, natural language processing, computer vision, generative AI, large language models, foundation models, or similarly explicit AI systems.\n"
-    "A business function such as forecasting, recommendations, fraud detection, pricing, automation, or internal decision support counts only if the filing explicitly states that AI or machine learning is being used in that function.\n\n"
-    "IMPORTANT: FOCUS ONLY ON FIRM-SPECIFIC, OPERATIONAL USE DURING THE FILING PERIOD\n"
-    "Score only based on evidence that the firm itself is using AI in a meaningful way in the business described by the filing.\n\n"
-    "STEP 1: BINARY GATE\n"
-    "Decide whether the excerpt contains explicit, firm-specific evidence that the firm is already using AI operationally during the filing period.\n"
-    "- Set explicit_operational_ai = true only if the filing clearly describes the firm's own operational use of AI in products, services, or internal operations.\n"
-    "- Set explicit_operational_ai = false if the text only mentions AI as an industry trend, future opportunity, customer demand, risk factor, third-party technology, marketing language, or generic innovation theme.\n\n"
-    "STEP 2: CONDITIONAL SCORING\n"
-    "- Only if explicit_operational_ai = true may the score be positive.\n"
-    "- If explicit_operational_ai = false, the score must be exactly 0.00.\n\n"
-    "DO NOT SCORE HIGHLY FOR THE FOLLOWING ALONE\n"
-    "- mere mention of AI, machine learning, generative AI, or automation\n"
-    "- generic discussion of industry trends\n"
-    "- speculative future plans or intentions\n"
-    "- research, experiments, pilots, or proofs of concept with no evidence of deployment\n"
-    "- boilerplate innovation language\n"
-    "- risk factors mentioning AI competition, regulation, or cybersecurity\n"
-    "- references to third-party technology unless the text shows the firm has operationally integrated it\n\n"
-    "WHAT SHOULD INCREASE THE SCORE\n"
-    "- clear evidence that AI is already deployed in products, services, or internal operations\n"
-    "- AI tied to revenue generation, product delivery, cost reduction, efficiency, or decision-making\n"
-    "- distinct evidence of deployment across meaningful business functions\n"
-    "- AI embedded in core business segments rather than peripheral activities\n"
-    "- AI described as strategically important to how the firm operates or competes\n\n"
-    "SCORING GUIDANCE\n"
-    "0.00 = explicit_operational_ai is false; no explicit, firm-specific operational AI adoption in the filing text\n"
-    "0.11 to 0.30 = limited adoption; some specific use cases but narrow, tentative, or not central\n"
-    "0.31 to 0.50 = moderate adoption; clear operational use in some relevant business areas\n"
-    "0.51 to 0.70 = substantial adoption; AI is integrated into multiple important functions or products\n"
-    "0.71 to 0.90 = extensive adoption; AI is deeply embedded in operations and materially relevant to the business\n"
-    "0.91 to 1.00 = AI is fundamental to the firm's core business model and competitive functioning\n\n"
-    "DECISION RULES\n"
-    "- Use the full 0.00 to 1.00 range.\n"
-    "- Base the score only on the text provided.\n"
-    "- Do not infer adoption from the industry the firm operates in.\n"
-    "- If there is no explicit, firm-specific evidence of operational AI adoption during the filing period described, explicit_operational_ai must be false and the score must be 0.00.\n"
-    "- Do not assign any positive score for generic technology language, automation, innovation, analytics, autonomous systems, digital transformation, cyber security, customer demand, or industry trends unless the filing explicitly describes the firm's own AI use in operations, products, or services.\n"
-    "- Do not use 0.01 to 0.10. If the binary gate is false, use 0.00. If the binary gate is true, use 0.11 or above.\n\n"
-    "TEXT TO EVALUATE:\n"
-    "<filing_text>\n"
-    f"{text}\n"
-    "</filing_text>\n\n"
-    "Now produce the score for the filing text above.\n"
-    "Return ONLY one valid JSON object and no other text.\n"
-    "The JSON object must have this shape:\n"
-    "{\"explicit_operational_ai\": true_or_false, \"score\": NUMBER_BETWEEN_0_AND_1, \"explanation\": \"ONE_SHORT_PARAGRAPH\"}\n"
-    "Do not copy the template. Replace true_or_false with a JSON boolean and NUMBER_BETWEEN_0_AND_1 with a numeric score between 0.00 and 1.00.\n"
-    "Do not return markdown, bullets, headings, or any text before or after the JSON."
+    """Build the main v2 LLM prompt for one filing excerpt."""
+
+    return (
+        "Score firm AI adoption from this SEC filing excerpt.\n"
+        "Return JSON only with keys: explicit_operational_ai, score, explanation.\n\n"
+        "Set explicit_operational_ai=true only when the excerpt says the firm itself already uses explicit AI technology "
+        "(artificial intelligence, machine learning, deep learning, NLP, computer vision, generative AI, LLMs, or similar) "
+        "in its own products, services, or internal operations during the filing period.\n\n"
+        "Set explicit_operational_ai=false and score=0.00 when the excerpt only shows:\n"
+        "- selling into AI markets or supplying AI customers/infrastructure\n"
+        "- AI trends, strategy, opportunity, competition, regulation, or risk\n"
+        "- future plans, experiments, pilots, research, or partnerships without deployment\n"
+        "- third-party AI unless the firm says it integrated or uses it operationally\n\n"
+        "If explicit_operational_ai=true, use this scale:\n"
+        "- 0.11-0.30 narrow or early deployed use\n"
+        "- 0.31-0.50 clear use in some important areas\n"
+        "- 0.51-0.70 use across multiple important functions or products\n"
+        "- 0.71-1.00 AI is deeply embedded or core to the business\n"
+        "Never use 0.01-0.10.\n\n"
+        "FILING EXCERPT:\n"
+        "<filing_text>\n"
+        f"{text}\n"
+        "</filing_text>\n\n"
+        "Return exactly one JSON object and nothing else:\n"
+        "{\"explicit_operational_ai\": true_or_false, \"score\": NUMBER_BETWEEN_0_AND_1, \"explanation\": \"ONE_SHORT_PARAGRAPH\"}\n"
+        "Replace the placeholders with actual JSON values."
+    )
+
+
+def build_ai_retry_prompt(text: str) -> str:
+    """Build a shorter JSON-only retry prompt for parser failures."""
+
+    return (
+        "Return exactly one valid JSON object. No markdown. No extra text.\n"
+        "Decide whether this filing excerpt shows the firm itself already using explicit AI "
+        "(artificial intelligence, machine learning, deep learning, NLP, computer vision, generative AI, LLMs) "
+        "in its own products, services, or internal operations during the filing period.\n"
+        "If not, set explicit_operational_ai=false and score=0.00.\n"
+        "Do not count AI markets, AI customers, trends, risks, future plans, pilots, research, or third-party AI without integration.\n"
+        "If true, score must be 0.11 to 1.00. If false, score must be 0.00.\n\n"
+        "<filing_text>\n"
+        f"{text}\n"
+        "</filing_text>\n\n"
+        "{\"explicit_operational_ai\": true_or_false, \"score\": NUMBER_BETWEEN_0_AND_1, \"explanation\": \"ONE_SHORT_PARAGRAPH\"}\n"
+        "Replace the placeholders with actual JSON values."
     )
 
 
@@ -752,6 +771,13 @@ def parse_score_object(obj: Any) -> tuple[Any, Any, str, str]:
         return pd.NA, explicit_operational_ai, "Score field was not numeric.", "non_numeric_score"
     if not 0.0 <= score <= 1.0:
         return pd.NA, explicit_operational_ai, "Score was outside [0,1].", "score_out_of_bounds"
+    if explicit_operational_ai and score < 0.11:
+        return (
+            pd.NA,
+            explicit_operational_ai,
+            "explicit_operational_ai was true but score was below the 0.11 minimum.",
+            "positive_gate_below_minimum",
+        )
 
     explanation = obj.get("explanation", "")
     if not isinstance(explanation, str):
@@ -819,18 +845,23 @@ def base_score_record(
         "item7_chars": int(row.get("item7_chars", 0) or 0),
         "combined_chars": int(row.get("combined_chars", 0) or 0),
         "keyword_hits": 0,
+        "ranking_keyword_hits": 0,
         "prefilter_mode": prefilter_mode,
         "prefilter_decision": "not_applicable",
         "prefilter_audit_sample": bool(prefilter_audit_sample),
         "snippet_chars": 0,
         "llm_called": False,
         "endpoint_attempts": 0,
+        "initial_score_status": "",
+        "retry_attempted": False,
+        "retry_score_status": "",
         "ai_adoption_score": pd.NA,
         "explicit_operational_ai": pd.NA,
         "explanation": "",
         "score_status": "",
         "endpoint": endpoint,
         "job_id": "",
+        "retry_job_id": "",
         "snippet_sha256": "",
         "raw_json_sha256": "",
     }
@@ -905,6 +936,7 @@ def prepare_records_and_prompts(
         accession = str(row.get("accession_number", "")).strip()
         full_text = normalize_whitespace(row.get("combined_text", ""))
         keyword_hits = count_ai_keywords(full_text)
+        ranking_keyword_hits = count_ranking_keywords(full_text)
 
         # Audit mode sends a stable sample of no-keyword filings to the LLM so
         # the false-zero risk of the prefilter can be measured.
@@ -927,6 +959,7 @@ def prepare_records_and_prompts(
             prefilter_audit_sample=audit_sample,
         )
         record["keyword_hits"] = keyword_hits
+        record["ranking_keyword_hits"] = ranking_keyword_hits
 
         # Empty filings get a transparent zero without an LLM call.
         if not full_text:
@@ -941,7 +974,7 @@ def prepare_records_and_prompts(
         elif keyword_hits == 0 and prefilter_mode in {"hard_zero", "audit"} and not audit_sample:
             record.update(
                 ai_adoption_score=0.0,
-                explanation="No AI-related keywords were detected by the prefilter, so the filing was assigned zero without an LLM call.",
+                explanation="No explicit AI trigger keywords were detected by the v2 prefilter, so the filing was assigned zero without an LLM call.",
                 score_status="prefilter_zero_no_keyword",
                 prefilter_decision=f"{prefilter_mode}_zero_no_keyword",
             )
@@ -958,7 +991,7 @@ def prepare_records_and_prompts(
                 record.update(
                     prefilter_decision="audit_call_no_keyword"
                     if audit_sample
-                    else ("llm_call_no_keyword_prefilter_off" if keyword_hits == 0 else "keyword_hit_llm_call"),
+                    else ("llm_call_no_trigger_prefilter_off" if keyword_hits == 0 else "keyword_hit_llm_call"),
                     snippet_chars=len(snippet),
                     llm_called=True,
                     endpoint_attempts=1,
@@ -967,7 +1000,11 @@ def prepare_records_and_prompts(
                 )
                 # linked_obj is the bridge between the bulk result and this row.
                 linked_obj = str(len(records))
-                pending[linked_obj] = {"record_index": len(records), "prompt": build_ai_prompt(snippet)}
+                pending[linked_obj] = {
+                    "record_index": len(records),
+                    "prompt": build_ai_prompt(snippet),
+                    "retry_prompt": build_ai_retry_prompt(snippet),
+                }
 
         records.append(record)
 
@@ -986,13 +1023,19 @@ def apply_bulk_results(
     results: Iterable[tuple[Any, Any, Any, Any, str, str]],
     *,
     save_raw_json: bool,
+    is_retry: bool = False,
 ) -> None:
     """Apply SageMaker bulk results to the prepared output records in place."""
 
     for linked_obj, _invoke_kwargs, _job_id, _inference_id, response_type, result_body in results:
         item = pending[str(linked_obj)]
         record = records[item["record_index"]]
-        if _job_id:
+        if is_retry:
+            record["retry_attempted"] = True
+            record["endpoint_attempts"] = int(record.get("endpoint_attempts", 0) or 0) + 1
+        if _job_id and is_retry:
+            record["retry_job_id"] = str(_job_id)
+        elif _job_id:
             record["job_id"] = str(_job_id)
         if _inference_id:
             record["inference_id"] = str(_inference_id)
@@ -1005,11 +1048,20 @@ def apply_bulk_results(
                 error = body.get("error", result_body)
             except Exception:
                 error = result_body
-            record.update(
-                ai_adoption_score=pd.NA,
-                explanation=f"Endpoint error: {str(error)[:500]}",
-                score_status="endpoint_error",
-            )
+            status = "endpoint_error"
+            if is_retry:
+                record.update(
+                    retry_score_status=status,
+                    explanation=f"Retry endpoint error: {str(error)[:500]}",
+                    score_status="retry_endpoint_error",
+                )
+            else:
+                record.update(
+                    ai_adoption_score=pd.NA,
+                    explanation=f"Endpoint error: {str(error)[:500]}",
+                    initial_score_status=status,
+                    score_status=status,
+                )
             continue
 
         # Successful responses still need JSON parsing and validation.
@@ -1019,6 +1071,29 @@ def apply_bulk_results(
             response_body = result_body
         raw_text = extract_text_from_response(response_body)
         score, explicit_operational_ai, explanation, status, raw_json = parse_model_output(raw_text)
+        if is_retry:
+            record["retry_score_status"] = status
+            if status == "ok":
+                final_status = "prefilter_audit_ok_after_retry" if record.get("prefilter_audit_sample") else "ok_after_retry"
+                record.update(
+                    ai_adoption_score=score,
+                    explicit_operational_ai=explicit_operational_ai,
+                    explanation=explanation,
+                    score_status=final_status,
+                    raw_json_sha256=sha256_text(raw_json) if raw_json else "",
+                )
+                if save_raw_json:
+                    record["raw_json"] = raw_json
+            else:
+                record.update(
+                    explanation=explanation,
+                    score_status=f"retry_{status}",
+                    raw_json_sha256=sha256_text(raw_json) if raw_json else "",
+                )
+                if save_raw_json:
+                    record["raw_json"] = raw_json
+            continue
+
         if record.get("prefilter_audit_sample") and status == "ok":
             status = "prefilter_audit_ok"
 
@@ -1026,6 +1101,7 @@ def apply_bulk_results(
             ai_adoption_score=score,
             explicit_operational_ai=explicit_operational_ai,
             explanation=explanation,
+            initial_score_status=status,
             score_status=status,
             raw_json_sha256=sha256_text(raw_json) if raw_json else "",
         )
@@ -1073,8 +1149,11 @@ def summarize_output(
         "n_unique_cik": int(out_df["cik"].nunique()) if not out_df.empty else 0,
         "n_llm_called": int(out_df["llm_called"].sum()) if not out_df.empty else 0,
         "n_ok": int((out_df["score_status"] == "ok").sum()) if not out_df.empty else 0,
+        "n_ok_after_retry": int((out_df["score_status"] == "ok_after_retry").sum()) if not out_df.empty else 0,
+        "n_prefilter_audit_ok_after_retry": int((out_df["score_status"] == "prefilter_audit_ok_after_retry").sum()) if not out_df.empty else 0,
         "n_prefilter_audit_ok": int((out_df["score_status"] == "prefilter_audit_ok").sum()) if not out_df.empty else 0,
         "n_prefilter_zero": int((out_df["score_status"] == "prefilter_zero_no_keyword").sum()) if not out_df.empty else 0,
+        "n_retry_attempted": int(out_df["retry_attempted"].sum()) if not out_df.empty and "retry_attempted" in out_df.columns else 0,
         "n_missing_item1": int((~out_df["has_item1"]).sum()) if not out_df.empty else 0,
         "n_missing_item7": int((~out_df["has_item7"]).sum()) if not out_df.empty else 0,
         "status_counts": out_df["score_status"].value_counts(dropna=False).to_dict() if not out_df.empty else {},
