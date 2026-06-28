@@ -60,6 +60,10 @@ po/*~
 # Project folder
 data/*
 cache/*
+figure/*
+output/*
+external/*
+code/main/2. get_ai_adoption/llm_score/__pycache__/
 
 # RStudio Connect folder
 rsconnect/
