@@ -4,7 +4,7 @@ This document records the methodology for the filing-level AI adoption process i
 
 ## Summary
 
-The pipeline estimates firm-level AI adoption from SEC Form 10-K disclosures. It reads EDGAR extract chunks, converts Item 1 and Item 7 text into one row per filing, optionally filters to a research lookup of `cik` and `year`, extracts a short AI-relevant excerpt, and sends that excerpt to a Data Workspace SageMaker endpoint.
+The pipeline estimates firm-level AI adoption from SEC Form 10-K disclosures. It reads EDGAR extract chunks, converts Item 1 and Item 7 text into one row per filing, optionally filters to a research lookup of `cik` and `year`, extracts a short AI-relevant filing text section, and sends that filing text to a Data Workspace SageMaker endpoint.
 
 The model now returns one ordinal adoption code, from which the pipeline derives:
 
@@ -164,7 +164,7 @@ item7_text
 combined_text
 ```
 
-The model receives one combined excerpt per filing, not separate Item 1 and Item 7 labels.
+The model receives one combined filing text section per filing, not separate Item 1 and Item 7 labels.
 
 The output also records:
 
@@ -199,7 +199,7 @@ lookup_csv
 
 ## Text Selection For The LLM
 
-Full 10-K filings can be very long. The process does not send the whole filing to the model. Instead, it extracts a short excerpt from the combined Item 1 and Item 7 text.
+Full 10-K filings can be very long. The process does not send the whole filing to the model. Instead, it extracts a short filing text section from the combined Item 1 and Item 7 text.
 
 The snippet extraction logic:
 
@@ -286,12 +286,12 @@ The prompt is designed for small instruct models such as `llama-3-3b`. It follow
 
 - keep the task zero-shot and explicit
 - put the main decision rule near the top
-- separate the binary decision from the intensity classification
+- use one ordinal classification code and derive the binary adoption variable from it
 - use short, structured JSON output
 - avoid long reasoning instructions and avoid chain-of-thought
 - define what does not count as adoption
 
-The prompt explicitly tells the model that the excerpt comes from:
+The prompt explicitly tells the model that the filing text comes from:
 
 ```text
 Item 1 (Business)
@@ -330,10 +330,10 @@ Positive clues include statements that the firm uses AI or ML to:
 Level meanings:
 
 ```text
-none = no evidence the firm uses AI in its own products, services, or internal operations
+none = no explicit evidence of AI adoption in the filing text
 low = one narrow or early deployed operational use case
 medium = clear operational use in more than one area or in an important business function
-high = AI is deeply embedded, used across multiple important functions, or core to the business
+high = AI is fundamental to the firm's core business model and competitive functioning
 ```
 
 The production scoring prompt asks only for the single field needed for labeling:
@@ -373,7 +373,7 @@ Current default generation setting:
 --max-new-tokens 60
 ```
 
-This limits response length. Filing excerpt length is controlled separately by `--max-prompt-chars`.
+This limits response length. Filing text length is controlled separately by `--max-prompt-chars`.
 
 ## Model Output Schema
 

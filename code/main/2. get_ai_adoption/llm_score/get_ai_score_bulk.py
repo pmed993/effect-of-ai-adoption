@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Bulk LLM labeling for filing-level AI adoption.
+"""Bulk LLM classification for filing-level AI adoption.
 
 The process estimates firm-level AI adoption from SEC Form 10-K disclosures.
 It reads EDGAR extract chunks from the Data Workspace team S3 folder, 
 converts Item 1 and Item 7 text into one row per filing,
 optionally filters to a research lookup of `cik` and `year`, 
-and sends relevant filing snippets to a Data Workspace SageMaker Llama endpoint.
+and sends relevant filing text sections to a Data Workspace SageMaker Llama endpoint.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ import ai_adoption_utils as u
 # It also checks that numeric options are sensible before the process starts.
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
-        description="Label selected EDGAR chunk files for AI adoption using Data Workspace bulk async SageMaker invocation."
+        description="Classify selected EDGAR chunk files for AI adoption using Data Workspace bulk async SageMaker invocation."
     )
 
     # Data Workspace S3 location. In normal use, the team folder is enough.
@@ -64,7 +64,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
     # LLM and bulk invocation settings.
     ap.add_argument("--model-label", choices=["llama", "mistral"], default="llama", help="Short label used for endpoint defaulting and output naming.")
-    ap.add_argument("--endpoint", default=None, help="Overrise SageMaker endpoint. If omitted, uses the default for --model-label.")
+    ap.add_argument("--endpoint", default=None, help="Override SageMaker endpoint. If omitted, uses the default for --model-label.")
     ap.add_argument("--max-prompt-chars", type=int, default=1500)
     ap.add_argument("--sentence-window", type=int, default=1)
     ap.add_argument("--temperature", type=float, default=0.0)
@@ -213,7 +213,7 @@ def process_chunk(
                 if records[item["record_index"]].get("score_status") in u.RETRYABLE_PARSE_STATUSES
             }
             if retry_pending:
-                logging.info("Retrying %d parser-failure rows for %s with stricter JSON prompt", len(retry_pending), ref.name)
+                logging.info("Retrying %d parser-failure rows for %s with stricter JSON retry prompt", len(retry_pending), ref.name)
                 retry_invoke_args = u.iter_bulk_invoke_args(
                     retry_pending,
                     endpoint=args.endpoint,

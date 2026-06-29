@@ -641,13 +641,13 @@ def _ai_prompt_rules() -> str:
     """Return the shared ordinal adoption-labeling rules used in both prompts."""
 
     return (
-        "Return one ordinal code for the firm's disclosed AI adoption in the filing excerpt.\n"
+        "Return one ordinal AI adoption classification code for the firm's filing text.\n"
         "Use this scale:\n"
-        "0 = none: no evidence the firm uses AI in its own products, services, or internal operations\n"
+        "0 = none: no explicit evidence of AI adoption in the filing text\n"
         "1 = low: one narrow or early deployed operational AI use case\n"
         "2 = medium: clear operational AI use in more than one area or in an important business function\n"
-        "3 = high: AI is deeply embedded, used across multiple important functions, or core to the business\n\n"
-        "Count as adoption when the excerpt describes the firm's own use of AI, machine learning, generative AI, "
+        "3 = high: AI is fundamental to the firm's core business model and competitive functioning\n\n"
+        "Count as adoption when the filing text describes the firm's own use of AI, machine learning, generative AI, "
         "LLMs, computer vision, NLP, or similar technologies.\n"
         "Examples include improving products, personalizing services, supporting decisions, automating tasks, "
         "forecasting outcomes, detecting fraud, making recommendations, designing products, or improving operations.\n\n"
@@ -660,17 +660,22 @@ def _ai_prompt_rules() -> str:
 
 
 def build_ai_prompt(text: str) -> str:
-    """Build the main LLM prompt for one filing excerpt."""
+    """Build the main LLM prompt for one filing text."""
 
     return (
-        "You are labeling firm AI adoption from a Form 10-K excerpt.\n"
-        "The excerpt comes from Item 1 (Business) and Item 7 (MD&A).\n\n"
-        "Return JSON only with key: ai_level_code.\n\n"
+        "You are labeling firm AI adoption from Form 10-K filing text.\n"
+        "The filing text comes from Item 1 (Business) and Item 7 (MD&A).\n\n"
         f"{_ai_prompt_rules()}\n"
-        'Return exactly one JSON object and nothing else.\n'
-        'Use this JSON schema: {"ai_level_code": 0_or_1_or_2_or_3}\n\n'
-        "Excerpt:\n"
-        f"{text}"
+        "FILING TEXT TO EVALUATE:\n"
+        "<filing_text>\n"
+        f"{text}\n"
+        "</filing_text>\n\n"
+        "Now produce the AI adoption classification code for the filing text above.\n"
+        "Return ONLY one valid JSON object and no other text.\n"
+        "The JSON object must have this shape:\n"
+        '{"ai_level_code": 0_or_1_or_2_or_3}\n'
+        "Do not copy the template. Replace 0_or_1_or_2_or_3 with one integer: 0, 1, 2, or 3.\n"
+        "Do not return markdown, bullets, headings, or any text before or after the JSON."
     )
 
 
@@ -678,14 +683,18 @@ def build_ai_retry_prompt(text: str) -> str:
     """Build a stricter JSON-only retry prompt with the same adoption rule."""
 
     return (
-        "Return exactly one valid JSON object on one line. No markdown. No extra text.\n"
-        "Use only this key: ai_level_code.\n"
-        "The excerpt comes from Item 1 (Business) and Item 7 (MD&A).\n\n"
+        "The filing text comes from Item 1 (Business) and Item 7 (MD&A).\n\n"
         f"{_ai_prompt_rules()}\n"
-        'Return JSON only.\n'
-        'Use this JSON schema: {"ai_level_code": 0_or_1_or_2_or_3}\n\n'
-        "Excerpt:\n"
-        f"{text}"
+        "FILING TEXT TO EVALUATE:\n"
+        "<filing_text>\n"
+        f"{text}\n"
+        "</filing_text>\n\n"
+        "Now produce the AI adoption classification code for the filing text above.\n"
+        "Return ONLY one valid JSON object and no other text.\n"
+        "The JSON object must have this shape:\n"
+        '{"ai_level_code": 0_or_1_or_2_or_3}\n'
+        "Do not copy the template. Replace 0_or_1_or_2_or_3 with one integer: 0, 1, 2, or 3.\n"
+        "Do not return markdown, bullets, headings, or any text before or after the JSON."
     )
 
 
