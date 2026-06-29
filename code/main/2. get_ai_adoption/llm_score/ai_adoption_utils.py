@@ -1,4 +1,4 @@
-"""Utility functions for filing-level AI adoption scoring.
+"""Utility functions for filing-level AI adoption labeling.
 
 Helper functions for S3/Data Workspace access, RDS reading, lookup filtering,
 prompt construction, snippet extraction, model-output parsing, and output formatting.
@@ -25,8 +25,8 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
-SCRIPT_VERSION = "2026-06-28-get_ai_score_bulk-v2"
-PROMPT_VERSION = "get_ai_adoption_v2"
+SCRIPT_VERSION = "2026-06-29-get_ai_score_bulk-v3"
+PROMPT_VERSION = "get_ai_adoption_binary_v1"
 
 DEFAULT_ENDPOINTS = {
     "llama": "jupyterhub-llama-3-3b-instruct-endpoint",
@@ -44,7 +44,7 @@ CHUNK_RE = re.compile(r"^extract_df_chunk_(\d{5})\.rds$")
 WHITESPACE_RE = re.compile(r"\s+")
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[\.\!\?\;])\s+|\n+")
 
-# v2 uses a split dictionary:
+# v3 uses a split dictionary:
 # - trigger terms: explicit AI language that can justify an LLM call
 # - ranking-only terms: broader adjacent language that can help snippet selection
 #   but should not, on their own, trigger a positive AI prefilter hit.
@@ -124,7 +124,7 @@ AI_TRIGGER_KEYWORDS = compile_keyword_patterns(AI_TRIGGER_PATTERNS)
 AI_RANKING_ONLY_KEYWORDS = compile_keyword_patterns(AI_RANKING_ONLY_PATTERNS)
 AI_RANKING_KEYWORDS = compile_keyword_patterns(AI_TRIGGER_PATTERNS + AI_RANKING_ONLY_PATTERNS)
 
-# These words help rank snippets. They do not determine the final score.
+# These words help rank snippets. They do not determine the final label.
 # They only make operational evidence more likely to be sent to the LLM.
 OPERATIONAL_CUES = re.compile(
     r"(?i)\b("
@@ -146,14 +146,21 @@ LOW_VALUE_CUES = re.compile(
     r")\b"
 )
 
-RETRYABLE_SCORE_STATUSES = {
+AI_ADOPTION_LEVEL_CODES = {
+    "none": 0,
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+}
+
+RETRYABLE_PARSE_STATUSES = {
     "missing_output",
     "no_json_found",
     "no_valid_score_json",
-    "non_boolean_gate",
-    "non_numeric_score",
-    "score_out_of_bounds",
-    "positive_gate_below_minimum",
+    "non_binary_adoption",
+    "invalid_adoption_level",
+    "invalid_level_for_non_adopter",
+    "missing_level_for_adopter",
 }
 
 
@@ -240,6 +247,9 @@ def chunk_name_from_id(chunk_id: int) -> str:
 def preferred_output_columns(save_raw_json: bool) -> list[str]:
     """Return the preferred CSV column order."""
 
+    # Status fields keep the historical "score" wording for compatibility with
+    # older QA outputs and merge scripts, even though the main outputs are now
+    # binary and ordinal labels.
     cols = [
         "run_id",
         "script_version",
@@ -266,8 +276,9 @@ def preferred_output_columns(save_raw_json: bool) -> list[str]:
         "initial_score_status",
         "retry_attempted",
         "retry_score_status",
-        "ai_adoption_score",
-        "explicit_operational_ai",
+        "ai_adopted",
+        "ai_adoption_level",
+        "ai_adoption_level_code",
         "explanation",
         "score_status",
         "endpoint",
@@ -438,7 +449,7 @@ def long_to_wide(df: pd.DataFrame, include_amended: bool) -> pd.DataFrame:
     """
     Convert long-format Item 1 / Item 7 rows into one row per filing.
 
-    The scoring methodology works at filing level, so each accession number
+    The labeling methodology works at filing level, so each accession number
     needs its Item 1 and Item 7 text side by side.
     """
 
@@ -455,7 +466,7 @@ def long_to_wide(df: pd.DataFrame, include_amended: bool) -> pd.DataFrame:
     work["cik"] = work["cik"].astype(str).str.strip()
     work["text"] = work["text"].apply(normalize_whitespace)
 
-    # Keep annual filings and the two disclosure sections used in the score.
+    # Keep annual filings and the two disclosure sections used in the label.
     keep_forms = {"10-K", "10-K/A"} if include_amended else {"10-K"}
     work = work[work["form_type"].isin(keep_forms)]
     work = work[work["item"].isin(["item1", "item7"])]
@@ -620,43 +631,46 @@ def extract_relevant_snippets(full_text: str, max_chars: int, sentence_window: i
 # ---------------------------------------------------------------------------
 # Prompt construction
 # ---------------------------------------------------------------------------
-# The scoring instructions are kept in one function so prompt changes are easy
+# The labeling instructions are kept in one function so prompt changes are easy
 # to review and version through PROMPT_VERSION.
 def build_ai_prompt(text: str) -> str:
-    """Build the main v2 LLM prompt for one filing excerpt."""
+    """Build the main v3 LLM prompt for one filing excerpt."""
 
     return (
-        "You are scoring firm AI adoption from a Form 10-K excerpt.\n"
+        "You are labeling firm AI adoption from a Form 10-K excerpt.\n"
         "The excerpt comes from Item 1 (Business) and Item 7 (MD&A).\n\n"
-        "Return JSON only with keys: explicit_operational_ai, score, explanation.\n\n"
-        "Task:\n"
-        "Decide whether the excerpt gives explicit evidence that the firm itself already uses AI in its own products, services, "
-        "or internal operations during the filing period.\n"
-        "Base the decision only on the excerpt provided.\n\n"
-        "Count as AI adoption only if the excerpt explicitly describes the firm's own use of AI technologies such as "
+        "Return JSON only with keys: ai_adopted, ai_adoption_level, explanation.\n\n"
+        "Decision rule:\n"
+        "Set ai_adopted=1 only if the excerpt gives explicit evidence that the firm itself already uses AI in its own products, "
+        "services, or internal operations during the filing period.\n"
+        "Otherwise set ai_adopted=0.\n"
+        "Base the label only on the excerpt provided.\n\n"
+        "Count as adoption only if the excerpt explicitly describes the firm's own use of AI technologies such as "
         "artificial intelligence, machine learning, deep learning, NLP, computer vision, generative AI, LLMs, or similar.\n\n"
         "Do not count the following by themselves:\n"
         "- selling into AI markets or supplying AI customers\n"
         "- AI trends, strategy, opportunity, competition, regulation, or risk\n"
         "- future plans, pilots, experiments, or research\n"
         "- third-party AI without clear operational integration by the firm\n\n"
-        "Scoring rule:\n"
-        "- If explicit_operational_ai=false, score=0.00\n"
-        "- If explicit_operational_ai=true, score must be between 0.11 and 1.00\n\n"
-        "Use this scale when explicit_operational_ai=true:\n"
-        "- 0.11-0.30 narrow or early deployed use\n"
-        "- 0.31-0.50 clear use in some important areas\n"
-        "- 0.51-0.70 use across multiple important functions or products\n"
-        "- 0.71-1.00 AI is deeply embedded or core to the business\n"
-        "\nExplanation:\n"
-        "Write 1-2 sentences explaining the main evidence for the gate and score.\n"
+        "Intensity rule:\n"
+        "Assign ai_adoption_level only after deciding ai_adopted.\n"
+        '- If ai_adopted=0, ai_adoption_level must be "none"\n'
+        '- If ai_adopted=1, ai_adoption_level must be "low", "medium", or "high"\n'
+        '- low = one narrow or early deployed operational use case\n'
+        '- medium = clear operational use in more than one area or in an important business function\n'
+        '- high = AI is deeply embedded, used across multiple important functions, or core to the business\n\n'
+        "Output rules:\n"
+        "- ai_adopted must be 0 or 1\n"
+        '- ai_adoption_level must be one of "none", "low", "medium", or "high"\n'
+        "Explanation:\n"
+        "Write 1-2 sentences explaining the main evidence for the label.\n"
         "Do not give step-by-step reasoning.\n\n"
-        "FILING EXCERPT:\n"
-        "<filing_text>\n"
+        "### Filing excerpt\n"
+        '"""\n'
         f"{text}\n"
-        "</filing_text>\n\n"
+        '"""\n\n'
         "Return exactly one JSON object and nothing else:\n"
-        "{\"explicit_operational_ai\": true_or_false, \"score\": NUMBER_BETWEEN_0_AND_1, \"explanation\": \"ONE_SHORT_PARAGRAPH\"}\n"
+        '{"ai_adopted": 0_or_1, "ai_adoption_level": "none_or_low_or_medium_or_high", "explanation": "ONE_OR_TWO_SENTENCES"}\n'
         "Replace the placeholders with actual JSON values."
     )
 
@@ -667,17 +681,19 @@ def build_ai_retry_prompt(text: str) -> str:
     return (
         "Return exactly one valid JSON object. No markdown. No extra text.\n"
         "This Form 10-K excerpt comes from Item 1 (Business) and Item 7 (MD&A).\n"
-        "Decide whether it shows the firm itself already using explicit AI "
+        "Set ai_adopted=1 only if the firm itself already uses explicit AI "
         "(artificial intelligence, machine learning, deep learning, NLP, computer vision, generative AI, LLMs) "
         "in its own products, services, or internal operations during the filing period.\n"
+        "Otherwise set ai_adopted=0.\n"
         "Do not count AI markets, AI customers, trends, strategy, risks, future plans, pilots, research, or third-party AI without integration.\n"
-        "If explicit_operational_ai=false, score=0.00.\n"
-        "If explicit_operational_ai=true, score must be 0.11 to 1.00.\n"
-        "Explanation should be 1-2 sentences only.\n\n"
-        "<filing_text>\n"
+        'If ai_adopted=0, ai_adoption_level must be "none".\n'
+        'If ai_adopted=1, ai_adoption_level must be "low", "medium", or "high".\n'
+        "Explanation must be 1-2 sentences.\n\n"
+        "### Filing excerpt\n"
+        '"""\n'
         f"{text}\n"
-        "</filing_text>\n\n"
-        "{\"explicit_operational_ai\": true_or_false, \"score\": NUMBER_BETWEEN_0_AND_1, \"explanation\": \"ONE_SHORT_PARAGRAPH\"}\n"
+        '"""\n\n'
+        '{"ai_adopted": 0_or_1, "ai_adoption_level": "none_or_low_or_medium_or_high", "explanation": "ONE_OR_TWO_SENTENCES"}\n'
         "Replace the placeholders with actual JSON values."
     )
 
@@ -687,7 +703,7 @@ def build_ai_retry_prompt(text: str) -> str:
 # ---------------------------------------------------------------------------
 # Model endpoints can return strings, dictionaries, lists, prompt echoes, or
 # repeated JSON. These helpers extract the generated text and then parse the
-# last valid JSON score object.
+# last valid JSON label object.
 def extract_text_from_response(resp: Any) -> str:
     """Extract generated text from common endpoint response shapes."""
 
@@ -760,47 +776,83 @@ def extract_balanced_json_objects(text: str) -> list[str]:
     return objects
 
 
-def parse_score_object(obj: Any) -> tuple[Any, Any, str, str]:
-    """Validate one parsed JSON object as a gated score/explanation response."""
+def parse_ai_adopted(value: Any) -> Any:
+    """Parse ai_adopted into an integer 0/1 when possible."""
+
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int) and value in {0, 1}:
+        return int(value)
+    if isinstance(value, float) and value in {0.0, 1.0}:
+        return int(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes"}:
+            return 1
+        if lowered in {"0", "false", "no"}:
+            return 0
+    return pd.NA
+
+
+def parse_adoption_level(value: Any) -> str:
+    """Normalize ai_adoption_level to one of none/low/medium/high."""
+
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    lowered = str(value).strip().lower()
+    alias_map = {
+        "none": "none",
+        "no adoption": "none",
+        "non-adopter": "none",
+        "non adopter": "none",
+        "0": "none",
+        "low": "low",
+        "1": "low",
+        "medium": "medium",
+        "med": "medium",
+        "2": "medium",
+        "high": "high",
+        "3": "high",
+    }
+    return alias_map.get(lowered, "")
+
+
+def adoption_level_code(level: Any) -> Any:
+    """Return the integer code for a normalized adoption level."""
+
+    normalized = str(level).strip().lower()
+    if normalized in AI_ADOPTION_LEVEL_CODES:
+        return AI_ADOPTION_LEVEL_CODES[normalized]
+    return pd.NA
+
+
+def parse_adoption_object(obj: Any) -> tuple[Any, Any, str, str]:
+    """Validate one parsed JSON object as a binary-first adoption response."""
 
     if not isinstance(obj, dict):
         return pd.NA, pd.NA, "Parsed JSON was not an object.", "json_not_object"
 
-    explicit_operational_ai = obj.get("explicit_operational_ai")
-    if isinstance(explicit_operational_ai, str):
-        lowered = explicit_operational_ai.strip().lower()
-        if lowered in {"true", "yes"}:
-            explicit_operational_ai = True
-        elif lowered in {"false", "no"}:
-            explicit_operational_ai = False
-    if not isinstance(explicit_operational_ai, bool):
-        return pd.NA, pd.NA, "explicit_operational_ai field was not a boolean.", "non_boolean_gate"
+    ai_adopted = parse_ai_adopted(obj.get("ai_adopted"))
+    if pd.isna(ai_adopted):
+        return pd.NA, pd.NA, "ai_adopted was not a valid binary value.", "non_binary_adoption"
 
-    try:
-        score = float(obj.get("score"))
-    except Exception:
-        return pd.NA, explicit_operational_ai, "Score field was not numeric.", "non_numeric_score"
-    if not 0.0 <= score <= 1.0:
-        return pd.NA, explicit_operational_ai, "Score was outside [0,1].", "score_out_of_bounds"
-    if explicit_operational_ai and score < 0.11:
-        return (
-            pd.NA,
-            explicit_operational_ai,
-            "explicit_operational_ai was true but score was below the 0.11 minimum.",
-            "positive_gate_below_minimum",
-        )
+    ai_adoption_level = parse_adoption_level(obj.get("ai_adoption_level"))
+    if not ai_adoption_level:
+        return pd.NA, pd.NA, "ai_adoption_level was not one of none/low/medium/high.", "invalid_adoption_level"
+    if ai_adopted == 0 and ai_adoption_level != "none":
+        return pd.NA, pd.NA, 'ai_adopted was 0 but ai_adoption_level was not "none".', "invalid_level_for_non_adopter"
+    if ai_adopted == 1 and ai_adoption_level not in {"low", "medium", "high"}:
+        return pd.NA, pd.NA, 'ai_adopted was 1 but ai_adoption_level was not low/medium/high.', "missing_level_for_adopter"
 
     explanation = obj.get("explanation", "")
     if not isinstance(explanation, str):
         explanation = "" if explanation is None else str(explanation)
     explanation = " ".join(explanation.split()).strip() or "No explanation returned."
-    if not explicit_operational_ai:
-        score = 0.0
-    return score, explicit_operational_ai, explanation, "ok"
+    return int(ai_adopted), ai_adoption_level, explanation, "ok"
 
 
 def parse_model_output(text: str) -> tuple[Any, Any, str, str, str]:
-    """Parse raw model output into score, gate, explanation, status, and raw JSON."""
+    """Parse raw model output into ai_adopted, level, explanation, status, and raw JSON."""
 
     if not text:
         return pd.NA, pd.NA, "No model output returned.", "missing_output", ""
@@ -814,11 +866,11 @@ def parse_model_output(text: str) -> tuple[Any, Any, str, str, str]:
             obj = json.loads(candidate)
         except Exception:
             continue
-        score, explicit_operational_ai, explanation, status = parse_score_object(obj)
+        ai_adopted, ai_adoption_level, explanation, status = parse_adoption_object(obj)
         if status == "ok":
-            return score, explicit_operational_ai, explanation, "ok", candidate
+            return ai_adopted, ai_adoption_level, explanation, "ok", candidate
 
-    return pd.NA, pd.NA, "Model output did not contain usable score JSON.", "no_valid_score_json", candidates[-1]
+    return pd.NA, pd.NA, "Model output did not contain usable adoption JSON.", "no_valid_score_json", candidates[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -826,7 +878,7 @@ def parse_model_output(text: str) -> tuple[Any, Any, str, str, str]:
 # ---------------------------------------------------------------------------
 # These helpers create the output row for each filing, apply empty-text and
 # prefilter rules, and build prompts only for filings that need the LLM.
-def base_score_record(
+def base_output_record(
     row: pd.Series,
     *,
     run_id: str,
@@ -836,7 +888,7 @@ def base_score_record(
     prefilter_mode: str,
     prefilter_audit_sample: bool,
 ) -> dict[str, Any]:
-    """Create the standard output record before scoring decisions are applied."""
+    """Create the standard output record before labeling decisions are applied."""
 
     year = row.get("year", pd.NA)
     year = int(year) if pd.notna(year) else pd.NA
@@ -866,8 +918,9 @@ def base_score_record(
         "initial_score_status": "",
         "retry_attempted": False,
         "retry_score_status": "",
-        "ai_adoption_score": pd.NA,
-        "explicit_operational_ai": pd.NA,
+        "ai_adopted": pd.NA,
+        "ai_adoption_level": pd.NA,
+        "ai_adoption_level_code": pd.NA,
         "explanation": "",
         "score_status": "",
         "endpoint": endpoint,
@@ -959,8 +1012,8 @@ def prepare_records_and_prompts(
             if audit_sample:
                 audit_calls += 1
 
-        # Start with the standard output fields, then fill in the scoring path.
-        record = base_score_record(
+        # Start with the standard output fields, then fill in the labeling path.
+        record = base_output_record(
             row,
             run_id=run_id,
             source_label=source_label,
@@ -975,7 +1028,9 @@ def prepare_records_and_prompts(
         # Empty filings get a transparent zero without an LLM call.
         if not full_text:
             record.update(
-                ai_adoption_score=0.0,
+                ai_adopted=0,
+                ai_adoption_level="none",
+                ai_adoption_level_code=0,
                 explanation="No text was available after combining Item 1 and Item 7.",
                 score_status="empty_text_zero",
                 prefilter_decision="empty_text",
@@ -984,8 +1039,10 @@ def prepare_records_and_prompts(
         # in audit mode.
         elif keyword_hits == 0 and prefilter_mode in {"hard_zero", "audit"} and not audit_sample:
             record.update(
-                ai_adoption_score=0.0,
-                explanation="No explicit AI trigger keywords were detected by the v2 prefilter, so the filing was assigned zero without an LLM call.",
+                ai_adopted=0,
+                ai_adoption_level="none",
+                ai_adoption_level_code=0,
+                explanation="No explicit AI trigger keywords were detected by the v3 prefilter, so the filing was labeled as a non-adopter without an LLM call.",
                 score_status="prefilter_zero_no_keyword",
                 prefilter_decision=f"{prefilter_mode}_zero_no_keyword",
             )
@@ -1026,8 +1083,8 @@ def prepare_records_and_prompts(
 # Bulk result handling
 # ---------------------------------------------------------------------------
 # This function takes the iterator returned by bulk_invoke_endpoint_async,
-# matches each result back to the correct filing row, and fills in the score
-# status, score, explanation, and raw JSON hashes.
+# matches each result back to the correct filing row, and fills in the label
+# status, adoption outputs, explanation, and raw JSON hashes.
 def apply_bulk_results(
     records: list[dict[str, Any]],
     pending: dict[str, dict[str, Any]],
@@ -1068,7 +1125,9 @@ def apply_bulk_results(
                 )
             else:
                 record.update(
-                    ai_adoption_score=pd.NA,
+                    ai_adopted=pd.NA,
+                    ai_adoption_level=pd.NA,
+                    ai_adoption_level_code=pd.NA,
                     explanation=f"Endpoint error: {str(error)[:500]}",
                     initial_score_status=status,
                     score_status=status,
@@ -1081,14 +1140,15 @@ def apply_bulk_results(
         except Exception:
             response_body = result_body
         raw_text = extract_text_from_response(response_body)
-        score, explicit_operational_ai, explanation, status, raw_json = parse_model_output(raw_text)
+        ai_adopted, ai_adoption_level, explanation, status, raw_json = parse_model_output(raw_text)
         if is_retry:
             record["retry_score_status"] = status
             if status == "ok":
                 final_status = "prefilter_audit_ok_after_retry" if record.get("prefilter_audit_sample") else "ok_after_retry"
                 record.update(
-                    ai_adoption_score=score,
-                    explicit_operational_ai=explicit_operational_ai,
+                    ai_adopted=ai_adopted,
+                    ai_adoption_level=ai_adoption_level,
+                    ai_adoption_level_code=adoption_level_code(ai_adoption_level),
                     explanation=explanation,
                     score_status=final_status,
                     raw_json_sha256=sha256_text(raw_json) if raw_json else "",
@@ -1109,8 +1169,9 @@ def apply_bulk_results(
             status = "prefilter_audit_ok"
 
         record.update(
-            ai_adoption_score=score,
-            explicit_operational_ai=explicit_operational_ai,
+            ai_adopted=ai_adopted,
+            ai_adoption_level=ai_adoption_level,
+            ai_adoption_level_code=adoption_level_code(ai_adoption_level) if pd.notna(ai_adopted) else pd.NA,
             explanation=explanation,
             initial_score_status=status,
             score_status=status,
@@ -1142,7 +1203,8 @@ def summarize_output(
 ) -> dict[str, Any]:
     """Build the per-chunk JSON summary."""
 
-    score_series = pd.to_numeric(out_df["ai_adoption_score"], errors="coerce") if not out_df.empty else pd.Series(dtype=float)
+    adopted_series = pd.to_numeric(out_df["ai_adopted"], errors="coerce") if not out_df.empty else pd.Series(dtype=float)
+    level_code_series = pd.to_numeric(out_df["ai_adoption_level_code"], errors="coerce") if not out_df.empty else pd.Series(dtype=float)
     return {
         "run_id": run_id,
         "chunk_name": chunk_name,
@@ -1159,6 +1221,11 @@ def summarize_output(
         "n_filings": int(len(out_df)),
         "n_unique_cik": int(out_df["cik"].nunique()) if not out_df.empty else 0,
         "n_llm_called": int(out_df["llm_called"].sum()) if not out_df.empty else 0,
+        "n_ai_adopted": int((adopted_series == 1).sum()) if not out_df.empty else 0,
+        "n_ai_non_adopted": int((adopted_series == 0).sum()) if not out_df.empty else 0,
+        "n_level_low": int((out_df["ai_adoption_level"] == "low").sum()) if not out_df.empty else 0,
+        "n_level_medium": int((out_df["ai_adoption_level"] == "medium").sum()) if not out_df.empty else 0,
+        "n_level_high": int((out_df["ai_adoption_level"] == "high").sum()) if not out_df.empty else 0,
         "n_ok": int((out_df["score_status"] == "ok").sum()) if not out_df.empty else 0,
         "n_ok_after_retry": int((out_df["score_status"] == "ok_after_retry").sum()) if not out_df.empty else 0,
         "n_prefilter_audit_ok_after_retry": int((out_df["score_status"] == "prefilter_audit_ok_after_retry").sum()) if not out_df.empty else 0,
@@ -1168,8 +1235,7 @@ def summarize_output(
         "n_missing_item1": int((~out_df["has_item1"]).sum()) if not out_df.empty else 0,
         "n_missing_item7": int((~out_df["has_item7"]).sum()) if not out_df.empty else 0,
         "status_counts": out_df["score_status"].value_counts(dropna=False).to_dict() if not out_df.empty else {},
-        "score_min": None if score_series.dropna().empty else float(score_series.min()),
-        "score_mean": None if score_series.dropna().empty else float(score_series.mean()),
-        "score_max": None if score_series.dropna().empty else float(score_series.max()),
+        "ai_adopted_mean": None if adopted_series.dropna().empty else float(adopted_series.mean()),
+        "ai_adoption_level_code_mean": None if level_code_series.dropna().empty else float(level_code_series.mean()),
         "output_csv": output_csv,
     }

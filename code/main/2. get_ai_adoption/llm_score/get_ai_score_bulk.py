@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Bulk LLM scoring for filing-level AI adoption.
+"""Bulk LLM labeling for filing-level AI adoption.
 
-The process estimates firm-level AI adoption from SEC Form 10-K disclosures. 
+The process estimates firm-level AI adoption from SEC Form 10-K disclosures.
 It reads EDGAR extract chunks from the Data Workspace team S3 folder, 
 converts Item 1 and Item 7 text into one row per filing,
 optionally filters to a research lookup of `cik` and `year`, 
@@ -29,7 +29,7 @@ import ai_adoption_utils as u
 # It also checks that numeric options are sensible before the process starts.
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
-        description="Score selected EDGAR chunk files for AI adoption using Data Workspace bulk async SageMaker invocation."
+        description="Label selected EDGAR chunk files for AI adoption using Data Workspace bulk async SageMaker invocation."
     )
 
     # Data Workspace S3 location. In normal use, the team folder is enough.
@@ -47,8 +47,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     # QA and sample-filtering options.
     ap.add_argument("--list-only", action="store_true", help="List available chunks and exit.")
     ap.add_argument("--max-chunks", type=int, default=0, help="Cap selected chunks after selection.")
-    ap.add_argument("--max-filings-per-chunk", type=int, default=0, help="QA option: score only first N matched filings per chunk.")
-    ap.add_argument("--lookup-csv", default=None, help="CSV with cik and year columns. Only matching filings are scored.")
+    ap.add_argument("--max-filings-per-chunk", type=int, default=0, help="QA option: label only first N matched filings per chunk.")
+    ap.add_argument("--lookup-csv", default=None, help="CSV with cik and year columns. Only matching filings are labeled.")
     ap.add_argument("--include-amended", action="store_true", help="Include 10-K/A rows. Default keeps only 10-K.")
 
     # Prefilter options decide when no-keyword filings should skip the LLM.
@@ -74,8 +74,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--no-retry-pass", action="store_true", help="Disable the automatic second-pass retry for parser failures.")
 
     # Output and logging settings.
-    ap.add_argument("--save-raw-json", action="store_true", help="Store parsed raw model JSON in the score CSV.")
-    ap.add_argument("--skip-existing", action="store_true", help="Skip chunks whose score CSV and summary JSON already exist.")
+    ap.add_argument("--save-raw-json", action="store_true", help="Store parsed raw model JSON in the output CSV.")
+    ap.add_argument("--skip-existing", action="store_true", help="Skip chunks whose output CSV and summary JSON already exist.")
     ap.add_argument("--flat-output", action="store_true", help="Write directly to --out-dir instead of --out-dir/RUN_ID.")
     ap.add_argument("--out-dir", default=os.path.join(os.getcwd(), "output", "llama_scores"))
     ap.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -158,7 +158,7 @@ def process_chunk(
     wide = u.long_to_wide(raw, include_amended=args.include_amended)
 
     # Keep only cik/year pairs that appear in the research lookup.
-    # This happens before any LLM calls, so irrelevant filings are never scored.
+    # This happens before any LLM calls, so irrelevant filings are never labeled.
     n_before_lookup = len(wide)
     wide = u.filter_to_lookup(wide, lookup)
     n_after_lookup = len(wide)
@@ -210,7 +210,7 @@ def process_chunk(
                     "prompt": item["retry_prompt"],
                 }
                 for linked_obj, item in pending.items()
-                if records[item["record_index"]].get("score_status") in u.RETRYABLE_SCORE_STATUSES
+                if records[item["record_index"]].get("score_status") in u.RETRYABLE_PARSE_STATUSES
             }
             if retry_pending:
                 logging.info("Retrying %d parser-failure rows for %s with stricter JSON prompt", len(retry_pending), ref.name)
@@ -235,7 +235,7 @@ def process_chunk(
     else:
         logging.info("No LLM calls needed for %s", ref.name)
 
-    # Write the filing-level score CSV.
+    # Write the filing-level output CSV.
     out_df = u.order_columns(pd.DataFrame(records), args.save_raw_json)
     out_df.to_csv(out_csv, index=False)
 
@@ -268,6 +268,7 @@ def process_chunk(
         "n_filings_after_lookup": n_after_lookup,
         "n_filings": int(len(out_df)),
         "n_llm_called": int(out_df["llm_called"].sum()) if not out_df.empty else 0,
+        "n_ai_adopted": int((pd.to_numeric(out_df["ai_adopted"], errors="coerce") == 1).sum()) if not out_df.empty else 0,
         "n_ok": int((out_df["score_status"] == "ok").sum()) if not out_df.empty else 0,
         "n_ok_after_retry": int((out_df["score_status"] == "ok_after_retry").sum()) if not out_df.empty else 0,
         "n_retry_attempted": int(out_df["retry_attempted"].sum()) if not out_df.empty and "retry_attempted" in out_df.columns else 0,

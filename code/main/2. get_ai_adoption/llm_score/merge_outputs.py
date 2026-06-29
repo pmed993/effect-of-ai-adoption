@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Merge chunk-level LLM score outputs into filing-level and firm-year datasets.
+"""Merge chunk-level LLM label outputs into filing-level and firm-year datasets.
 
-This script is designed for the bulk AI-adoption scoring workflow.
+This script is designed for the bulk AI-adoption labeling workflow.
 It:
 1. collects all chunk CSVs under a model output folder,
 2. builds a filing-level master dataset,
-3. optionally merges in a second model's scores,
+3. optionally merges in a second model's labels,
 4. optionally re-filters the merged outputs to a research cik-year lookup,
 5. writes one all-chunk merged output file,
 6. builds a firm-year panel for Compustat joins, and
@@ -49,6 +49,13 @@ FILING_BASE_COLS = [
     "snippet_sha256",
 ]
 
+ADOPTION_LEVEL_CODES = {
+    "none": 0,
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+}
+
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Merge AI-adoption chunk outputs into final datasets.")
@@ -64,13 +71,13 @@ def parse_args() -> argparse.Namespace:
         "--filing-duplicate-rule",
         choices=["error", "best_context", "max_llama"],
         default="error",
-        help="How to handle duplicate accession_number rows before building the filing master.",
+        help="How to handle duplicate accession_number rows before building the filing master. max_llama prefers adopted rows and stronger adoption labels.",
     )
     ap.add_argument(
         "--firm-year-rule",
         choices=["error", "first", "last", "max_llama"],
         default="error",
-        help="How to handle duplicate cik-year rows when building the firm-year panel.",
+        help="How to handle duplicate cik-year rows when building the firm-year panel. max_llama prefers adopted rows and stronger adoption labels.",
     )
     ap.add_argument(
         "--compustat-csv",
@@ -168,6 +175,35 @@ def filter_to_lookup(df: pd.DataFrame, lookup: pd.DataFrame | None, label: str) 
     return out
 
 
+def model_priority_columns(df: pd.DataFrame, prefix: str) -> tuple[pd.Series, pd.Series]:
+    """Return adoption and intensity priority series for duplicate resolution."""
+
+    adopted_col = f"{prefix}_ai_adopted"
+    level_code_col = f"{prefix}_ai_adoption_level_code"
+    level_col = f"{prefix}_ai_adoption_level"
+    legacy_score_col = f"{prefix}_score"
+
+    if adopted_col in df.columns:
+        adopted = pd.to_numeric(df[adopted_col], errors="coerce").fillna(-1)
+    elif legacy_score_col in df.columns:
+        legacy_score = pd.to_numeric(df[legacy_score_col], errors="coerce")
+        adopted = legacy_score.gt(0).astype(float).fillna(-1)
+    else:
+        adopted = pd.Series(-1, index=df.index, dtype=float)
+
+    if level_code_col in df.columns:
+        level_code = pd.to_numeric(df[level_code_col], errors="coerce").fillna(-1)
+    elif level_col in df.columns:
+        level_code = df[level_col].astype("string").str.lower().map(ADOPTION_LEVEL_CODES).fillna(-1)
+    elif legacy_score_col in df.columns:
+        legacy_score = pd.to_numeric(df[legacy_score_col], errors="coerce")
+        level_code = legacy_score.fillna(float("-inf"))
+    else:
+        level_code = pd.Series(-1, index=df.index, dtype=float)
+
+    return adopted, level_code
+
+
 def rename_llama_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = ensure_identity_types(df)
     rename_map = {
@@ -179,7 +215,11 @@ def rename_llama_columns(df: pd.DataFrame) -> pd.DataFrame:
         "initial_score_status": "llama_initial_score_status",
         "retry_attempted": "llama_retry_attempted",
         "retry_score_status": "llama_retry_score_status",
-        "ai_adoption_score": "llama_score",
+        "ai_adopted": "llama_ai_adopted",
+        # Legacy compatibility for older chunk files.
+        "explicit_operational_ai": "llama_explicit_operational_ai",
+        "ai_adoption_level": "llama_ai_adoption_level",
+        "ai_adoption_level_code": "llama_ai_adoption_level_code",
         "explanation": "llama_explanation",
         "score_status": "llama_score_status",
         "endpoint": "llama_endpoint",
@@ -201,7 +241,9 @@ def rename_llama_columns(df: pd.DataFrame) -> pd.DataFrame:
             "llama_initial_score_status",
             "llama_retry_attempted",
             "llama_retry_score_status",
-            "llama_score",
+            "llama_ai_adopted",
+            "llama_ai_adoption_level",
+            "llama_ai_adoption_level_code",
             "llama_explanation",
             "llama_score_status",
             "llama_endpoint",
@@ -227,7 +269,11 @@ def rename_mistral_columns(df: pd.DataFrame) -> pd.DataFrame:
         "initial_score_status": "mistral_initial_score_status",
         "retry_attempted": "mistral_retry_attempted",
         "retry_score_status": "mistral_retry_score_status",
-        "ai_adoption_score": "mistral_score",
+        "ai_adopted": "mistral_ai_adopted",
+        # Legacy compatibility for older chunk files.
+        "explicit_operational_ai": "mistral_explicit_operational_ai",
+        "ai_adoption_level": "mistral_ai_adoption_level",
+        "ai_adoption_level_code": "mistral_ai_adoption_level_code",
         "explanation": "mistral_explanation",
         "score_status": "mistral_score_status",
         "endpoint": "mistral_endpoint",
@@ -249,7 +295,9 @@ def rename_mistral_columns(df: pd.DataFrame) -> pd.DataFrame:
             "mistral_initial_score_status",
             "mistral_retry_attempted",
             "mistral_retry_score_status",
-            "mistral_score",
+            "mistral_ai_adopted",
+            "mistral_ai_adoption_level",
+            "mistral_ai_adoption_level_code",
             "mistral_explanation",
             "mistral_score_status",
             "mistral_endpoint",
@@ -266,7 +314,7 @@ def rename_mistral_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def load_model_outputs(root: str, pattern: str, model: str) -> pd.DataFrame:
     files = find_score_files(root, pattern)
-    print(f"Found {len(files)} {model} score files under {root}")
+    print(f"Found {len(files)} {model} output files under {root}")
     df = read_concat(files)
     if model == "llama":
         return rename_llama_columns(df)
@@ -312,39 +360,40 @@ def deduplicate_accessions(df: pd.DataFrame, label: str, rule: str, out_dir: str
     snippet_chars = pd.to_numeric(out.get("snippet_chars"), errors="coerce").fillna(-1)
     llm_called_col = f"{label.lower()}_llm_called"
     llm_called = out.get(llm_called_col, pd.Series(False, index=out.index)).fillna(False).astype(bool).astype(int)
-    score_col = f"{label.lower()}_score"
-    score_num = pd.to_numeric(out.get(score_col), errors="coerce").fillna(float("-inf"))
+    adopted_rank, level_rank = model_priority_columns(out, label.lower())
 
     out = out.assign(
         _section_count=section_count,
         _combined_chars_num=combined_chars,
         _snippet_chars_num=snippet_chars,
         _llm_called_num=llm_called,
-        _score_num=score_num,
+        _adopted_rank=adopted_rank,
+        _level_rank=level_rank,
     )
 
     if rule == "best_context":
         out = out.sort_values(
             [
                 "accession_number",
+                "_adopted_rank",
+                "_level_rank",
                 "_section_count",
                 "_combined_chars_num",
                 "_snippet_chars_num",
                 "_llm_called_num",
-                "_score_num",
             ],
-            ascending=[True, False, False, False, False, False],
+            ascending=[True, False, False, False, False, False, False],
         )
     elif rule == "max_llama":
         out = out.sort_values(
-            ["accession_number", "_score_num", "_section_count", "_combined_chars_num", "_snippet_chars_num"],
-            ascending=[True, False, False, False, False],
+            ["accession_number", "_adopted_rank", "_level_rank", "_section_count", "_combined_chars_num", "_snippet_chars_num"],
+            ascending=[True, False, False, False, False, False],
         )
     else:
         raise ValueError(f"Unsupported filing duplicate rule: {rule}")
 
     out = out.drop_duplicates(subset=["accession_number"], keep="first").reset_index(drop=True)
-    out = out.drop(columns=["_section_count", "_combined_chars_num", "_snippet_chars_num", "_llm_called_num", "_score_num"])
+    out = out.drop(columns=["_section_count", "_combined_chars_num", "_snippet_chars_num", "_llm_called_num", "_adopted_rank", "_level_rank"])
     return out
 
 
@@ -389,10 +438,10 @@ def build_firm_year_panel(filing_df: pd.DataFrame, rule: str, out_dir: str) -> p
         return out.groupby(key, as_index=False).tail(1).reset_index(drop=True)
 
     if rule == "max_llama":
-        score = pd.to_numeric(out.get("llama_score"), errors="coerce")
-        out = out.assign(_llama_score_num=score.fillna(float("-inf")))
-        out = out.sort_values(["cik", "year", "_llama_score_num", "accession_number"])
-        out = out.groupby(key, as_index=False).tail(1).drop(columns=["_llama_score_num"]).reset_index(drop=True)
+        adopted_rank, level_rank = model_priority_columns(out, "llama")
+        out = out.assign(_llama_adopted_rank=adopted_rank, _llama_level_rank=level_rank)
+        out = out.sort_values(["cik", "year", "_llama_adopted_rank", "_llama_level_rank", "accession_number"])
+        out = out.groupby(key, as_index=False).tail(1).drop(columns=["_llama_adopted_rank", "_llama_level_rank"]).reset_index(drop=True)
         return out
 
     raise ValueError(f"Unsupported firm-year rule: {rule}")
