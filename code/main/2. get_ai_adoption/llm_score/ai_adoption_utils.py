@@ -26,7 +26,7 @@ import pandas as pd
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
 SCRIPT_VERSION = "2026-06-29-get_ai_score_bulk-v3"
-PROMPT_VERSION = "get_ai_adoption_binary_v4"
+PROMPT_VERSION = "get_ai_adoption_binary_v5"
 
 DEFAULT_ENDPOINTS = {
     "llama": "jupyterhub-llama-3-3b-instruct-endpoint",
@@ -288,6 +288,7 @@ def preferred_output_columns(save_raw_json: bool) -> list[str]:
         "raw_json_sha256",
     ]
     if save_raw_json:
+        cols.append("raw_model_output")
         cols.append("raw_json")
     return cols
 
@@ -631,15 +632,13 @@ def extract_relevant_snippets(full_text: str, max_chars: int, sentence_window: i
 # ---------------------------------------------------------------------------
 # Prompt construction
 # ---------------------------------------------------------------------------
-# The labeling instructions are kept in one function so prompt changes are easy
-# to review and version through PROMPT_VERSION.
-def build_ai_prompt(text: str) -> str:
-    """Build the main LLM prompt for one filing excerpt."""
+# The labeling instructions are kept in one shared helper so the first pass and
+# retry pass apply the same adoption rule while differing only in formatting
+# strictness.
+def _ai_prompt_rules() -> str:
+    """Return the shared adoption-labeling rules used in both prompts."""
 
     return (
-        "You are labeling firm AI adoption from a Form 10-K excerpt.\n"
-        "The excerpt comes from Item 1 (Business) and Item 7 (MD&A).\n\n"
-        "Return JSON only with keys: ai_adopted, ai_adoption_level, explanation.\n\n"
         "Set ai_adopted=1 if the excerpt says the firm uses AI or machine learning in its own products, "
         "services, or internal operations during the filing period.\n"
         "Set ai_adopted=0 otherwise.\n\n"
@@ -656,23 +655,42 @@ def build_ai_prompt(text: str) -> str:
         'If ai_adopted=1, ai_adoption_level must be "low", "medium", or "high".\n'
         '- low = one narrow or early deployed operational use case\n'
         '- medium = clear operational use in more than one area or in an important business function\n'
-        '- high = AI is deeply embedded, used across multiple important functions, or core to the business\n\n'
-        "Explanation: write 1-2 sentences based on the excerpt. Do not invent facts. "
-        "Do not say the firm does not use AI unless the excerpt explicitly says that.\n\n"
-        "### Filing excerpt\n"
-        '"""\n'
-        f"{text}\n"
-        '"""\n\n'
-        "Return exactly one JSON object and nothing else:\n"
-        '{"ai_adopted": 1, "ai_adoption_level": "medium", "explanation": "The filing says the firm uses machine learning in pricing and fraud detection, indicating deployed operational AI use."}\n'
-        "Use the same JSON structure with the correct values for this excerpt."
+        '- high = AI is deeply embedded, used across multiple important functions, or core to the business\n'
+    )
+
+
+def build_ai_prompt(text: str) -> str:
+    """Build the main LLM prompt for one filing excerpt."""
+
+    return (
+        "You are labeling firm AI adoption from a Form 10-K excerpt.\n"
+        "The excerpt comes from Item 1 (Business) and Item 7 (MD&A).\n\n"
+        "Return JSON only with keys: ai_adopted and ai_adoption_level.\n\n"
+        + _ai_prompt_rules()
+        + "\nReturn exactly one JSON object and nothing else.\n"
+        + 'Use this JSON format: {"ai_adopted": 1, "ai_adoption_level": "medium"}\n\n'
+        + "### Filing excerpt\n"
+        + '"""\n'
+        + f"{text}\n"
+        + '"""'
     )
 
 
 def build_ai_retry_prompt(text: str) -> str:
-    """Reuse the same prompt on retry so both passes apply the same rule."""
+    """Build a stricter JSON-only retry prompt with the same adoption rule."""
 
-    return build_ai_prompt(text)
+    return (
+        "Return exactly one valid JSON object on one line. No markdown. No extra text.\n"
+        "Use only these keys: ai_adopted and ai_adoption_level.\n"
+        "The excerpt comes from Item 1 (Business) and Item 7 (MD&A).\n\n"
+        + _ai_prompt_rules()
+        + "\nReturn JSON only.\n"
+        + 'Valid example: {"ai_adopted": 0, "ai_adoption_level": "none"}\n\n'
+        + "### Filing excerpt\n"
+        + '"""\n'
+        + f"{text}\n"
+        + '"""'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -824,8 +842,28 @@ def parse_adoption_object(obj: Any) -> tuple[Any, Any, str, str]:
     explanation = obj.get("explanation", "")
     if not isinstance(explanation, str):
         explanation = "" if explanation is None else str(explanation)
-    explanation = " ".join(explanation.split()).strip() or "No explanation returned."
+    explanation = " ".join(explanation.split()).strip()
     return int(ai_adopted), ai_adoption_level, explanation, "ok"
+
+
+def extract_adoption_fields_from_text(text: str) -> tuple[Any, Any]:
+    """Loosely extract ai_adopted and ai_adoption_level from non-JSON text."""
+
+    adopted_match = re.search(
+        r'(?is)\bai_adopted\b\s*["\']?\s*[:=]\s*["\']?(0|1|true|false|yes|no)\b',
+        text,
+    )
+    level_match = re.search(
+        r'(?is)\bai_adoption_level\b\s*["\']?\s*[:=]\s*["\']?'
+        r'(none|low|medium|med|high|0|1|2|3|no adoption|non-adopter|non adopter)\b',
+        text,
+    )
+    if not adopted_match or not level_match:
+        return pd.NA, pd.NA
+
+    ai_adopted = parse_ai_adopted(adopted_match.group(1))
+    ai_adoption_level = parse_adoption_level(level_match.group(1))
+    return ai_adopted, ai_adoption_level
 
 
 def parse_model_output(text: str) -> tuple[Any, Any, str, str, str]:
@@ -836,6 +874,9 @@ def parse_model_output(text: str) -> tuple[Any, Any, str, str, str]:
 
     candidates = extract_balanced_json_objects(text)
     if not candidates:
+        ai_adopted, ai_adoption_level = extract_adoption_fields_from_text(text)
+        if pd.notna(ai_adopted) and ai_adoption_level:
+            return ai_adopted, ai_adoption_level, "", "ok", ""
         return pd.NA, pd.NA, "Model output did not contain valid JSON.", "no_json_found", ""
 
     for candidate in reversed(candidates):
@@ -846,6 +887,10 @@ def parse_model_output(text: str) -> tuple[Any, Any, str, str, str]:
         ai_adopted, ai_adoption_level, explanation, status = parse_adoption_object(obj)
         if status == "ok":
             return ai_adopted, ai_adoption_level, explanation, "ok", candidate
+
+    ai_adopted, ai_adoption_level = extract_adoption_fields_from_text(text)
+    if pd.notna(ai_adopted) and ai_adoption_level:
+        return ai_adopted, ai_adoption_level, "", "ok", candidates[-1]
 
     return pd.NA, pd.NA, "Model output did not contain usable adoption JSON.", "no_valid_score_json", candidates[-1]
 
@@ -1093,6 +1138,8 @@ def apply_bulk_results(
                 error = body.get("error", result_body)
             except Exception:
                 error = result_body
+            if save_raw_json:
+                record["raw_model_output"] = str(result_body)
             status = "endpoint_error"
             if is_retry:
                 record.update(
@@ -1118,6 +1165,8 @@ def apply_bulk_results(
             response_body = result_body
         raw_text = extract_text_from_response(response_body)
         ai_adopted, ai_adoption_level, explanation, status, raw_json = parse_model_output(raw_text)
+        if save_raw_json:
+            record["raw_model_output"] = raw_text
         if is_retry:
             record["retry_score_status"] = status
             if status == "ok":
@@ -1181,7 +1230,9 @@ def summarize_output(
     """Build the per-chunk JSON summary."""
 
     adopted_series = pd.to_numeric(out_df["ai_adopted"], errors="coerce") if not out_df.empty else pd.Series(dtype=float)
-    level_code_series = pd.to_numeric(out_df["ai_adoption_level_code"], errors="coerce") if not out_df.empty else pd.Series(dtype=float)
+    n_scored = int(adopted_series.notna().sum()) if not out_df.empty else 0
+    n_adopted = int((adopted_series == 1).sum()) if not out_df.empty else 0
+    n_non_adopted = int((adopted_series == 0).sum()) if not out_df.empty else 0
     return {
         "run_id": run_id,
         "chunk_name": chunk_name,
@@ -1198,8 +1249,10 @@ def summarize_output(
         "n_filings": int(len(out_df)),
         "n_unique_cik": int(out_df["cik"].nunique()) if not out_df.empty else 0,
         "n_llm_called": int(out_df["llm_called"].sum()) if not out_df.empty else 0,
-        "n_ai_adopted": int((adopted_series == 1).sum()) if not out_df.empty else 0,
-        "n_ai_non_adopted": int((adopted_series == 0).sum()) if not out_df.empty else 0,
+        "n_scored": n_scored,
+        "n_unscored": int(len(out_df) - n_scored),
+        "n_ai_adopted": n_adopted,
+        "n_ai_non_adopted": n_non_adopted,
         "n_level_low": int((out_df["ai_adoption_level"] == "low").sum()) if not out_df.empty else 0,
         "n_level_medium": int((out_df["ai_adoption_level"] == "medium").sum()) if not out_df.empty else 0,
         "n_level_high": int((out_df["ai_adoption_level"] == "high").sum()) if not out_df.empty else 0,
@@ -1212,7 +1265,6 @@ def summarize_output(
         "n_missing_item1": int((~out_df["has_item1"]).sum()) if not out_df.empty else 0,
         "n_missing_item7": int((~out_df["has_item7"]).sum()) if not out_df.empty else 0,
         "status_counts": out_df["score_status"].value_counts(dropna=False).to_dict() if not out_df.empty else {},
-        "ai_adopted_mean": None if adopted_series.dropna().empty else float(adopted_series.mean()),
-        "ai_adoption_level_code_mean": None if level_code_series.dropna().empty else float(level_code_series.mean()),
+        "adoption_rate": None if n_scored == 0 else float(n_adopted / n_scored),
         "output_csv": output_csv,
     }

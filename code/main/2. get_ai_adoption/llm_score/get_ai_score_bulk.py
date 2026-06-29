@@ -68,13 +68,13 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--max-prompt-chars", type=int, default=1500)
     ap.add_argument("--sentence-window", type=int, default=1)
     ap.add_argument("--temperature", type=float, default=0.0)
-    ap.add_argument("--max-new-tokens", type=int, default=120)
+    ap.add_argument("--max-new-tokens", type=int, default=60)
     ap.add_argument("--max-concurrent-invocations", type=int, default=25)
     ap.add_argument("--max-workers", type=int, default=9)
     ap.add_argument("--no-retry-pass", action="store_true", help="Disable the automatic second-pass retry for parser failures.")
 
     # Output and logging settings.
-    ap.add_argument("--save-raw-json", action="store_true", help="Store parsed raw model JSON in the output CSV.")
+    ap.add_argument("--save-raw-json", action="store_true", help="Store parsed JSON and raw model output in the output CSV.")
     ap.add_argument("--skip-existing", action="store_true", help="Skip chunks whose output CSV and summary JSON already exist.")
     ap.add_argument("--flat-output", action="store_true", help="Write directly to --out-dir instead of --out-dir/RUN_ID.")
     ap.add_argument("--out-dir", default=os.path.join(os.getcwd(), "output", "llama_scores"))

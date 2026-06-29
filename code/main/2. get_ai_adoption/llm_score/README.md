@@ -28,7 +28,7 @@ Main script: get_ai_score_bulk.py
 Utilities: ai_adoption_utils.py
 Merge script: merge_outputs.py
 Script version: 2026-06-29-get_ai_score_bulk-v3
-Prompt version: get_ai_adoption_binary_v4
+Prompt version: get_ai_adoption_binary_v5
 Default endpoint: jupyterhub-llama-3-3b-instruct-endpoint
 Invocation method: dwutils.sm.bulk_invoke_endpoint_async
 ```
@@ -332,7 +332,14 @@ medium = clear operational use in more than one area or in an important business
 high = AI is deeply embedded, used across multiple important functions, or core to the business
 ```
 
-The prompt also asks for a short explanation in `1-2 sentences`, explicitly avoids step-by-step reasoning, and tells the model not to invent a direct negative statement unless the excerpt itself says the firm does not use AI.
+The production scoring prompt asks only for the two fields needed for labeling:
+
+```text
+ai_adopted
+ai_adoption_level
+```
+
+This keeps the output small and makes JSON compliance easier for smaller models.
 
 ## Model Invocation
 
@@ -360,7 +367,7 @@ parameters:
 Current default generation setting:
 
 ```text
---max-new-tokens 120
+--max-new-tokens 60
 ```
 
 This limits response length. Filing excerpt length is controlled separately by `--max-prompt-chars`.
@@ -370,7 +377,7 @@ This limits response length. Filing excerpt length is controlled separately by `
 The model is instructed to return exactly one JSON object:
 
 ```json
-{"ai_adopted": 1, "ai_adoption_level": "medium", "explanation": "The filing says the firm uses machine learning in underwriting and fraud detection, indicating deployed operational use in important functions."}
+{"ai_adopted": 1, "ai_adoption_level": "medium"}
 ```
 
 Required fields:
@@ -378,7 +385,6 @@ Required fields:
 ```text
 ai_adopted
 ai_adoption_level
-explanation
 ```
 
 Rules:
@@ -395,7 +401,7 @@ The parser:
 2. Finds balanced JSON-looking objects while respecting quoted strings and escapes.
 3. Tries JSON objects from last to first, because some endpoints may echo earlier prompt content.
 4. Accepts the first object that satisfies the binary-plus-level schema.
-5. Normalizes the explanation to a single paragraph.
+5. If no valid JSON is found, tries a fallback field extractor that looks for `ai_adopted` and `ai_adoption_level` directly in the raw text.
 
 If parsing fails on the first pass, the output keeps the row and records a failure status such as:
 
@@ -409,7 +415,7 @@ invalid_level_for_non_adopter
 missing_level_for_adopter
 ```
 
-Parser-like failures automatically receive a second LLM call using the same prompt and labeling rule as the first pass. Successful rescues are recorded as:
+Parser-like failures automatically receive a second LLM call using the same labeling rule wrapped in a stricter JSON-only prompt. Successful rescues are recorded as:
 
 ```text
 ok_after_retry
@@ -499,13 +505,16 @@ ai_adoption_level_code
 explanation
 ```
 
+`explanation` remains in the output schema for compatibility, but it is no longer required for a filing to be scored successfully.
+
 Optional debug output:
 
 ```text
+raw_model_output
 raw_json
 ```
 
-`raw_json` is included only when `--save-raw-json` is used.
+These fields are included only when `--save-raw-json` is used. `raw_model_output` stores the raw text returned by the model, which is useful for debugging parser failures.
 
 ## Merge Outputs
 
@@ -544,7 +553,7 @@ python3 get_ai_score_bulk.py \
   --prefilter-mode hard_zero \
   --model-label llama \
   --max-prompt-chars 1500 \
-  --max-new-tokens 120 \
+  --max-new-tokens 60 \
   --max-concurrent-invocations 10 \
   --max-workers 5 \
   --out-dir output/test_bulk_chunk1_full \
@@ -561,7 +570,7 @@ python3 get_ai_score_bulk.py \
   --prefilter-mode hard_zero \
   --model-label llama \
   --max-prompt-chars 1500 \
-  --max-new-tokens 120 \
+  --max-new-tokens 60 \
   --max-concurrent-invocations 10 \
   --max-workers 5 \
   --out-dir output/test_bulk_chunks_1_3 \
