@@ -26,7 +26,7 @@ import pandas as pd
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
 SCRIPT_VERSION = "2026-06-29-get_ai_score_bulk-v3"
-PROMPT_VERSION = "get_ai_adoption_binary_v1"
+PROMPT_VERSION = "get_ai_adoption_binary_v4"
 
 DEFAULT_ENDPOINTS = {
     "llama": "jupyterhub-llama-3-3b-instruct-endpoint",
@@ -634,68 +634,45 @@ def extract_relevant_snippets(full_text: str, max_chars: int, sentence_window: i
 # The labeling instructions are kept in one function so prompt changes are easy
 # to review and version through PROMPT_VERSION.
 def build_ai_prompt(text: str) -> str:
-    """Build the main v3 LLM prompt for one filing excerpt."""
+    """Build the main LLM prompt for one filing excerpt."""
 
     return (
         "You are labeling firm AI adoption from a Form 10-K excerpt.\n"
         "The excerpt comes from Item 1 (Business) and Item 7 (MD&A).\n\n"
         "Return JSON only with keys: ai_adopted, ai_adoption_level, explanation.\n\n"
-        "Decision rule:\n"
-        "Set ai_adopted=1 only if the excerpt gives explicit evidence that the firm itself already uses AI in its own products, "
+        "Set ai_adopted=1 if the excerpt says the firm uses AI or machine learning in its own products, "
         "services, or internal operations during the filing period.\n"
-        "Otherwise set ai_adopted=0.\n"
-        "Base the label only on the excerpt provided.\n\n"
-        "Count as adoption only if the excerpt explicitly describes the firm's own use of AI technologies such as "
-        "artificial intelligence, machine learning, deep learning, NLP, computer vision, generative AI, LLMs, or similar.\n\n"
+        "Set ai_adopted=0 otherwise.\n\n"
+        "Count as adoption when the excerpt describes the firm's own use of AI, machine learning, generative AI, "
+        "LLMs, computer vision, NLP, or similar technologies.\n"
+        "Examples include improving products, personalizing services, supporting decisions, automating tasks, "
+        "forecasting outcomes, detecting fraud, making recommendations, designing products, or improving operations.\n\n"
         "Do not count the following by themselves:\n"
         "- selling into AI markets or supplying AI customers\n"
-        "- AI trends, strategy, opportunity, competition, regulation, or risk\n"
+        "- AI trends, opportunity, competition, regulation, or risk\n"
         "- future plans, pilots, experiments, or research\n"
-        "- third-party AI without clear operational integration by the firm\n\n"
-        "Intensity rule:\n"
-        "Assign ai_adoption_level only after deciding ai_adopted.\n"
-        '- If ai_adopted=0, ai_adoption_level must be "none"\n'
-        '- If ai_adopted=1, ai_adoption_level must be "low", "medium", or "high"\n'
+        "- third-party AI without firm use\n\n"
+        'If ai_adopted=0, ai_adoption_level must be "none".\n'
+        'If ai_adopted=1, ai_adoption_level must be "low", "medium", or "high".\n'
         '- low = one narrow or early deployed operational use case\n'
         '- medium = clear operational use in more than one area or in an important business function\n'
         '- high = AI is deeply embedded, used across multiple important functions, or core to the business\n\n'
-        "Output rules:\n"
-        "- ai_adopted must be 0 or 1\n"
-        '- ai_adoption_level must be one of "none", "low", "medium", or "high"\n'
-        "Explanation:\n"
-        "Write 1-2 sentences explaining the main evidence for the label.\n"
-        "Do not give step-by-step reasoning.\n\n"
+        "Explanation: write 1-2 sentences based on the excerpt. Do not invent facts. "
+        "Do not say the firm does not use AI unless the excerpt explicitly says that.\n\n"
         "### Filing excerpt\n"
         '"""\n'
         f"{text}\n"
         '"""\n\n'
         "Return exactly one JSON object and nothing else:\n"
-        '{"ai_adopted": 0_or_1, "ai_adoption_level": "none_or_low_or_medium_or_high", "explanation": "ONE_OR_TWO_SENTENCES"}\n'
-        "Replace the placeholders with actual JSON values."
+        '{"ai_adopted": 1, "ai_adoption_level": "medium", "explanation": "The filing says the firm uses machine learning in pricing and fraud detection, indicating deployed operational AI use."}\n'
+        "Use the same JSON structure with the correct values for this excerpt."
     )
 
 
 def build_ai_retry_prompt(text: str) -> str:
-    """Build a shorter JSON-only retry prompt for parser failures."""
+    """Reuse the same prompt on retry so both passes apply the same rule."""
 
-    return (
-        "Return exactly one valid JSON object. No markdown. No extra text.\n"
-        "This Form 10-K excerpt comes from Item 1 (Business) and Item 7 (MD&A).\n"
-        "Set ai_adopted=1 only if the firm itself already uses explicit AI "
-        "(artificial intelligence, machine learning, deep learning, NLP, computer vision, generative AI, LLMs) "
-        "in its own products, services, or internal operations during the filing period.\n"
-        "Otherwise set ai_adopted=0.\n"
-        "Do not count AI markets, AI customers, trends, strategy, risks, future plans, pilots, research, or third-party AI without integration.\n"
-        'If ai_adopted=0, ai_adoption_level must be "none".\n'
-        'If ai_adopted=1, ai_adoption_level must be "low", "medium", or "high".\n'
-        "Explanation must be 1-2 sentences.\n\n"
-        "### Filing excerpt\n"
-        '"""\n'
-        f"{text}\n"
-        '"""\n\n'
-        '{"ai_adopted": 0_or_1, "ai_adoption_level": "none_or_low_or_medium_or_high", "explanation": "ONE_OR_TWO_SENTENCES"}\n'
-        "Replace the placeholders with actual JSON values."
-    )
+    return build_ai_prompt(text)
 
 
 # ---------------------------------------------------------------------------

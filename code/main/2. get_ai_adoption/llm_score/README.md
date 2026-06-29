@@ -28,7 +28,7 @@ Main script: get_ai_score_bulk.py
 Utilities: ai_adoption_utils.py
 Merge script: merge_outputs.py
 Script version: 2026-06-29-get_ai_score_bulk-v3
-Prompt version: get_ai_adoption_binary_v1
+Prompt version: get_ai_adoption_binary_v4
 Default endpoint: jupyterhub-llama-3-3b-instruct-endpoint
 Invocation method: dwutils.sm.bulk_invoke_endpoint_async
 ```
@@ -294,7 +294,7 @@ Item 7 (MD&A)
 The core decision rule is:
 
 ```text
-Set ai_adopted=1 only if the excerpt gives explicit evidence that the firm itself already uses AI in its own products, services, or internal operations during the filing period.
+Set ai_adopted=1 if the excerpt says the firm already uses AI in its own products, services, or internal operations during the filing period.
 Otherwise set ai_adopted=0.
 ```
 
@@ -304,6 +304,18 @@ The prompt tells the model not to count the following by themselves:
 - AI trends, opportunity, strategy, competition, regulation, or risk
 - future plans, pilots, experiments, or research
 - third-party AI without clear operational integration by the firm
+
+Positive clues include statements that the firm uses AI or ML to:
+
+- improve products
+- personalize services
+- support decisions
+- automate tasks
+- forecast outcomes
+- detect fraud
+- recommend content
+- design products
+- improve operations
 
 The intensity decision is only made after the binary gate:
 
@@ -320,7 +332,7 @@ medium = clear operational use in more than one area or in an important business
 high = AI is deeply embedded, used across multiple important functions, or core to the business
 ```
 
-The prompt also asks for a short explanation in `1-2 sentences` and explicitly avoids step-by-step reasoning.
+The prompt also asks for a short explanation in `1-2 sentences`, explicitly avoids step-by-step reasoning, and tells the model not to invent a direct negative statement unless the excerpt itself says the firm does not use AI.
 
 ## Model Invocation
 
@@ -397,7 +409,7 @@ invalid_level_for_non_adopter
 missing_level_for_adopter
 ```
 
-Parser-like failures automatically receive a second LLM call using a shorter JSON-only retry prompt. Successful rescues are recorded as:
+Parser-like failures automatically receive a second LLM call using the same prompt and labeling rule as the first pass. Successful rescues are recorded as:
 
 ```text
 ok_after_retry
