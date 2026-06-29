@@ -25,8 +25,8 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
-SCRIPT_VERSION = "2026-06-29-get_ai_score_bulk-v3"
-PROMPT_VERSION = "get_ai_adoption_binary_v5"
+SCRIPT_VERSION = "2026-06-29-get_ai_score_bulk-v5"
+PROMPT_VERSION = "get_ai_adoption_binary_v7"
 
 DEFAULT_ENDPOINTS = {
     "llama": "jupyterhub-llama-3-3b-instruct-endpoint",
@@ -44,10 +44,9 @@ CHUNK_RE = re.compile(r"^extract_df_chunk_(\d{5})\.rds$")
 WHITESPACE_RE = re.compile(r"\s+")
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[\.\!\?\;])\s+|\n+")
 
-# v3 uses a split dictionary:
-# - trigger terms: explicit AI language that can justify an LLM call
-# - ranking-only terms: broader adjacent language that can help snippet selection
-#   but should not, on their own, trigger a positive AI prefilter hit.
+# The prefilter now uses a broader AI dictionary. We still keep explicit trigger
+# terms and broader adjacent terms in separate lists for readability, but the
+# call decision counts hits from both lists.
 AI_TRIGGER_PATTERNS = [
     r"\bartificial intelligence\b",
     r"\bA\.I\.\b",
@@ -120,9 +119,9 @@ def compile_keyword_patterns(patterns: Sequence[str]) -> re.Pattern[str]:
     return re.compile(r"(?i:" + "|".join(patterns) + r")")
 
 
-AI_TRIGGER_KEYWORDS = compile_keyword_patterns(AI_TRIGGER_PATTERNS)
+AI_TRIGGER_KEYWORDS = compile_keyword_patterns(AI_TRIGGER_PATTERNS + AI_RANKING_ONLY_PATTERNS)
 AI_RANKING_ONLY_KEYWORDS = compile_keyword_patterns(AI_RANKING_ONLY_PATTERNS)
-AI_RANKING_KEYWORDS = compile_keyword_patterns(AI_TRIGGER_PATTERNS + AI_RANKING_ONLY_PATTERNS)
+AI_RANKING_KEYWORDS = AI_TRIGGER_KEYWORDS
 
 # These words help rank snippets. They do not determine the final label.
 # They only make operational evidence more likely to be sent to the LLM.
@@ -153,15 +152,18 @@ AI_ADOPTION_LEVEL_CODES = {
     "high": 3,
 }
 
+AI_LEVEL_CODE_LABELS = {code: label for label, code in AI_ADOPTION_LEVEL_CODES.items()}
+
 RETRYABLE_PARSE_STATUSES = {
     "missing_output",
     "no_json_found",
     "no_valid_score_json",
-    "non_binary_adoption",
-    "invalid_adoption_level",
-    "invalid_level_for_non_adopter",
-    "missing_level_for_adopter",
+    "invalid_level_code",
 }
+
+TEMPLATE_OUTPUT_CUES = re.compile(
+    r"(?im)(^\s*def\s+|^\s*return\b|^\s*if\b|^\s*elif\b|^\s*else\s*:|^\s*###|^\s*##\s*step\b|^\s*solution\b)"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +222,7 @@ def normalize_cik(value: Any) -> str:
 
 
 def count_ai_keywords(text: str) -> int:
-    """Count explicit AI trigger keyword hits in filing text."""
+    """Count broad AI prefilter keyword hits in filing text."""
 
     return len(list(AI_TRIGGER_KEYWORDS.finditer(text))) if text else 0
 
@@ -636,12 +638,15 @@ def extract_relevant_snippets(full_text: str, max_chars: int, sentence_window: i
 # retry pass apply the same adoption rule while differing only in formatting
 # strictness.
 def _ai_prompt_rules() -> str:
-    """Return the shared adoption-labeling rules used in both prompts."""
+    """Return the shared ordinal adoption-labeling rules used in both prompts."""
 
     return (
-        "Set ai_adopted=1 if the excerpt says the firm uses AI or machine learning in its own products, "
-        "services, or internal operations during the filing period.\n"
-        "Set ai_adopted=0 otherwise.\n\n"
+        "Return one ordinal code for the firm's disclosed AI adoption in the filing excerpt.\n"
+        "Use this scale:\n"
+        "0 = none: no evidence the firm uses AI in its own products, services, or internal operations\n"
+        "1 = low: one narrow or early deployed operational AI use case\n"
+        "2 = medium: clear operational AI use in more than one area or in an important business function\n"
+        "3 = high: AI is deeply embedded, used across multiple important functions, or core to the business\n\n"
         "Count as adoption when the excerpt describes the firm's own use of AI, machine learning, generative AI, "
         "LLMs, computer vision, NLP, or similar technologies.\n"
         "Examples include improving products, personalizing services, supporting decisions, automating tasks, "
@@ -650,12 +655,7 @@ def _ai_prompt_rules() -> str:
         "- selling into AI markets or supplying AI customers\n"
         "- AI trends, opportunity, competition, regulation, or risk\n"
         "- future plans, pilots, experiments, or research\n"
-        "- third-party AI without firm use\n\n"
-        'If ai_adopted=0, ai_adoption_level must be "none".\n'
-        'If ai_adopted=1, ai_adoption_level must be "low", "medium", or "high".\n'
-        '- low = one narrow or early deployed operational use case\n'
-        '- medium = clear operational use in more than one area or in an important business function\n'
-        '- high = AI is deeply embedded, used across multiple important functions, or core to the business\n'
+        "- third-party AI without firm use\n"
     )
 
 
@@ -665,14 +665,12 @@ def build_ai_prompt(text: str) -> str:
     return (
         "You are labeling firm AI adoption from a Form 10-K excerpt.\n"
         "The excerpt comes from Item 1 (Business) and Item 7 (MD&A).\n\n"
-        "Return JSON only with keys: ai_adopted and ai_adoption_level.\n\n"
-        + _ai_prompt_rules()
-        + "\nReturn exactly one JSON object and nothing else.\n"
-        + 'Use this JSON format: {"ai_adopted": 1, "ai_adoption_level": "medium"}\n\n'
-        + "### Filing excerpt\n"
-        + '"""\n'
-        + f"{text}\n"
-        + '"""'
+        "Return JSON only with key: ai_level_code.\n\n"
+        f"{_ai_prompt_rules()}\n"
+        'Return exactly one JSON object and nothing else.\n'
+        'Use this JSON schema: {"ai_level_code": 0_or_1_or_2_or_3}\n\n'
+        "Excerpt:\n"
+        f"{text}"
     )
 
 
@@ -681,15 +679,13 @@ def build_ai_retry_prompt(text: str) -> str:
 
     return (
         "Return exactly one valid JSON object on one line. No markdown. No extra text.\n"
-        "Use only these keys: ai_adopted and ai_adoption_level.\n"
+        "Use only this key: ai_level_code.\n"
         "The excerpt comes from Item 1 (Business) and Item 7 (MD&A).\n\n"
-        + _ai_prompt_rules()
-        + "\nReturn JSON only.\n"
-        + 'Valid example: {"ai_adopted": 0, "ai_adoption_level": "none"}\n\n'
-        + "### Filing excerpt\n"
-        + '"""\n'
-        + f"{text}\n"
-        + '"""'
+        f"{_ai_prompt_rules()}\n"
+        'Return JSON only.\n'
+        'Use this JSON schema: {"ai_level_code": 0_or_1_or_2_or_3}\n\n'
+        "Excerpt:\n"
+        f"{text}"
     )
 
 
@@ -771,45 +767,34 @@ def extract_balanced_json_objects(text: str) -> list[str]:
     return objects
 
 
-def parse_ai_adopted(value: Any) -> Any:
-    """Parse ai_adopted into an integer 0/1 when possible."""
+def parse_level_code(value: Any) -> Any:
+    """Parse ai_level_code into an integer 0/1/2/3 when possible."""
 
     if isinstance(value, bool):
+        return pd.NA
+    if isinstance(value, int) and value in {0, 1, 2, 3}:
         return int(value)
-    if isinstance(value, int) and value in {0, 1}:
+    if isinstance(value, float) and value in {0.0, 1.0, 2.0, 3.0}:
         return int(value)
-    if isinstance(value, float) and value in {0.0, 1.0}:
-        return int(value)
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"1", "true", "yes"}:
-            return 1
-        if lowered in {"0", "false", "no"}:
-            return 0
-    return pd.NA
-
-
-def parse_adoption_level(value: Any) -> str:
-    """Normalize ai_adoption_level to one of none/low/medium/high."""
-
     if value is None or (isinstance(value, float) and pd.isna(value)):
-        return ""
+        return pd.NA
+
     lowered = str(value).strip().lower()
     alias_map = {
-        "none": "none",
-        "no adoption": "none",
-        "non-adopter": "none",
-        "non adopter": "none",
-        "0": "none",
-        "low": "low",
-        "1": "low",
-        "medium": "medium",
-        "med": "medium",
-        "2": "medium",
-        "high": "high",
-        "3": "high",
+        "0": 0,
+        "none": 0,
+        "no adoption": 0,
+        "non-adopter": 0,
+        "non adopter": 0,
+        "1": 1,
+        "low": 1,
+        "2": 2,
+        "medium": 2,
+        "med": 2,
+        "3": 3,
+        "high": 3,
     }
-    return alias_map.get(lowered, "")
+    return alias_map.get(lowered, pd.NA)
 
 
 def adoption_level_code(level: Any) -> Any:
@@ -821,78 +806,102 @@ def adoption_level_code(level: Any) -> Any:
     return pd.NA
 
 
-def parse_adoption_object(obj: Any) -> tuple[Any, Any, str, str]:
-    """Validate one parsed JSON object as a binary-first adoption response."""
+def adoption_level_label(code: Any) -> str:
+    """Return the normalized label for a valid adoption level code."""
+
+    parsed = parse_level_code(code)
+    if pd.isna(parsed):
+        return ""
+    return AI_LEVEL_CODE_LABELS[int(parsed)]
+
+
+def derive_adoption_outputs(level_code: Any) -> tuple[Any, Any, Any]:
+    """Derive ai_adopted, label, and code from one valid ordinal level code."""
+
+    parsed = parse_level_code(level_code)
+    if pd.isna(parsed):
+        return pd.NA, pd.NA, pd.NA
+    parsed = int(parsed)
+    return int(parsed > 0), adoption_level_label(parsed), parsed
+
+
+def parse_adoption_object(obj: Any) -> tuple[Any, Any, Any, str, str]:
+    """Validate one parsed JSON object as an ordinal-first adoption response."""
 
     if not isinstance(obj, dict):
-        return pd.NA, pd.NA, "Parsed JSON was not an object.", "json_not_object"
+        return pd.NA, pd.NA, pd.NA, "Parsed JSON was not an object.", "json_not_object"
 
-    ai_adopted = parse_ai_adopted(obj.get("ai_adopted"))
-    if pd.isna(ai_adopted):
-        return pd.NA, pd.NA, "ai_adopted was not a valid binary value.", "non_binary_adoption"
+    level_code = parse_level_code(obj.get("ai_level_code"))
 
-    ai_adoption_level = parse_adoption_level(obj.get("ai_adoption_level"))
-    if not ai_adoption_level:
-        return pd.NA, pd.NA, "ai_adoption_level was not one of none/low/medium/high.", "invalid_adoption_level"
-    if ai_adopted == 0 and ai_adoption_level != "none":
-        return pd.NA, pd.NA, 'ai_adopted was 0 but ai_adoption_level was not "none".', "invalid_level_for_non_adopter"
-    if ai_adopted == 1 and ai_adoption_level not in {"low", "medium", "high"}:
-        return pd.NA, pd.NA, 'ai_adopted was 1 but ai_adoption_level was not low/medium/high.', "missing_level_for_adopter"
+    # Backward-compatible fallback in case the model drifts toward the old schema.
+    if pd.isna(level_code) and ("ai_adopted" in obj or "ai_adoption_level" in obj):
+        legacy_adopted = obj.get("ai_adopted")
+        legacy_level = obj.get("ai_adoption_level")
+        if legacy_adopted in {0, 1, 0.0, 1.0, True, False} or isinstance(legacy_adopted, str):
+            adopted_flag = str(legacy_adopted).strip().lower()
+            if adopted_flag in {"1", "true", "yes"}:
+                legacy_code = parse_level_code(legacy_level)
+                if pd.notna(legacy_code) and int(legacy_code) in {1, 2, 3}:
+                    level_code = int(legacy_code)
+            elif adopted_flag in {"0", "false", "no"}:
+                level_code = 0
+
+    if pd.isna(level_code):
+        return pd.NA, pd.NA, pd.NA, "ai_level_code was not a valid value in {0,1,2,3}.", "invalid_level_code"
+
+    ai_adopted, ai_adoption_level, level_code = derive_adoption_outputs(level_code)
 
     explanation = obj.get("explanation", "")
     if not isinstance(explanation, str):
         explanation = "" if explanation is None else str(explanation)
     explanation = " ".join(explanation.split()).strip()
-    return int(ai_adopted), ai_adoption_level, explanation, "ok"
+    return ai_adopted, ai_adoption_level, level_code, explanation, "ok"
 
 
-def extract_adoption_fields_from_text(text: str) -> tuple[Any, Any]:
-    """Loosely extract ai_adopted and ai_adoption_level from non-JSON text."""
+def extract_level_code_from_text(text: str) -> Any:
+    """Loosely extract one direct ai_level_code assignment from non-JSON text."""
 
-    adopted_match = re.search(
-        r'(?is)\bai_adopted\b\s*["\']?\s*[:=]\s*["\']?(0|1|true|false|yes|no)\b',
+    if TEMPLATE_OUTPUT_CUES.search(text):
+        return pd.NA
+
+    matches = re.findall(
+        r'(?is)\bai_level_code\b\s*["\']?\s*[:=]\s*["\']?(0|1|2|3|none|low|medium|med|high|no adoption|non-adopter|non adopter)\b',
         text,
     )
-    level_match = re.search(
-        r'(?is)\bai_adoption_level\b\s*["\']?\s*[:=]\s*["\']?'
-        r'(none|low|medium|med|high|0|1|2|3|no adoption|non-adopter|non adopter)\b',
-        text,
-    )
-    if not adopted_match or not level_match:
-        return pd.NA, pd.NA
-
-    ai_adopted = parse_ai_adopted(adopted_match.group(1))
-    ai_adoption_level = parse_adoption_level(level_match.group(1))
-    return ai_adopted, ai_adoption_level
+    if len(matches) != 1:
+        return pd.NA
+    return parse_level_code(matches[0])
 
 
-def parse_model_output(text: str) -> tuple[Any, Any, str, str, str]:
-    """Parse raw model output into ai_adopted, level, explanation, status, and raw JSON."""
+def parse_model_output(text: str) -> tuple[Any, Any, Any, str, str, str]:
+    """Parse raw model output into derived adoption outputs, status, and raw JSON."""
 
     if not text:
-        return pd.NA, pd.NA, "No model output returned.", "missing_output", ""
+        return pd.NA, pd.NA, pd.NA, "No model output returned.", "missing_output", ""
 
     candidates = extract_balanced_json_objects(text)
     if not candidates:
-        ai_adopted, ai_adoption_level = extract_adoption_fields_from_text(text)
-        if pd.notna(ai_adopted) and ai_adoption_level:
-            return ai_adopted, ai_adoption_level, "", "ok", ""
-        return pd.NA, pd.NA, "Model output did not contain valid JSON.", "no_json_found", ""
+        level_code = extract_level_code_from_text(text)
+        if pd.notna(level_code):
+            ai_adopted, ai_adoption_level, level_code = derive_adoption_outputs(level_code)
+            return ai_adopted, ai_adoption_level, level_code, "", "ok", ""
+        return pd.NA, pd.NA, pd.NA, "Model output did not contain valid JSON.", "no_json_found", ""
 
     for candidate in reversed(candidates):
         try:
             obj = json.loads(candidate)
         except Exception:
             continue
-        ai_adopted, ai_adoption_level, explanation, status = parse_adoption_object(obj)
+        ai_adopted, ai_adoption_level, level_code, explanation, status = parse_adoption_object(obj)
         if status == "ok":
-            return ai_adopted, ai_adoption_level, explanation, "ok", candidate
+            return ai_adopted, ai_adoption_level, level_code, explanation, "ok", candidate
 
-    ai_adopted, ai_adoption_level = extract_adoption_fields_from_text(text)
-    if pd.notna(ai_adopted) and ai_adoption_level:
-        return ai_adopted, ai_adoption_level, "", "ok", candidates[-1]
+    level_code = extract_level_code_from_text(text)
+    if pd.notna(level_code):
+        ai_adopted, ai_adoption_level, level_code = derive_adoption_outputs(level_code)
+        return ai_adopted, ai_adoption_level, level_code, "", "ok", candidates[-1]
 
-    return pd.NA, pd.NA, "Model output did not contain usable adoption JSON.", "no_valid_score_json", candidates[-1]
+    return pd.NA, pd.NA, pd.NA, "Model output did not contain usable adoption JSON.", "no_valid_score_json", candidates[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -1064,7 +1073,7 @@ def prepare_records_and_prompts(
                 ai_adopted=0,
                 ai_adoption_level="none",
                 ai_adoption_level_code=0,
-                explanation="No explicit AI trigger keywords were detected by the v3 prefilter, so the filing was labeled as a non-adopter without an LLM call.",
+                explanation="No AI dictionary keywords were detected by the v5 prefilter, so the filing was labeled as a non-adopter without an LLM call.",
                 score_status="prefilter_zero_no_keyword",
                 prefilter_decision=f"{prefilter_mode}_zero_no_keyword",
             )
@@ -1164,7 +1173,7 @@ def apply_bulk_results(
         except Exception:
             response_body = result_body
         raw_text = extract_text_from_response(response_body)
-        ai_adopted, ai_adoption_level, explanation, status, raw_json = parse_model_output(raw_text)
+        ai_adopted, ai_adoption_level, ai_adoption_level_code, explanation, status, raw_json = parse_model_output(raw_text)
         if save_raw_json:
             record["raw_model_output"] = raw_text
         if is_retry:
@@ -1174,7 +1183,7 @@ def apply_bulk_results(
                 record.update(
                     ai_adopted=ai_adopted,
                     ai_adoption_level=ai_adoption_level,
-                    ai_adoption_level_code=adoption_level_code(ai_adoption_level),
+                    ai_adoption_level_code=ai_adoption_level_code,
                     explanation=explanation,
                     score_status=final_status,
                     raw_json_sha256=sha256_text(raw_json) if raw_json else "",
@@ -1197,7 +1206,7 @@ def apply_bulk_results(
         record.update(
             ai_adopted=ai_adopted,
             ai_adoption_level=ai_adoption_level,
-            ai_adoption_level_code=adoption_level_code(ai_adoption_level) if pd.notna(ai_adopted) else pd.NA,
+            ai_adoption_level_code=ai_adoption_level_code,
             explanation=explanation,
             initial_score_status=status,
             score_status=status,

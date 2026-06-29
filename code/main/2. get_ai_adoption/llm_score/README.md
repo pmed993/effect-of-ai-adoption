@@ -6,15 +6,11 @@ This document records the methodology for the filing-level AI adoption process i
 
 The pipeline estimates firm-level AI adoption from SEC Form 10-K disclosures. It reads EDGAR extract chunks, converts Item 1 and Item 7 text into one row per filing, optionally filters to a research lookup of `cik` and `year`, extracts a short AI-relevant excerpt, and sends that excerpt to a Data Workspace SageMaker endpoint.
 
-The pipeline now produces:
+The model now returns one ordinal adoption code, from which the pipeline derives:
 
 - `ai_adopted` as the main specification
 - `ai_adoption_level` as the secondary intensity measure
-
-The process is binary first and ordinal second:
-
-- first decide whether the filing contains explicit evidence that the firm itself already uses AI
-- only if the answer is yes, classify the intensity as `low`, `medium`, or `high`
+- `ai_adoption_level_code` as the stored ordinal code
 
 This replaces the earlier continuous-score design. The change reflects both the literature and our QA evidence:
 
@@ -27,8 +23,8 @@ Current implementation:
 Main script: get_ai_score_bulk.py
 Utilities: ai_adoption_utils.py
 Merge script: merge_outputs.py
-Script version: 2026-06-29-get_ai_score_bulk-v3
-Prompt version: get_ai_adoption_binary_v5
+Script version: 2026-06-29-get_ai_score_bulk-v5
+Prompt version: get_ai_adoption_binary_v7
 Default endpoint: jupyterhub-llama-3-3b-instruct-endpoint
 Invocation method: dwutils.sm.bulk_invoke_endpoint_async
 ```
@@ -57,17 +53,18 @@ The output should not be used as:
 
 ## Main Design Decision
 
-The pipeline is designed around a primary binary outcome and a secondary ordinal outcome.
+The pipeline is designed around one ordinal model output and two derived analysis variables.
 
-Primary outcome:
+Model output:
+
+```text
+ai_level_code ∈ {0, 1, 2, 3}
+```
+
+Derived outcomes:
 
 ```text
 ai_adopted ∈ {0, 1}
-```
-
-Secondary outcome:
-
-```text
 ai_adoption_level ∈ {none, low, medium, high}
 ai_adoption_level_code ∈ {0, 1, 2, 3}
 ```
@@ -80,6 +77,11 @@ Mapping:
 2 = medium
 3 = high
 ```
+
+The pipeline derives:
+
+- `ai_adopted = 0` when `ai_level_code = 0`
+- `ai_adopted = 1` when `ai_level_code ∈ {1, 2, 3}`
 
 `ai_adoption_level` should be used for robustness checks, heterogeneity, or descriptive work. The main empirical specification should use `ai_adopted`.
 
@@ -203,9 +205,9 @@ The snippet extraction logic:
 
 1. Normalizes whitespace.
 2. Splits the filing into sentence-like segments.
-3. Finds sentences containing explicit AI trigger terms or broader ranking-only AI-adjacent terms.
+3. Finds sentences containing broad AI dictionary terms.
 4. Adds nearby context using `--sentence-window`.
-5. Prioritizes windows with explicit AI trigger terms.
+5. Prioritizes windows with stronger AI language and operational cues.
 6. Prioritizes windows with operational cues such as `use`, `deployed`, `integrated`, `detect`, `optimize`, or `personalize`.
 7. Downweights windows that look like risk-only, speculative, regulatory, market-theme, future-plan, pilot, or research-only discussion.
 8. Returns selected sentences in filing order up to `--max-prompt-chars`.
@@ -220,7 +222,9 @@ If no ranking keywords are found and the LLM is still called, the snippet falls 
 
 ## Keyword Prefilter
 
-The v3 prefilter reduces unnecessary LLM calls. It separates keywords into two groups.
+The v4 prefilter uses a broader AI dictionary to reduce missed filings. The
+code still keeps the terms in two readable lists, but the hard-zero call
+decision now counts both groups together.
 
 Trigger terms:
 
@@ -250,7 +254,8 @@ recommendation engine
 expert systems
 ```
 
-Trigger terms can justify an LLM call in `hard_zero` mode. Ranking-only terms improve snippet selection, but they do not by themselves count as a positive prefilter hit.
+Both groups can now justify an LLM call in `hard_zero` mode. The broader list
+raises recall by sending more AI-adjacent filings to the model.
 
 The process supports three prefilter modes.
 
@@ -260,7 +265,7 @@ Calls the LLM for every non-empty filing.
 
 `hard_zero`:
 
-If no AI trigger keyword is found, assigns:
+If no AI dictionary keyword is found, assigns:
 
 ```text
 ai_adopted = 0
@@ -271,7 +276,9 @@ llm_called = False
 
 `audit`:
 
-Mostly behaves like `hard_zero`, but sends a deterministic sample of no-trigger-keyword filings to the LLM. This estimates whether the trigger dictionary is incorrectly labeling some filings as non-adopters.
+Mostly behaves like `hard_zero`, but sends a deterministic sample of no-keyword
+filings to the LLM. This estimates whether the broader dictionary is still
+missing some adopters.
 
 ## Prompt Design
 
@@ -291,11 +298,14 @@ Item 1 (Business)
 Item 7 (MD&A)
 ```
 
-The core decision rule is:
+The core labeling rule is:
 
 ```text
-Set ai_adopted=1 if the excerpt says the firm already uses AI in its own products, services, or internal operations during the filing period.
-Otherwise set ai_adopted=0.
+Return one code:
+0 = none
+1 = low
+2 = medium
+3 = high
 ```
 
 The prompt tells the model not to count the following by themselves:
@@ -317,29 +327,22 @@ Positive clues include statements that the firm uses AI or ML to:
 - design products
 - improve operations
 
-The intensity decision is only made after the binary gate:
-
-```text
-If ai_adopted=0, ai_adoption_level must be "none".
-If ai_adopted=1, ai_adoption_level must be "low", "medium", or "high".
-```
-
 Level meanings:
 
 ```text
+none = no evidence the firm uses AI in its own products, services, or internal operations
 low = one narrow or early deployed operational use case
 medium = clear operational use in more than one area or in an important business function
 high = AI is deeply embedded, used across multiple important functions, or core to the business
 ```
 
-The production scoring prompt asks only for the two fields needed for labeling:
+The production scoring prompt asks only for the single field needed for labeling:
 
 ```text
-ai_adopted
-ai_adoption_level
+ai_level_code
 ```
 
-This keeps the output small and makes JSON compliance easier for smaller models.
+The pipeline derives `ai_adopted`, `ai_adoption_level`, and `ai_adoption_level_code` from that one ordinal code. This keeps the output small and reduces inconsistency risk for smaller models.
 
 ## Model Invocation
 
@@ -377,21 +380,22 @@ This limits response length. Filing excerpt length is controlled separately by `
 The model is instructed to return exactly one JSON object:
 
 ```json
-{"ai_adopted": 1, "ai_adoption_level": "medium"}
+{"ai_level_code": 0_or_1_or_2_or_3}
 ```
 
 Required fields:
 
 ```text
-ai_adopted
-ai_adoption_level
+ai_level_code
 ```
 
 Rules:
 
-- `ai_adopted` must be `0` or `1`
-- if `ai_adopted = 0`, `ai_adoption_level` must be `none`
-- if `ai_adopted = 1`, `ai_adoption_level` must be `low`, `medium`, or `high`
+- `ai_level_code` must be `0`, `1`, `2`, or `3`
+- `0 = none`
+- `1 = low`
+- `2 = medium`
+- `3 = high`
 
 ## Model Output Parsing
 
@@ -400,8 +404,8 @@ The parser:
 1. Extracts generated text from common endpoint response shapes.
 2. Finds balanced JSON-looking objects while respecting quoted strings and escapes.
 3. Tries JSON objects from last to first, because some endpoints may echo earlier prompt content.
-4. Accepts the first object that satisfies the binary-plus-level schema.
-5. If no valid JSON is found, tries a fallback field extractor that looks for `ai_adopted` and `ai_adoption_level` directly in the raw text.
+4. Accepts the first object that satisfies the ordinal-code schema.
+5. If no valid JSON is found, tries a fallback extractor that looks for one direct `ai_level_code` assignment in the raw text.
 
 If parsing fails on the first pass, the output keeps the row and records a failure status such as:
 
@@ -409,10 +413,7 @@ If parsing fails on the first pass, the output keeps the row and records a failu
 missing_output
 no_json_found
 no_valid_score_json
-non_binary_adoption
-invalid_adoption_level
-invalid_level_for_non_adopter
-missing_level_for_adopter
+invalid_level_code
 ```
 
 Parser-like failures automatically receive a second LLM call using the same labeling rule wrapped in a stricter JSON-only prompt. Successful rescues are recorded as:
