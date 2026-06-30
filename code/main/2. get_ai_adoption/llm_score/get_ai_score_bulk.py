@@ -68,7 +68,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--max-prompt-chars", type=int, default=1500)
     ap.add_argument("--sentence-window", type=int, default=1)
     ap.add_argument("--temperature", type=float, default=0.0)
-    ap.add_argument("--max-new-tokens", type=int, default=60)
+    ap.add_argument("--max-new-tokens", type=int, default=24)
     ap.add_argument("--max-concurrent-invocations", type=int, default=25)
     ap.add_argument("--max-workers", type=int, default=9)
     ap.add_argument("--no-retry-pass", action="store_true", help="Disable the automatic second-pass retry for parser failures.")

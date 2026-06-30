@@ -26,7 +26,7 @@ import pandas as pd
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
 SCRIPT_VERSION = "2026-06-29-get_ai_score_bulk-v5"
-PROMPT_VERSION = "get_ai_adoption_binary_v10"
+PROMPT_VERSION = "get_ai_adoption_binary_v12"
 
 DEFAULT_ENDPOINTS = {
     "llama": "jupyterhub-llama-3-3b-instruct-endpoint",
@@ -159,6 +159,7 @@ RETRYABLE_PARSE_STATUSES = {
     "no_json_found",
     "no_valid_score_json",
     "invalid_level_code",
+    "conflicting_level_codes",
 }
 
 TEMPLATE_OUTPUT_CUES = re.compile(
@@ -647,10 +648,14 @@ def _ai_prompt_rules() -> str:
         "1 = low: one narrow or early deployed operational AI use case\n"
         "2 = medium: clear operational AI use in more than one area or in an important business function\n"
         "3 = high: AI is fundamental to the firm's core business model and competitive functioning\n\n"
-        "Count adoption when the filing text gives reasonably strong evidence that the firm itself already uses AI in its own products, services, or operations, even if no single sentence states this directly.\n"
-        "If the text gives only vague or ambiguous hints about the firm's own current AI use, return 0.\n"
+        "Count adoption only when the text points to a concrete AI system, model, feature, or workflow that the firm itself uses or deploys in its own products, services, or operations.\n"
+        "Do not count text that only suggests AI relevance or AI capability without a concrete firm use.\n"
+        "Do not count products, chips, software, or infrastructure that enable customers to build or run AI unless the filing says the firm's own product or operation itself uses AI.\n"
         "Do not infer adoption from industry context, firm name, product names, or vague tech language.\n"
         "Do not count AI market exposure, customer use, general AI discussion, future plans or pilots.\n"
+        "Use 1 when the text shows only one specific AI use case.\n"
+        "Use 2 only when the text shows multiple use cases or one clearly important function with concrete AI use.\n"
+        "Use 3 only when the filing shows with repeated concrete evidence that AI is central to the firm's core product, service, or business model, not just one important use case.\n"
         "If unsure, choose the lower code.\n"
     )
 
@@ -671,7 +676,7 @@ def build_ai_prompt(text: str) -> str:
         "The JSON object must have this shape:\n"
         '{"ai_level_code": 0_or_1_or_2_or_3}\n'
         "Do not copy the template. Replace 0_or_1_or_2_or_3 with one integer: 0, 1, 2, or 3.\n"
-        "Do not return markdown, bullets, headings, or any text before or after the JSON."
+        "Do not return multiple JSON objects, alternative codes, markdown, bullets, headings, or any text before or after the JSON."
     )
 
 
@@ -690,7 +695,7 @@ def build_ai_retry_prompt(text: str) -> str:
         "The JSON object must have this shape:\n"
         '{"ai_level_code": 0_or_1_or_2_or_3}\n'
         "Do not copy the template. Replace 0_or_1_or_2_or_3 with one integer: 0, 1, 2, or 3.\n"
-        "Do not return markdown, bullets, headings, or any text before or after the JSON."
+        "Do not return multiple JSON objects, alternative codes, markdown, bullets, headings, or any text before or after the JSON."
     )
 
 
@@ -698,8 +703,8 @@ def build_ai_retry_prompt(text: str) -> str:
 # Model response parsing
 # ---------------------------------------------------------------------------
 # Model endpoints can return strings, dictionaries, lists, prompt echoes, or
-# repeated JSON. These helpers extract the generated text and then parse the
-# last valid JSON label object.
+# repeated JSON. These helpers extract the generated text, validate candidate
+# JSON label objects, and reject conflicting label codes.
 def extract_text_from_response(resp: Any) -> str:
     """Extract generated text from common endpoint response shapes."""
 
@@ -892,14 +897,30 @@ def parse_model_output(text: str) -> tuple[Any, Any, Any, str, str, str]:
             return ai_adopted, ai_adoption_level, level_code, "", "ok", ""
         return pd.NA, pd.NA, pd.NA, "Model output did not contain valid JSON.", "no_json_found", ""
 
-    for candidate in reversed(candidates):
+    valid_candidates: list[tuple[Any, Any, Any, str, str]] = []
+    for candidate in candidates:
         try:
             obj = json.loads(candidate)
         except Exception:
             continue
         ai_adopted, ai_adoption_level, level_code, explanation, status = parse_adoption_object(obj)
         if status == "ok":
-            return ai_adopted, ai_adoption_level, level_code, explanation, "ok", candidate
+            valid_candidates.append((ai_adopted, ai_adoption_level, level_code, explanation, candidate))
+
+    if valid_candidates:
+        distinct_codes = sorted({int(item[2]) for item in valid_candidates if pd.notna(item[2])})
+        if len(distinct_codes) > 1:
+            return (
+                pd.NA,
+                pd.NA,
+                pd.NA,
+                f"Model output contained conflicting ai_level_code values: {distinct_codes}.",
+                "conflicting_level_codes",
+                valid_candidates[-1][4],
+            )
+
+        ai_adopted, ai_adoption_level, level_code, explanation, raw_json = valid_candidates[-1]
+        return ai_adopted, ai_adoption_level, level_code, explanation, "ok", raw_json
 
     level_code = extract_level_code_from_text(text)
     if pd.notna(level_code):

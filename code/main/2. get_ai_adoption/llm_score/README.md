@@ -24,7 +24,7 @@ Main script: get_ai_score_bulk.py
 Utilities: ai_adoption_utils.py
 Merge script: merge_outputs.py
 Script version: 2026-06-29-get_ai_score_bulk-v5
-Prompt version: get_ai_adoption_binary_v10
+Prompt version: get_ai_adoption_binary_v12
 Default endpoint: jupyterhub-llama-3-3b-instruct-endpoint
 Invocation method: dwutils.sm.bulk_invoke_endpoint_async
 ```
@@ -310,10 +310,13 @@ Return one code:
 
 The prompt tells the model:
 
-- count adoption when the filing text gives reasonably strong evidence that the firm itself already uses AI in its own products, services, or operations, even if no single sentence states this directly
-- return `0` when the text gives only vague or ambiguous hints about the firm's own current AI use
+- count adoption only when the text points to a concrete AI system, model, feature, or workflow that the firm itself uses or deploys in its own products, services, or operations
+- not count text that only suggests AI relevance or AI capability without a concrete firm use
+- not count products, chips, software, or infrastructure that enable customers to build or run AI unless the filing says the firm's own product or operation itself uses AI
 - not infer adoption from industry context, firm name, product names, or vague tech language
 - not count AI market exposure, customer use, general AI discussion, future plans, or pilots
+- use `1` for one specific AI use case and `2` only for multiple use cases or one clearly important function with concrete AI use
+- use `3` only when the filing shows with repeated concrete evidence that AI is central to the firm's core product, service, or business model, not just one important use case
 
 Positive clues include statements that the firm uses AI or ML to:
 
@@ -370,7 +373,7 @@ parameters:
 Current default generation setting:
 
 ```text
---max-new-tokens 60
+--max-new-tokens 24
 ```
 
 This limits response length. Filing text length is controlled separately by `--max-prompt-chars`.
@@ -403,8 +406,8 @@ The parser:
 
 1. Extracts generated text from common endpoint response shapes.
 2. Finds balanced JSON-looking objects while respecting quoted strings and escapes.
-3. Tries JSON objects from last to first, because some endpoints may echo earlier prompt content.
-4. Accepts the first object that satisfies the ordinal-code schema.
+3. Validates all JSON objects that satisfy the ordinal-code schema.
+4. Rejects the response if the valid JSON objects contain conflicting `ai_level_code` values.
 5. If no valid JSON is found, tries a fallback extractor that looks for one direct `ai_level_code` assignment in the raw text.
 
 If parsing fails on the first pass, the output keeps the row and records a failure status such as:
@@ -414,6 +417,7 @@ missing_output
 no_json_found
 no_valid_score_json
 invalid_level_code
+conflicting_level_codes
 ```
 
 Parser-like failures automatically receive a second LLM call using the same labeling rule wrapped in a stricter JSON-only prompt. Successful rescues are recorded as:
@@ -554,7 +558,7 @@ python3 get_ai_score_bulk.py \
   --prefilter-mode hard_zero \
   --model-label llama \
   --max-prompt-chars 1500 \
-  --max-new-tokens 60 \
+  --max-new-tokens 24 \
   --max-concurrent-invocations 10 \
   --max-workers 5 \
   --out-dir output/test_bulk_chunk1_full \
@@ -571,7 +575,7 @@ python3 get_ai_score_bulk.py \
   --prefilter-mode hard_zero \
   --model-label llama \
   --max-prompt-chars 1500 \
-  --max-new-tokens 60 \
+  --max-new-tokens 24 \
   --max-concurrent-invocations 10 \
   --max-workers 5 \
   --out-dir output/test_bulk_chunks_1_3 \
