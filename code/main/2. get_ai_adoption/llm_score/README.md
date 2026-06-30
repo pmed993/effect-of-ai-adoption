@@ -24,7 +24,7 @@ Main script: get_ai_score_bulk.py
 Utilities: ai_adoption_utils.py
 Merge script: merge_outputs.py
 Script version: 2026-06-29-get_ai_score_bulk-v5
-Prompt version: get_ai_adoption_binary_v7
+Prompt version: get_ai_adoption_binary_v10
 Default endpoint: jupyterhub-llama-3-3b-instruct-endpoint
 Invocation method: dwutils.sm.bulk_invoke_endpoint_async
 ```
@@ -308,12 +308,12 @@ Return one code:
 3 = high
 ```
 
-The prompt tells the model not to count the following by themselves:
+The prompt tells the model:
 
-- selling into AI markets or supplying AI customers
-- AI trends, opportunity, strategy, competition, regulation, or risk
-- future plans, pilots, experiments, or research
-- third-party AI without clear operational integration by the firm
+- count adoption when the filing text gives reasonably strong evidence that the firm itself already uses AI in its own products, services, or operations, even if no single sentence states this directly
+- return `0` when the text gives only vague or ambiguous hints about the firm's own current AI use
+- not infer adoption from industry context, firm name, product names, or vague tech language
+- not count AI market exposure, customer use, general AI discussion, future plans, or pilots
 
 Positive clues include statements that the firm uses AI or ML to:
 

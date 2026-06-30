@@ -26,7 +26,7 @@ import pandas as pd
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
 SCRIPT_VERSION = "2026-06-29-get_ai_score_bulk-v5"
-PROMPT_VERSION = "get_ai_adoption_binary_v7"
+PROMPT_VERSION = "get_ai_adoption_binary_v10"
 
 DEFAULT_ENDPOINTS = {
     "llama": "jupyterhub-llama-3-3b-instruct-endpoint",
@@ -647,15 +647,11 @@ def _ai_prompt_rules() -> str:
         "1 = low: one narrow or early deployed operational AI use case\n"
         "2 = medium: clear operational AI use in more than one area or in an important business function\n"
         "3 = high: AI is fundamental to the firm's core business model and competitive functioning\n\n"
-        "Count as adoption when the filing text describes the firm's own use of AI, machine learning, generative AI, "
-        "LLMs, computer vision, NLP, or similar technologies.\n"
-        "Examples include improving products, personalizing services, supporting decisions, automating tasks, "
-        "forecasting outcomes, detecting fraud, making recommendations, designing products, or improving operations.\n\n"
-        "Do not count the following by themselves:\n"
-        "- selling into AI markets or supplying AI customers\n"
-        "- AI trends, opportunity, competition, regulation, or risk\n"
-        "- future plans, pilots, experiments, or research\n"
-        "- third-party AI without firm use\n"
+        "Count adoption when the filing text gives reasonably strong evidence that the firm itself already uses AI in its own products, services, or operations, even if no single sentence states this directly.\n"
+        "If the text gives only vague or ambiguous hints about the firm's own current AI use, return 0.\n"
+        "Do not infer adoption from industry context, firm name, product names, or vague tech language.\n"
+        "Do not count AI market exposure, customer use, general AI discussion, future plans or pilots.\n"
+        "If unsure, choose the lower code.\n"
     )
 
 
