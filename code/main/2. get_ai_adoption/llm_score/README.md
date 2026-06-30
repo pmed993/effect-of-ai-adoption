@@ -24,7 +24,7 @@ Main script: get_ai_score_bulk.py
 Utilities: ai_adoption_utils.py
 Merge script: merge_outputs.py
 Script version: 2026-06-29-get_ai_score_bulk-v5
-Prompt version: get_ai_adoption_binary_v12
+Prompt version: get_ai_adoption_binary_v14
 Default endpoint: jupyterhub-llama-3-3b-instruct-endpoint
 Invocation method: dwutils.sm.bulk_invoke_endpoint_async
 ```
@@ -313,10 +313,13 @@ The prompt tells the model:
 - count adoption only when the text points to a concrete AI system, model, feature, or workflow that the firm itself uses or deploys in its own products, services, or operations
 - not count text that only suggests AI relevance or AI capability without a concrete firm use
 - not count products, chips, software, or infrastructure that enable customers to build or run AI unless the filing says the firm's own product or operation itself uses AI
+- count distinct concrete use cases, not the number of AI terms or sentences
 - not infer adoption from industry context, firm name, product names, or vague tech language
 - not count AI market exposure, customer use, general AI discussion, future plans, or pilots
-- use `1` for one specific AI use case and `2` only for multiple use cases or one clearly important function with concrete AI use
+- use `1` for limited adoption: one concrete AI use case by the firm that is narrow or not central
+- use `2` for substantial adoption: clear operational AI use in multiple areas, products, or functions
 - use `3` only when the filing shows with repeated concrete evidence that AI is central to the firm's core product, service, or business model, not just one important use case
+- if there is only one concrete AI use case, not return `2` or `3`
 
 Positive clues include statements that the firm uses AI or ML to:
 
@@ -334,9 +337,9 @@ Level meanings:
 
 ```text
 none = no explicit evidence of AI adoption in the filing text
-low = one narrow or early deployed operational use case
-medium = clear operational use in more than one area or in an important business function
-high = AI is fundamental to the firm's core business model and competitive functioning
+low = limited adoption; one concrete AI use case by the firm, narrow or not central
+medium = substantial adoption; clear operational AI use in multiple areas, products, or functions
+high = repeated concrete evidence that AI is central to the firm's core product, service, or business model
 ```
 
 The production scoring prompt asks only for the single field needed for labeling:

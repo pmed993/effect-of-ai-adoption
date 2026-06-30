@@ -26,7 +26,7 @@ import pandas as pd
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
 SCRIPT_VERSION = "2026-06-29-get_ai_score_bulk-v5"
-PROMPT_VERSION = "get_ai_adoption_binary_v12"
+PROMPT_VERSION = "get_ai_adoption_binary_v14"
 
 DEFAULT_ENDPOINTS = {
     "llama": "jupyterhub-llama-3-3b-instruct-endpoint",
@@ -645,17 +645,19 @@ def _ai_prompt_rules() -> str:
         "Return one ordinal AI adoption classification code for the firm's filing text.\n"
         "Use this scale:\n"
         "0 = none: no explicit evidence of AI adoption in the filing text\n"
-        "1 = low: one narrow or early deployed operational AI use case\n"
-        "2 = medium: clear operational AI use in more than one area or in an important business function\n"
+        "1 = low: limited adoption; one concrete AI use case by the firm, narrow or not central\n"
+        "2 = medium: substantial adoption; clear operational AI use in multiple areas, products, or functions\n"
         "3 = high: AI is fundamental to the firm's core business model and competitive functioning\n\n"
         "Count adoption only when the text points to a concrete AI system, model, feature, or workflow that the firm itself uses or deploys in its own products, services, or operations.\n"
         "Do not count text that only suggests AI relevance or AI capability without a concrete firm use.\n"
         "Do not count products, chips, software, or infrastructure that enable customers to build or run AI unless the filing says the firm's own product or operation itself uses AI.\n"
+        "Count distinct concrete use cases, not the number of AI terms or sentences.\n"
         "Do not infer adoption from industry context, firm name, product names, or vague tech language.\n"
         "Do not count AI market exposure, customer use, general AI discussion, future plans or pilots.\n"
-        "Use 1 when the text shows only one specific AI use case.\n"
-        "Use 2 only when the text shows multiple use cases or one clearly important function with concrete AI use.\n"
+        "Use 1 when the text shows one concrete AI use case that is limited, narrow, or not central.\n"
+        "Use 2 when the text shows clear operational AI use in multiple areas, products, or functions.\n"
         "Use 3 only when the filing shows with repeated concrete evidence that AI is central to the firm's core product, service, or business model, not just one important use case.\n"
+        "If there is only one concrete AI use case, do not return 2 or 3.\n"
         "If unsure, choose the lower code.\n"
     )
 
