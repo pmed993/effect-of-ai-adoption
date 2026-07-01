@@ -956,7 +956,7 @@ def _binary_adoption_rules() -> str:
     return (
         "Decide whether the filing text contains at least one concrete current AI use case by the firm itself.\n"
         "The text comes from Form 10-K Item 1 (Business) and Item 7 (MD&A).\n\n"
-        "Set ai_adoption = 1 only if the text clearly shows that the firm itself currently uses, deploys, embeds, or operates AI, machine learning, deep learning, generative AI, natural language processing, computer vision, predictive models, recommendation systems, autonomous systems, or similar AI systems in its own products, services, workflows, or internal operations.\n\n"
+        "Set ai_adoption = 1 only if the text  shows that the firm itself uses, deploys, embeds, or operates AI, machine learning, deep learning, generative AI, natural language processing, computer vision, predictive models, recommendation systems, autonomous systems, or similar AI systems in its own products, services, workflows, or internal operations.\n\n"
         "Do not count:\n"
         "1. Generic AI discussion or market trends.\n"
         "2. AI risk disclosure only.\n"
