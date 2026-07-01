@@ -6,13 +6,13 @@ This document records the methodology for the filing-level AI adoption process i
 
 The pipeline estimates firm-level AI adoption from SEC Form 10-K disclosures. It reads EDGAR extract chunks, converts Item 1 and Item 7 text into one row per filing, optionally filters to a research lookup of `cik` and `year`, extracts a short AI-relevant filing text section, and sends that filing text to a Data Workspace SageMaker endpoint.
 
-The model now returns one ordinal adoption code, from which the pipeline derives:
+The model now extracts structured AI-adoption evidence first, and the pipeline then derives the final adoption variables deterministically in Python:
 
-- `ai_adopted` as the main specification
-- `ai_adoption_level` as the secondary intensity measure
-- `ai_adoption_level_code` as the stored ordinal code
+- `ai_adopted` as the main binary specification
+- `ai_adoption_level` as the secondary ordinal intensity measure
+- `ai_adoption_level_code` as the stored deterministic ordinal code
 
-This replaces the earlier continuous-score design. The change reflects both the literature and our QA evidence:
+This replaces the earlier direct ordinal prompting design. The change improves robustness and reproducibility by separating evidence extraction from final coding.
 
 - LLMs tend to be more reliable on discrete annotation than on fine-grained continuous scoring
 - earlier continuous-score runs showed clear bunching at a small number of repeated values
@@ -23,8 +23,8 @@ Current implementation:
 Main script: get_ai_score_bulk.py
 Utilities: ai_adoption_utils.py
 Merge script: merge_outputs.py
-Script version: 2026-06-29-get_ai_score_bulk-v5
-Prompt version: get_ai_adoption_binary_v14
+Script version: 2026-07-01-get_ai_score_bulk-v6
+Prompt version: ai_evidence_extraction_v1
 Default endpoint: jupyterhub-llama-3-3b-instruct-endpoint
 Invocation method: dwutils.sm.bulk_invoke_endpoint_async
 ```
@@ -35,8 +35,8 @@ This process is intended to create a research measure of disclosed firm AI adopt
 
 Interpretation:
 
-- `ai_adopted = 1` means the filing text provides explicit evidence that the firm itself already uses AI in products, services, or internal operations during the filing period
-- `ai_adopted = 0` means the filing text does not provide that evidence
+- the LLM extracts qualifying AI use cases and excluded mentions from filing text
+- final `ai_adopted` and `ai_adoption_level_code` are assigned deterministically from that evidence
 - `ai_adoption_level` is only intended as a coarse secondary measure of disclosed intensity
 
 This is a disclosure-based measure, not a direct operational audit.
@@ -53,12 +53,13 @@ The output should not be used as:
 
 ## Main Design Decision
 
-The pipeline is designed around one ordinal model output and two derived analysis variables.
+The pipeline is designed around structured evidence extraction plus deterministic scoring.
 
 Model output:
 
 ```text
-ai_level_code ∈ {0, 1, 2, 3}
+qualifying_ai_use_cases
+excluded_mentions
 ```
 
 Derived outcomes:
@@ -78,10 +79,12 @@ Mapping:
 3 = high
 ```
 
-The pipeline derives:
+The pipeline derives the final ordinal code deterministically:
 
-- `ai_adopted = 0` when `ai_level_code = 0`
-- `ai_adopted = 1` when `ai_level_code ∈ {1, 2, 3}`
+- `0` = no qualifying current firm-use AI evidence
+- `1` = one distinct qualifying use case or only narrow evidence
+- `2` = two or more distinct use cases across areas, but AI is not core to the business model
+- `3` = AI is central to the core product, service, platform, or business model with at least two distinct concrete pieces of evidence
 
 `ai_adoption_level` should be used for robustness checks, heterogeneity, or descriptive work. The main empirical specification should use `ai_adopted`.
 
@@ -376,7 +379,7 @@ parameters:
 Current default generation setting:
 
 ```text
---max-new-tokens 24
+--max-new-tokens 220
 ```
 
 This limits response length. Filing text length is controlled separately by `--max-prompt-chars`.
@@ -411,7 +414,7 @@ The parser:
 2. Finds balanced JSON-looking objects while respecting quoted strings and escapes.
 3. Validates all JSON objects that satisfy the ordinal-code schema.
 4. Rejects the response if the valid JSON objects contain conflicting `ai_level_code` values.
-5. If no valid JSON is found, tries a fallback extractor that looks for one direct `ai_level_code` assignment in the raw text.
+5. If no valid JSON is found, tries a fallback extractor that looks for one direct `ai_level_code` assignment or one plain-English classification-code statement in the raw text.
 
 If parsing fails on the first pass, the output keeps the row and records a failure status such as:
 
@@ -561,7 +564,7 @@ python3 get_ai_score_bulk.py \
   --prefilter-mode hard_zero \
   --model-label llama \
   --max-prompt-chars 1500 \
-  --max-new-tokens 24 \
+  --max-new-tokens 220 \
   --max-concurrent-invocations 10 \
   --max-workers 5 \
   --out-dir output/test_bulk_chunk1_full \
@@ -578,7 +581,7 @@ python3 get_ai_score_bulk.py \
   --prefilter-mode hard_zero \
   --model-label llama \
   --max-prompt-chars 1500 \
-  --max-new-tokens 24 \
+  --max-new-tokens 220 \
   --max-concurrent-invocations 10 \
   --max-workers 5 \
   --out-dir output/test_bulk_chunks_1_3 \

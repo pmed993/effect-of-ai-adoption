@@ -65,10 +65,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     # LLM and bulk invocation settings.
     ap.add_argument("--model-label", choices=["llama", "mistral"], default="llama", help="Short label used for endpoint defaulting and output naming.")
     ap.add_argument("--endpoint", default=None, help="Override SageMaker endpoint. If omitted, uses the default for --model-label.")
+    ap.add_argument("--llm-checkpoint", default=None, help="Exact model checkpoint name to store in outputs. Defaults to the configured checkpoint for --model-label.")
     ap.add_argument("--max-prompt-chars", type=int, default=1500)
     ap.add_argument("--sentence-window", type=int, default=1)
-    ap.add_argument("--temperature", type=float, default=0.0)
-    ap.add_argument("--max-new-tokens", type=int, default=24)
+    ap.add_argument("--temperature", type=float, default=u.TEMPERATURE)
+    ap.add_argument("--max-new-tokens", type=int, default=u.DEFAULT_MAX_NEW_TOKENS)
     ap.add_argument("--max-concurrent-invocations", type=int, default=25)
     ap.add_argument("--max-workers", type=int, default=9)
     ap.add_argument("--no-retry-pass", action="store_true", help="Disable the automatic second-pass retry for parser failures.")
@@ -84,7 +85,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
     # Fail early for invalid arguments so the run does not start half-configured.
     if args.endpoint is None:
-        args.endpoint = u.DEFAULT_ENDPOINTS[args.model_label]  
+        args.endpoint = u.DEFAULT_ENDPOINTS[args.model_label]
+    if args.llm_checkpoint is None:
+        args.llm_checkpoint = u.DEFAULT_MODEL_NAMES[args.model_label]
     if args.max_chunks < 0:
         ap.error("--max-chunks must be >= 0")
     if args.max_filings_per_chunk < 0:
@@ -175,6 +178,10 @@ def process_chunk(
         run_id=run_id,
         chunk_id=chunk_id,
         source_label=source_label,
+        llm_model=args.llm_checkpoint,
+        llm_checkpoint=args.llm_checkpoint,
+        temperature=args.temperature,
+        max_new_tokens=args.max_new_tokens,
         endpoint=args.endpoint,
         prefilter_mode=args.prefilter_mode,
         audit_seed=args.audit_seed,

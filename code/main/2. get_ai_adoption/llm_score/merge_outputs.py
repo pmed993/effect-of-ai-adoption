@@ -20,11 +20,14 @@ Typical usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
+
+import ai_adoption_utils as u
 
 
 LLAMA_PATTERN = "*_llama_scores.csv"
@@ -34,6 +37,7 @@ IDENTITY_COLS = ["accession_number", "cik", "year"]
 FILING_BASE_COLS = [
     "source_label",
     "chunk_id",
+    "filing_accession",
     "form_type",
     "has_item1",
     "has_item7",
@@ -55,6 +59,42 @@ ADOPTION_LEVEL_CODES = {
     "medium": 2,
     "high": 3,
 }
+
+MODEL_METADATA_FIELDS = [
+    "run_id",
+    "script_version",
+    "prompt_version",
+    "llm_model",
+    "llm_checkpoint",
+    "temperature",
+    "max_new_tokens",
+    "llm_called",
+    "endpoint_attempts",
+    "parse_status",
+    "initial_score_status",
+    "retry_attempted",
+    "retry_score_status",
+    "ai_adopted",
+    "ai_adoption_level",
+    "ai_adoption_level_code",
+    "ai_adopted_binary",
+    "ai_adopted_medium",
+    "ai_adopted_core",
+    "n_qualifying_use_cases",
+    "n_business_areas",
+    "has_core_ai",
+    "main_exclusion_reason_if_zero",
+    "explanation",
+    "score_status",
+    "endpoint",
+    "job_id",
+    "retry_job_id",
+    "raw_json_sha256",
+    "evidence_json_sha256",
+    "qualifying_ai_use_cases_json",
+    "excluded_mentions_json",
+    "source_csv",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -206,52 +246,13 @@ def model_priority_columns(df: pd.DataFrame, prefix: str) -> tuple[pd.Series, pd
 
 def rename_llama_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = ensure_identity_types(df)
-    rename_map = {
-        "run_id": "llama_run_id",
-        "script_version": "llama_script_version",
-        "prompt_version": "llama_prompt_version",
-        "llm_called": "llama_llm_called",
-        "endpoint_attempts": "llama_endpoint_attempts",
-        "initial_score_status": "llama_initial_score_status",
-        "retry_attempted": "llama_retry_attempted",
-        "retry_score_status": "llama_retry_score_status",
-        "ai_adopted": "llama_ai_adopted",
-        # Legacy compatibility for older chunk files.
-        "explicit_operational_ai": "llama_explicit_operational_ai",
-        "ai_adoption_level": "llama_ai_adoption_level",
-        "ai_adoption_level_code": "llama_ai_adoption_level_code",
-        "explanation": "llama_explanation",
-        "score_status": "llama_score_status",
-        "endpoint": "llama_endpoint",
-        "job_id": "llama_job_id",
-        "retry_job_id": "llama_retry_job_id",
-        "raw_json_sha256": "llama_raw_json_sha256",
-        "source_csv": "llama_source_csv",
-    }
+    rename_map = {field: f"llama_{field}" for field in MODEL_METADATA_FIELDS}
+    rename_map["explicit_operational_ai"] = "llama_explicit_operational_ai"
     out = out.rename(columns=rename_map)
     preferred = (
         IDENTITY_COLS
         + FILING_BASE_COLS
-        + [
-            "llama_run_id",
-            "llama_script_version",
-            "llama_prompt_version",
-            "llama_llm_called",
-            "llama_endpoint_attempts",
-            "llama_initial_score_status",
-            "llama_retry_attempted",
-            "llama_retry_score_status",
-            "llama_ai_adopted",
-            "llama_ai_adoption_level",
-            "llama_ai_adoption_level_code",
-            "llama_explanation",
-            "llama_score_status",
-            "llama_endpoint",
-            "llama_job_id",
-            "llama_retry_job_id",
-            "llama_raw_json_sha256",
-            "llama_source_csv",
-        ]
+        + [f"llama_{field}" for field in MODEL_METADATA_FIELDS]
     )
     existing = [col for col in preferred if col in out.columns]
     extra = [col for col in out.columns if col not in existing]
@@ -260,52 +261,13 @@ def rename_llama_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 def rename_mistral_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = ensure_identity_types(df)
-    rename_map = {
-        "run_id": "mistral_run_id",
-        "script_version": "mistral_script_version",
-        "prompt_version": "mistral_prompt_version",
-        "llm_called": "mistral_llm_called",
-        "endpoint_attempts": "mistral_endpoint_attempts",
-        "initial_score_status": "mistral_initial_score_status",
-        "retry_attempted": "mistral_retry_attempted",
-        "retry_score_status": "mistral_retry_score_status",
-        "ai_adopted": "mistral_ai_adopted",
-        # Legacy compatibility for older chunk files.
-        "explicit_operational_ai": "mistral_explicit_operational_ai",
-        "ai_adoption_level": "mistral_ai_adoption_level",
-        "ai_adoption_level_code": "mistral_ai_adoption_level_code",
-        "explanation": "mistral_explanation",
-        "score_status": "mistral_score_status",
-        "endpoint": "mistral_endpoint",
-        "job_id": "mistral_job_id",
-        "retry_job_id": "mistral_retry_job_id",
-        "raw_json_sha256": "mistral_raw_json_sha256",
-        "source_csv": "mistral_source_csv",
-    }
+    rename_map = {field: f"mistral_{field}" for field in MODEL_METADATA_FIELDS}
+    rename_map["explicit_operational_ai"] = "mistral_explicit_operational_ai"
     out = out.rename(columns=rename_map)
     keep = (
         IDENTITY_COLS
         + FILING_BASE_COLS
-        + [
-            "mistral_run_id",
-            "mistral_script_version",
-            "mistral_prompt_version",
-            "mistral_llm_called",
-            "mistral_endpoint_attempts",
-            "mistral_initial_score_status",
-            "mistral_retry_attempted",
-            "mistral_retry_score_status",
-            "mistral_ai_adopted",
-            "mistral_ai_adoption_level",
-            "mistral_ai_adoption_level_code",
-            "mistral_explanation",
-            "mistral_score_status",
-            "mistral_endpoint",
-            "mistral_job_id",
-            "mistral_retry_job_id",
-            "mistral_raw_json_sha256",
-            "mistral_source_csv",
-        ]
+        + [f"mistral_{field}" for field in MODEL_METADATA_FIELDS]
     )
     existing = [col for col in keep if col in out.columns]
     extra = [col for col in out.columns if col not in existing]
@@ -403,48 +365,175 @@ def merge_models(llama_df: pd.DataFrame, mistral_df: pd.DataFrame | None, filing
         return llama_df
 
     mistral_df = deduplicate_accessions(mistral_df, "Mistral", filing_duplicate_rule, out_dir)
+    merge_keys = [col for col in IDENTITY_COLS + FILING_BASE_COLS if col in llama_df.columns and col in mistral_df.columns]
     merged = llama_df.merge(
         mistral_df,
-        on=IDENTITY_COLS,
+        on=merge_keys,
         how="outer",
         validate="one_to_one",
     )
     return merged
 
 
-def build_firm_year_panel(filing_df: pd.DataFrame, rule: str, out_dir: str) -> pd.DataFrame:
-    out = filing_df.copy()
-    out = ensure_identity_types(out)
+def json_list(value: object) -> list[dict]:
+    if value is None or pd.isna(value):
+        return []
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    text = str(value).strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        return []
+    return [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
 
-    key = ["cik", "year"]
-    dupes = out[out.duplicated(subset=key, keep=False)].sort_values(key + ["accession_number"])
-    if dupes.empty:
-        return out
 
-    dupes_path = write_duplicate_report(dupes, out_dir, "firm_year_duplicates.csv")
-    print(f"Found duplicate cik-year rows. Wrote report to {dupes_path}")
+def first_non_null(series: pd.Series) -> object:
+    for value in series:
+        if value is None or pd.isna(value):
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return pd.NA
 
-    if rule == "error":
-        raise ValueError(
-            "Duplicate cik-year rows found when building the firm-year panel. "
-            f"Review {dupes_path} and rerun with --firm-year-rule last or --firm-year-rule max_llama."
+
+def aggregate_parse_status(series: pd.Series) -> str:
+    statuses = {
+        str(value).strip()
+        for value in series
+        if value is not None and not pd.isna(value) and str(value).strip()
+    }
+    if "failed" in statuses:
+        return "failed"
+    if "retry_success" in statuses:
+        return "retry_success"
+    if "success" in statuses:
+        return "success"
+    if "not_called" in statuses:
+        return "not_called"
+    return ""
+
+
+def aggregate_model_firm_year(
+    filing_df: pd.DataFrame,
+    prefix: str,
+    *,
+    generic_output: bool,
+) -> pd.DataFrame:
+    """Aggregate filing-level evidence into one deterministic firm-year score."""
+
+    qualifying_col = f"{prefix}_qualifying_ai_use_cases_json"
+    excluded_col = f"{prefix}_excluded_mentions_json"
+    parse_status_col = f"{prefix}_parse_status"
+    if qualifying_col not in filing_df.columns and excluded_col not in filing_df.columns:
+        return pd.DataFrame(columns=["cik", "year"])
+
+    out = ensure_identity_types(filing_df)
+    rows: list[dict[str, object]] = []
+
+    for (cik, year), group in out.groupby(["cik", "year"], dropna=False, sort=True):
+        qualifying: list[dict] = []
+        excluded: list[dict] = []
+        for _, row in group.iterrows():
+            for item in json_list(row.get(qualifying_col)):
+                try:
+                    qualifying.append(u.normalize_qualifying_use_case(item))
+                except Exception:
+                    continue
+            for item in json_list(row.get(excluded_col)):
+                try:
+                    excluded.append(u.normalize_excluded_mention(item))
+                except Exception:
+                    continue
+
+        evidence = {
+            "qualifying_ai_use_cases": u.deduplicate_qualifying_use_cases(qualifying),
+            "excluded_mentions": excluded,
+        }
+        summary = u.summarize_evidence(evidence, fallback_zero_reason="no_qualifying_current_firm_use")
+        ai_adopted, ai_adoption_level, ai_level_code = u.derive_adoption_outputs(summary["ai_level_code"])
+        evidence_json = {
+            "qualifying_ai_use_cases": summary["qualifying_ai_use_cases"],
+            "excluded_mentions": evidence["excluded_mentions"],
+        }
+        evidence_json_text = json.dumps(evidence_json, ensure_ascii=False, sort_keys=True)
+        accessions = sorted(
+            {
+                str(value).strip()
+                for value in group.get("accession_number", pd.Series(dtype="string"))
+                if value is not None and not pd.isna(value) and str(value).strip()
+            }
         )
+        parse_status_series = group.get(parse_status_col, pd.Series(dtype="string"))
+        row = {
+            "cik": cik,
+            "year": year,
+            "filing_accession": ";".join(accessions),
+            "run_id": first_non_null(group.get(f"{prefix}_run_id", pd.Series(dtype="object"))),
+            "script_version": first_non_null(group.get(f"{prefix}_script_version", pd.Series(dtype="object"))),
+            "prompt_version": first_non_null(group.get(f"{prefix}_prompt_version", pd.Series(dtype="object"))),
+            "llm_model": first_non_null(group.get(f"{prefix}_llm_model", pd.Series(dtype="object"))),
+            "llm_checkpoint": first_non_null(group.get(f"{prefix}_llm_checkpoint", pd.Series(dtype="object"))),
+            "temperature": first_non_null(group.get(f"{prefix}_temperature", pd.Series(dtype="object"))),
+            "max_new_tokens": first_non_null(group.get(f"{prefix}_max_new_tokens", pd.Series(dtype="object"))),
+            "n_chunks": int(len(group)),
+            "n_chunks_scored": int(parse_status_series.isin(["success", "retry_success"]).sum()),
+            "parse_status": aggregate_parse_status(parse_status_series),
+            "n_qualifying_use_cases": summary["n_qualifying_use_cases"],
+            "n_business_areas": summary["n_business_areas"],
+            "has_core_ai": summary["has_core_ai"],
+            "main_exclusion_reason_if_zero": summary["main_exclusion_reason_if_zero"],
+            "ai_adopted": ai_adopted,
+            "ai_adoption_level": ai_adoption_level,
+            "ai_adoption_level_code": ai_level_code,
+            "ai_level_code": ai_level_code,
+            "ai_adopted_binary": summary["ai_adopted_binary"],
+            "ai_adopted_medium": summary["ai_adopted_medium"],
+            "ai_adopted_core": summary["ai_adopted_core"],
+            "qualifying_ai_use_cases_json": json.dumps(summary["qualifying_ai_use_cases"], ensure_ascii=False),
+            "excluded_mentions_json": json.dumps(evidence["excluded_mentions"], ensure_ascii=False),
+            "evidence_json_sha256": u.sha256_text(evidence_json_text),
+        }
+        if generic_output:
+            rows.append(row)
+        else:
+            prefixed = {"cik": cik, "year": year}
+            prefixed.update({f"{prefix}_{key}": value for key, value in row.items() if key not in {"cik", "year"}})
+            rows.append(prefixed)
 
-    out = out.sort_values(["cik", "year", "accession_number"])
-    if rule == "first":
-        return out.groupby(key, as_index=False).head(1).reset_index(drop=True)
+    return pd.DataFrame(rows)
 
-    if rule == "last":
-        return out.groupby(key, as_index=False).tail(1).reset_index(drop=True)
 
-    if rule == "max_llama":
-        adopted_rank, level_rank = model_priority_columns(out, "llama")
-        out = out.assign(_llama_adopted_rank=adopted_rank, _llama_level_rank=level_rank)
-        out = out.sort_values(["cik", "year", "_llama_adopted_rank", "_llama_level_rank", "accession_number"])
-        out = out.groupby(key, as_index=False).tail(1).drop(columns=["_llama_adopted_rank", "_llama_level_rank"]).reset_index(drop=True)
-        return out
+def build_firm_year_panel(filing_df: pd.DataFrame, rule: str, out_dir: str) -> pd.DataFrame:
+    """
+    Aggregate all filing-level evidence within each firm-year.
 
-    raise ValueError(f"Unsupported firm-year rule: {rule}")
+    The `rule` argument is retained for CLI compatibility, but firm-years are no
+    longer reduced by picking one row. Evidence is combined deterministically
+    across all filings in the same cik-year.
+    """
+
+    del rule, out_dir
+    prefixes = [
+        prefix
+        for prefix in ["llama", "mistral"]
+        if f"{prefix}_qualifying_ai_use_cases_json" in filing_df.columns
+        or f"{prefix}_excluded_mentions_json" in filing_df.columns
+    ]
+    if not prefixes:
+        return ensure_identity_types(filing_df)[["cik", "year"]].drop_duplicates().reset_index(drop=True)
+
+    primary_prefix = "llama" if "llama" in prefixes else prefixes[0]
+    panel = aggregate_model_firm_year(filing_df, primary_prefix, generic_output=True)
+    for prefix in prefixes:
+        if prefix == primary_prefix:
+            continue
+        extra = aggregate_model_firm_year(filing_df, prefix, generic_output=False)
+        panel = panel.merge(extra, on=["cik", "year"], how="outer", validate="one_to_one")
+    return ensure_identity_types(panel).reset_index(drop=True)
 
 
 def merge_with_compustat(
@@ -496,7 +585,8 @@ def main() -> int:
     print(f"Wrote filing-level master: {filing_out} ({len(filing_df)} rows)")
 
     panel_df = build_firm_year_panel(filing_df, args.firm_year_rule, args.out_dir)
-    panel_df = panel_df.sort_values(["year", "cik", "accession_number"]).reset_index(drop=True)
+    panel_sort_cols = [col for col in ["year", "cik", "filing_accession"] if col in panel_df.columns]
+    panel_df = panel_df.sort_values(panel_sort_cols).reset_index(drop=True) if panel_sort_cols else panel_df.reset_index(drop=True)
     panel_out = os.path.join(args.out_dir, "ai_adoption_firm_year_panel.csv")
     panel_df.to_csv(panel_out, index=False)
     print(f"Wrote firm-year panel: {panel_out} ({len(panel_df)} rows)")
