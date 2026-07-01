@@ -27,7 +27,7 @@ import pandas as pd
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
 SCRIPT_VERSION = "2026-07-01-get_ai_score_bulk-v7"
-PROMPT_VERSION = "ai_binary_adoption_v1"
+PROMPT_VERSION = "ai_binary_adoption_v2"
 MODEL_NAME = "meta-llama/Llama-3.2-3B-Instruct"
 TEMPERATURE = 0.0
 DEFAULT_MAX_NEW_TOKENS = 96
@@ -965,6 +965,7 @@ def _binary_adoption_rules() -> str:
         "5. AI chips, cloud, software, data centres, or infrastructure that only enable customers to build or run AI.\n"
         "6. AI partnerships, investments, acquisitions, or hiring without a concrete deployed use case.\n"
         "7. Vague analytics, automation, algorithms, digital transformation, or innovation language without explicit AI or ML use.\n\n"
+        "If you cannot state the specific use case in evidence_summary, set ai_adoption = 0.\n"
         "If unsure, set ai_adoption = 0.\n"
     )
 
