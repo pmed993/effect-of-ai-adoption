@@ -164,6 +164,23 @@ class ClassifyAiAdoptionFromEvidenceTests(unittest.TestCase):
         self.assertEqual(result["ai_adoption_level_code"], 1)
         self.assertEqual(result["n_qualifying_use_cases"], 1)
 
+    def test_parser_salvages_pipe_separated_categories_and_single_object(self) -> None:
+        payload = """
+        {
+          "use_case": "AI chatbot used in store operations.",
+          "business_area": "operations|customer_service",
+          "current_use": true,
+          "firm_itself_uses_or_deploys": true,
+          "evidence_strength": "strong",
+          "centrality": "operational",
+          "source_item": "1|7"
+        }
+        """
+        result = u.parse_model_output_payload(payload)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["ai_adoption_level_code"], 1)
+        self.assertEqual(result["n_qualifying_use_cases"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -203,10 +203,12 @@ CENTRALITY_RANK = {"peripheral": 1, "operational": 2, "core": 3}
 
 SOURCE_ITEMS = {"item_1", "item_7", "unknown"}
 SOURCE_ITEM_ALIASES = {
+    "1": "item_1",
     "item1": "item_1",
     "item_1": "item_1",
     "item 1": "item_1",
     "business": "item_1",
+    "7": "item_7",
     "item7": "item_7",
     "item_7": "item_7",
     "item 7": "item_7",
@@ -323,11 +325,26 @@ def normalize_enum(
 
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return ""
-    text = normalize_whitespace(value).lower().replace("-", "_").replace("/", "_").replace("&", "and")
-    text = re.sub(r"\s+", "_", text)
-    if aliases:
-        text = aliases.get(text, text)
-    return text if text in allowed else ""
+    raw = normalize_whitespace(value).lower()
+
+    def canonicalize(text: str) -> str:
+        text = text.strip().replace("-", "_").replace("/", "_").replace("&", "and")
+        text = re.sub(r"\s+", "_", text)
+        if aliases:
+            text = aliases.get(text, text)
+        return text
+
+    text = canonicalize(raw)
+    if text in allowed:
+        return text
+
+    multi_tokens = re.split(r"\s*(?:\||,|;| or )\s*", raw)
+    for token in multi_tokens:
+        candidate = canonicalize(token)
+        if candidate in allowed:
+            return candidate
+
+    return ""
 
 
 def normalize_bool(value: Any) -> Optional[bool]:
@@ -1152,7 +1169,23 @@ def parse_evidence_object(obj: Any) -> dict[str, list[dict[str, Any]]]:
     if not isinstance(obj, dict):
         raise ValueError("Parsed JSON was not an object.")
 
-    if "qualifying_ai_use_cases" not in obj or "excluded_mentions" not in obj:
+    # Salvage the common Llama pattern where it returns one qualifying use case
+    # object directly instead of wrapping it in the requested top-level lists.
+    use_case_keys = {
+        "use_case",
+        "business_area",
+        "current_use",
+        "firm_itself_uses_or_deploys",
+        "evidence_strength",
+        "centrality",
+        "source_item",
+    }
+    if use_case_keys.issubset(obj.keys()):
+        obj = {
+            "qualifying_ai_use_cases": [obj],
+            "excluded_mentions": [],
+        }
+    elif "qualifying_ai_use_cases" not in obj or "excluded_mentions" not in obj:
         raise ValueError("JSON object must contain qualifying_ai_use_cases and excluded_mentions.")
 
     qualifying_raw = obj.get("qualifying_ai_use_cases")
