@@ -20,14 +20,11 @@ Typical usage:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
-
-import ai_adoption_utils as u
 
 
 LLAMA_PATTERN = "*_llama_scores.csv"
@@ -55,9 +52,7 @@ FILING_BASE_COLS = [
 
 ADOPTION_LEVEL_CODES = {
     "none": 0,
-    "low": 1,
-    "medium": 2,
-    "high": 3,
+    "adopted": 1,
 }
 
 MODEL_METADATA_FIELDS = [
@@ -74,25 +69,20 @@ MODEL_METADATA_FIELDS = [
     "initial_score_status",
     "retry_attempted",
     "retry_score_status",
+    "ai_adoption",
+    "qualifying_evidence_found",
+    "evidence_summary",
+    "exclusion_reason_if_zero",
     "ai_adopted",
     "ai_adoption_level",
     "ai_adoption_level_code",
-    "ai_adopted_binary",
-    "ai_adopted_medium",
-    "ai_adopted_core",
-    "n_qualifying_use_cases",
-    "n_business_areas",
-    "has_core_ai",
-    "main_exclusion_reason_if_zero",
+    "ai_level_code",
     "explanation",
     "score_status",
     "endpoint",
     "job_id",
     "retry_job_id",
     "raw_json_sha256",
-    "evidence_json_sha256",
-    "qualifying_ai_use_cases_json",
-    "excluded_mentions_json",
     "source_csv",
 ]
 
@@ -218,13 +208,17 @@ def filter_to_lookup(df: pd.DataFrame, lookup: pd.DataFrame | None, label: str) 
 def model_priority_columns(df: pd.DataFrame, prefix: str) -> tuple[pd.Series, pd.Series]:
     """Return adoption and intensity priority series for duplicate resolution."""
 
-    adopted_col = f"{prefix}_ai_adopted"
-    level_code_col = f"{prefix}_ai_adoption_level_code"
+    adopted_col = f"{prefix}_ai_adoption"
+    adopted_legacy_col = f"{prefix}_ai_adopted"
+    level_code_col = f"{prefix}_ai_level_code"
+    level_code_legacy_col = f"{prefix}_ai_adoption_level_code"
     level_col = f"{prefix}_ai_adoption_level"
     legacy_score_col = f"{prefix}_score"
 
     if adopted_col in df.columns:
         adopted = pd.to_numeric(df[adopted_col], errors="coerce").fillna(-1)
+    elif adopted_legacy_col in df.columns:
+        adopted = pd.to_numeric(df[adopted_legacy_col], errors="coerce").fillna(-1)
     elif legacy_score_col in df.columns:
         legacy_score = pd.to_numeric(df[legacy_score_col], errors="coerce")
         adopted = legacy_score.gt(0).astype(float).fillna(-1)
@@ -233,6 +227,8 @@ def model_priority_columns(df: pd.DataFrame, prefix: str) -> tuple[pd.Series, pd
 
     if level_code_col in df.columns:
         level_code = pd.to_numeric(df[level_code_col], errors="coerce").fillna(-1)
+    elif level_code_legacy_col in df.columns:
+        level_code = pd.to_numeric(df[level_code_legacy_col], errors="coerce").fillna(-1)
     elif level_col in df.columns:
         level_code = df[level_col].astype("string").str.lower().map(ADOPTION_LEVEL_CODES).fillna(-1)
     elif legacy_score_col in df.columns:
@@ -375,21 +371,6 @@ def merge_models(llama_df: pd.DataFrame, mistral_df: pd.DataFrame | None, filing
     return merged
 
 
-def json_list(value: object) -> list[dict]:
-    if value is None or pd.isna(value):
-        return []
-    if isinstance(value, list):
-        return [item for item in value if isinstance(item, dict)]
-    text = str(value).strip()
-    if not text:
-        return []
-    try:
-        parsed = json.loads(text)
-    except Exception:
-        return []
-    return [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
-
-
 def first_non_null(series: pd.Series) -> object:
     for value in series:
         if value is None or pd.isna(value):
@@ -406,15 +387,23 @@ def aggregate_parse_status(series: pd.Series) -> str:
         for value in series
         if value is not None and not pd.isna(value) and str(value).strip()
     }
-    if "failed" in statuses:
-        return "failed"
     if "retry_success" in statuses:
         return "retry_success"
-    if "success" in statuses:
+    if "success" in statuses or "not_called" in statuses:
         return "success"
-    if "not_called" in statuses:
-        return "not_called"
-    return ""
+    return "failed"
+
+
+def combine_evidence_summaries(series: pd.Series, limit: int = 3) -> str:
+    summaries: list[str] = []
+    for value in series:
+        text = str(value).strip() if value is not None and not pd.isna(value) else ""
+        if not text or text in summaries:
+            continue
+        summaries.append(text)
+        if len(summaries) >= limit:
+            break
+    return " | ".join(summaries)
 
 
 def aggregate_model_firm_year(
@@ -423,43 +412,30 @@ def aggregate_model_firm_year(
     *,
     generic_output: bool,
 ) -> pd.DataFrame:
-    """Aggregate filing-level evidence into one deterministic firm-year score."""
+    """Aggregate binary filing-level AI adoption into one firm-year score."""
 
-    qualifying_col = f"{prefix}_qualifying_ai_use_cases_json"
-    excluded_col = f"{prefix}_excluded_mentions_json"
+    adoption_col = f"{prefix}_ai_adoption"
+    legacy_adoption_col = f"{prefix}_ai_adopted"
+    summary_col = f"{prefix}_evidence_summary"
+    exclusion_col = f"{prefix}_exclusion_reason_if_zero"
     parse_status_col = f"{prefix}_parse_status"
-    if qualifying_col not in filing_df.columns and excluded_col not in filing_df.columns:
+    if (
+        adoption_col not in filing_df.columns
+        and legacy_adoption_col not in filing_df.columns
+        and parse_status_col not in filing_df.columns
+    ):
         return pd.DataFrame(columns=["cik", "year"])
 
     out = ensure_identity_types(filing_df)
     rows: list[dict[str, object]] = []
 
     for (cik, year), group in out.groupby(["cik", "year"], dropna=False, sort=True):
-        qualifying: list[dict] = []
-        excluded: list[dict] = []
-        for _, row in group.iterrows():
-            for item in json_list(row.get(qualifying_col)):
-                try:
-                    qualifying.append(u.normalize_qualifying_use_case(item))
-                except Exception:
-                    continue
-            for item in json_list(row.get(excluded_col)):
-                try:
-                    excluded.append(u.normalize_excluded_mention(item))
-                except Exception:
-                    continue
-
-        evidence = {
-            "qualifying_ai_use_cases": u.deduplicate_qualifying_use_cases(qualifying),
-            "excluded_mentions": excluded,
-        }
-        summary = u.summarize_evidence(evidence, fallback_zero_reason="no_qualifying_current_firm_use")
-        ai_adopted, ai_adoption_level, ai_level_code = u.derive_adoption_outputs(summary["ai_level_code"])
-        evidence_json = {
-            "qualifying_ai_use_cases": summary["qualifying_ai_use_cases"],
-            "excluded_mentions": evidence["excluded_mentions"],
-        }
-        evidence_json_text = json.dumps(evidence_json, ensure_ascii=False, sort_keys=True)
+        if adoption_col in group.columns:
+            adoption_series = pd.to_numeric(group[adoption_col], errors="coerce")
+        elif legacy_adoption_col in group.columns:
+            adoption_series = pd.to_numeric(group[legacy_adoption_col], errors="coerce")
+        else:
+            adoption_series = pd.Series(pd.NA, index=group.index, dtype="Float64")
         accessions = sorted(
             {
                 str(value).strip()
@@ -468,6 +444,19 @@ def aggregate_model_firm_year(
             }
         )
         parse_status_series = group.get(parse_status_col, pd.Series(dtype="string"))
+        n_chunks = int(len(group))
+        n_chunks_scored = int(parse_status_series.isin(["success", "retry_success"]).sum())
+        n_chunks_failed = int((parse_status_series == "failed").sum())
+        ai_adoption = int((adoption_series == 1).any())
+        evidence_summary = (
+            combine_evidence_summaries(group.loc[adoption_series == 1, summary_col])
+            if ai_adoption == 1 and summary_col in group.columns
+            else ""
+        )
+        exclusion_series = group.get(exclusion_col, pd.Series(dtype="string")).astype("string").str.strip()
+        exclusion_candidates = exclusion_series[
+            exclusion_series.notna() & exclusion_series.ne("") & exclusion_series.ne("none")
+        ]
         row = {
             "cik": cik,
             "year": year,
@@ -479,23 +468,23 @@ def aggregate_model_firm_year(
             "llm_checkpoint": first_non_null(group.get(f"{prefix}_llm_checkpoint", pd.Series(dtype="object"))),
             "temperature": first_non_null(group.get(f"{prefix}_temperature", pd.Series(dtype="object"))),
             "max_new_tokens": first_non_null(group.get(f"{prefix}_max_new_tokens", pd.Series(dtype="object"))),
-            "n_chunks": int(len(group)),
-            "n_chunks_scored": int(parse_status_series.isin(["success", "retry_success"]).sum()),
+            "n_chunks": n_chunks,
+            "n_chunks_scored": n_chunks_scored,
+            "n_chunks_failed": n_chunks_failed,
             "parse_status": aggregate_parse_status(parse_status_series),
-            "n_qualifying_use_cases": summary["n_qualifying_use_cases"],
-            "n_business_areas": summary["n_business_areas"],
-            "has_core_ai": summary["has_core_ai"],
-            "main_exclusion_reason_if_zero": summary["main_exclusion_reason_if_zero"],
-            "ai_adopted": ai_adopted,
-            "ai_adoption_level": ai_adoption_level,
-            "ai_adoption_level_code": ai_level_code,
-            "ai_level_code": ai_level_code,
-            "ai_adopted_binary": summary["ai_adopted_binary"],
-            "ai_adopted_medium": summary["ai_adopted_medium"],
-            "ai_adopted_core": summary["ai_adopted_core"],
-            "qualifying_ai_use_cases_json": json.dumps(summary["qualifying_ai_use_cases"], ensure_ascii=False),
-            "excluded_mentions_json": json.dumps(evidence["excluded_mentions"], ensure_ascii=False),
-            "evidence_json_sha256": u.sha256_text(evidence_json_text),
+            "ai_adoption": ai_adoption,
+            "qualifying_evidence_found": bool(ai_adoption),
+            "evidence_summary": evidence_summary,
+            "exclusion_reason_if_zero": (
+                "none"
+                if ai_adoption == 1
+                else (exclusion_candidates.mode().iloc[0] if not exclusion_candidates.empty else "other")
+            ),
+            "ai_adopted": ai_adoption,
+            "ai_adoption_level": "adopted" if ai_adoption == 1 else "none",
+            "ai_adoption_level_code": ai_adoption,
+            # Compatibility field: ai_level_code is now binary (0/1), not ordinal.
+            "ai_level_code": ai_adoption,
         }
         if generic_output:
             rows.append(row)
@@ -509,19 +498,19 @@ def aggregate_model_firm_year(
 
 def build_firm_year_panel(filing_df: pd.DataFrame, rule: str, out_dir: str) -> pd.DataFrame:
     """
-    Aggregate all filing-level evidence within each firm-year.
+    Aggregate all filing-level binary adoption decisions within each firm-year.
 
     The `rule` argument is retained for CLI compatibility, but firm-years are no
-    longer reduced by picking one row. Evidence is combined deterministically
-    across all filings in the same cik-year.
+    longer reduced by picking one row. A firm-year is classified as adopting AI
+    if any chunk or filing row in the same cik-year is classified as positive.
     """
 
     del rule, out_dir
     prefixes = [
         prefix
         for prefix in ["llama", "mistral"]
-        if f"{prefix}_qualifying_ai_use_cases_json" in filing_df.columns
-        or f"{prefix}_excluded_mentions_json" in filing_df.columns
+        if f"{prefix}_ai_adoption" in filing_df.columns
+        or f"{prefix}_ai_adopted" in filing_df.columns
     ]
     if not prefixes:
         return ensure_identity_types(filing_df)[["cik", "year"]].drop_duplicates().reset_index(drop=True)

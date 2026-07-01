@@ -4,182 +4,172 @@ import sys
 import unittest
 from pathlib import Path
 
+import pandas as pd
+
 
 THIS_DIR = Path(__file__).resolve().parent
 if str(THIS_DIR) not in sys.path:
     sys.path.insert(0, str(THIS_DIR))
 
 import ai_adoption_utils as u
+import merge_outputs as m
 
 
-def qualifying(
-    use_case: str,
-    *,
-    business_area: str = "operations",
-    evidence_strength: str = "moderate",
-    centrality: str = "operational",
-    source_item: str = "item_7",
-) -> dict[str, object]:
-    return {
-        "use_case": use_case,
-        "business_area": business_area,
-        "current_use": True,
-        "firm_itself_uses_or_deploys": True,
-        "evidence_strength": evidence_strength,
-        "centrality": centrality,
-        "source_item": source_item,
-    }
-
-
-def excluded(reason: str, description: str) -> dict[str, str]:
-    return {"brief_description": description, "reason": reason}
-
-
-class ClassifyAiAdoptionFromEvidenceTests(unittest.TestCase):
+class BinaryAiAdoptionTests(unittest.TestCase):
     def test_no_ai_mention_returns_zero(self) -> None:
-        evidence = {"qualifying_ai_use_cases": [], "excluded_mentions": []}
-        self.assertEqual(u.classify_ai_adoption_from_evidence(evidence), 0)
-
-    def test_generic_risk_language_returns_zero(self) -> None:
-        evidence = {
-            "qualifying_ai_use_cases": [],
-            "excluded_mentions": [excluded("risk_only", "AI creates cybersecurity and compliance risks.")],
-        }
-        summary = u.summarize_evidence(evidence)
-        self.assertEqual(summary["ai_level_code"], 0)
-        self.assertEqual(summary["main_exclusion_reason_if_zero"], "risk_only")
-
-    def test_future_plans_only_return_zero(self) -> None:
-        evidence = {
-            "qualifying_ai_use_cases": [],
-            "excluded_mentions": [excluded("future_only", "The firm plans to explore generative AI next year.")],
-        }
-        self.assertEqual(u.classify_ai_adoption_from_evidence(evidence), 0)
-
-    def test_one_concrete_current_use_case_returns_one(self) -> None:
-        evidence = {
-            "qualifying_ai_use_cases": [
-                qualifying("Machine-learning fraud detection in card authorization.", business_area="risk_fraud")
-            ],
-            "excluded_mentions": [],
-        }
-        summary = u.summarize_evidence(evidence)
-        self.assertEqual(summary["ai_level_code"], 1)
-        self.assertEqual(summary["n_qualifying_use_cases"], 1)
-
-    def test_multiple_business_areas_return_two(self) -> None:
-        evidence = {
-            "qualifying_ai_use_cases": [
-                qualifying("Recommendation models in the consumer app.", business_area="product_service"),
-                qualifying("Demand forecasting models in warehouse planning.", business_area="supply_chain"),
-            ],
-            "excluded_mentions": [],
-        }
-        summary = u.summarize_evidence(evidence)
-        self.assertEqual(summary["ai_level_code"], 2)
-        self.assertEqual(summary["n_business_areas"], 2)
-
-    def test_core_ai_business_model_returns_three(self) -> None:
-        evidence = {
-            "qualifying_ai_use_cases": [
-                qualifying(
-                    "Core platform uses proprietary ML models to generate underwriting decisions.",
-                    business_area="product_service",
-                    evidence_strength="strong",
-                    centrality="core",
-                    source_item="item_1",
-                ),
-                qualifying(
-                    "The subscription platform continuously retrains models used in the core product.",
-                    business_area="r_and_d",
-                    evidence_strength="strong",
-                    centrality="core",
-                    source_item="item_7",
-                ),
-            ],
-            "excluded_mentions": [],
-        }
-        summary = u.summarize_evidence(evidence)
-        self.assertEqual(summary["ai_level_code"], 3)
-        self.assertTrue(summary["has_core_ai"])
-
-    def test_enabling_infrastructure_only_returns_zero_unless_embedded(self) -> None:
-        enabling_only = {
-            "qualifying_ai_use_cases": [],
-            "excluded_mentions": [
-                excluded(
-                    "enabling_infrastructure",
-                    "The firm sells chips and cloud capacity used by customers to build AI systems.",
-                )
-            ],
-        }
-        embedded_ai_product = {
-            "qualifying_ai_use_cases": [
-                qualifying(
-                    "The firm's software product embeds recommendation models in the user workflow.",
-                    business_area="product_service",
-                    evidence_strength="moderate",
-                    centrality="operational",
-                )
-            ],
-            "excluded_mentions": [],
-        }
-        self.assertEqual(u.classify_ai_adoption_from_evidence(enabling_only), 0)
-        self.assertEqual(u.classify_ai_adoption_from_evidence(embedded_ai_product), 1)
-
-    def test_deduplicates_repeated_mentions_of_same_use_case(self) -> None:
-        repeated = qualifying("Computer-vision inspection on the production line.", business_area="operations")
-        evidence = {
-            "qualifying_ai_use_cases": [repeated, dict(repeated)],
-            "excluded_mentions": [],
-        }
-        summary = u.summarize_evidence(evidence)
-        self.assertEqual(summary["n_qualifying_use_cases"], 1)
-        self.assertEqual(summary["ai_level_code"], 1)
-
-    def test_parse_valid_evidence_json(self) -> None:
         payload = """
         {
-          "qualifying_ai_use_cases": [
-            {
-              "use_case": "NLP triage of inbound support requests.",
-              "business_area": "customer_service",
-              "current_use": true,
-              "firm_itself_uses_or_deploys": true,
-              "evidence_strength": "moderate",
-              "centrality": "operational",
-              "source_item": "item_7"
-            }
-          ],
-          "excluded_mentions": [
-            {
-              "brief_description": "General AI market discussion.",
-              "reason": "generic_market_discussion"
-            }
-          ]
+          "ai_adoption": 0,
+          "qualifying_evidence_found": false,
+          "evidence_summary": "",
+          "exclusion_reason_if_zero": "not_ai"
         }
         """
         result = u.parse_model_output_payload(payload)
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["ai_adoption_level_code"], 1)
-        self.assertEqual(result["n_qualifying_use_cases"], 1)
+        self.assertEqual(result["ai_adoption"], 0)
 
-    def test_parser_salvages_pipe_separated_categories_and_single_object(self) -> None:
+    def test_generic_ai_risk_language_returns_zero(self) -> None:
         payload = """
         {
-          "use_case": "AI chatbot used in store operations.",
-          "business_area": "operations|customer_service",
-          "current_use": true,
-          "firm_itself_uses_or_deploys": true,
-          "evidence_strength": "strong",
-          "centrality": "operational",
-          "source_item": "1|7"
+          "ai_adoption": 0,
+          "qualifying_evidence_found": false,
+          "evidence_summary": "",
+          "exclusion_reason_if_zero": "risk_only"
         }
         """
         result = u.parse_model_output_payload(payload)
-        self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["ai_adoption_level_code"], 1)
-        self.assertEqual(result["n_qualifying_use_cases"], 1)
+        self.assertEqual(result["ai_adoption"], 0)
+        self.assertEqual(result["exclusion_reason_if_zero"], "risk_only")
+
+    def test_future_ai_plans_only_returns_zero(self) -> None:
+        payload = """
+        {
+          "ai_adoption": 0,
+          "qualifying_evidence_found": false,
+          "evidence_summary": "",
+          "exclusion_reason_if_zero": "future_only"
+        }
+        """
+        result = u.parse_model_output_payload(payload)
+        self.assertEqual(result["ai_adoption"], 0)
+
+    def test_customer_use_only_returns_zero(self) -> None:
+        payload = """
+        {
+          "ai_adoption": 0,
+          "qualifying_evidence_found": false,
+          "evidence_summary": "",
+          "exclusion_reason_if_zero": "customer_only"
+        }
+        """
+        result = u.parse_model_output_payload(payload)
+        self.assertEqual(result["ai_adoption"], 0)
+
+    def test_enabling_infrastructure_only_returns_zero(self) -> None:
+        payload = """
+        {
+          "ai_adoption": 0,
+          "qualifying_evidence_found": false,
+          "evidence_summary": "",
+          "exclusion_reason_if_zero": "enabling_infrastructure"
+        }
+        """
+        result = u.parse_model_output_payload(payload)
+        self.assertEqual(result["ai_adoption"], 0)
+
+    def test_one_concrete_current_firm_use_case_returns_one(self) -> None:
+        payload = """
+        {
+          "ai_adoption": 1,
+          "qualifying_evidence_found": true,
+          "evidence_summary": "The firm uses machine-learning fraud detection in card authorization decisions.",
+          "exclusion_reason_if_zero": "none"
+        }
+        """
+        result = u.parse_model_output_payload(payload)
+        self.assertEqual(result["ai_adoption"], 1)
+        self.assertEqual(result["ai_level_code"], 1)
+        self.assertEqual(result["ai_adoption_level"], "adopted")
+
+    def test_multiple_concrete_use_cases_still_return_one(self) -> None:
+        payload = """
+        {
+          "ai_adoption": 1,
+          "qualifying_evidence_found": true,
+          "evidence_summary": "The firm uses recommendation models in its app and predictive maintenance models in operations.",
+          "exclusion_reason_if_zero": "none"
+        }
+        """
+        result = u.parse_model_output_payload(payload)
+        self.assertEqual(result["ai_adoption"], 1)
+        self.assertEqual(result["ai_level_code"], 1)
+
+    def test_parser_rejects_invalid_binary_json(self) -> None:
+        payload = """
+        {
+          "ai_adoption": 2,
+          "qualifying_evidence_found": true,
+          "evidence_summary": "bad",
+          "exclusion_reason_if_zero": "none"
+        }
+        """
+        result = u.parse_model_output_payload(payload)
+        self.assertIn(result["status"], {"no_valid_score_json", "no_json_found"})
+
+    def test_firm_year_is_positive_if_any_chunk_is_positive(self) -> None:
+        df = pd.DataFrame(
+            [
+                {
+                    "accession_number": "a1",
+                    "cik": 1001,
+                    "year": 2024,
+                    "llama_run_id": "r1",
+                    "llama_script_version": "s1",
+                    "llama_prompt_version": "p1",
+                    "llama_llm_model": "meta-llama/Llama-3.2-3B-Instruct",
+                    "llama_llm_checkpoint": "meta-llama/Llama-3.2-3B-Instruct",
+                    "llama_temperature": 0.0,
+                    "llama_max_new_tokens": 96,
+                    "llama_parse_status": "success",
+                    "llama_ai_adoption": 0,
+                    "llama_evidence_summary": "",
+                    "llama_exclusion_reason_if_zero": "future_only",
+                },
+                {
+                    "accession_number": "a2",
+                    "cik": 1001,
+                    "year": 2024,
+                    "llama_run_id": "r1",
+                    "llama_script_version": "s1",
+                    "llama_prompt_version": "p1",
+                    "llama_llm_model": "meta-llama/Llama-3.2-3B-Instruct",
+                    "llama_llm_checkpoint": "meta-llama/Llama-3.2-3B-Instruct",
+                    "llama_temperature": 0.0,
+                    "llama_max_new_tokens": 96,
+                    "llama_parse_status": "retry_success",
+                    "llama_ai_adoption": 1,
+                    "llama_evidence_summary": "The firm embeds recommendation models in its customer platform.",
+                    "llama_exclusion_reason_if_zero": "none",
+                },
+            ]
+        )
+        panel = m.build_firm_year_panel(df, rule="error", out_dir=".")
+        self.assertEqual(int(panel.loc[0, "ai_adoption"]), 1)
+        self.assertEqual(int(panel.loc[0, "ai_level_code"]), 1)
+        self.assertEqual(str(panel.loc[0, "parse_status"]), "retry_success")
+
+    def test_binary_compatibility_field_matches_ai_adoption(self) -> None:
+        payload = """
+        {
+          "ai_adoption": 1,
+          "qualifying_evidence_found": true,
+          "evidence_summary": "The firm uses NLP triage in customer support.",
+          "exclusion_reason_if_zero": "none"
+        }
+        """
+        result = u.parse_model_output_payload(payload)
+        self.assertEqual(result["ai_level_code"], result["ai_adoption"])
 
 
 if __name__ == "__main__":
