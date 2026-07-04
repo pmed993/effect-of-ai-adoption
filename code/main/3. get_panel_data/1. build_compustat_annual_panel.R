@@ -6,7 +6,7 @@
 # This script:
 # 1. loads (or optionally refreshes) annual Compustat FUNDA data,
 # 2. standardises key variable types,
-# 3. applies the annual sample filters used in comp_query.txt,
+# 3. applies the annual sample filters used in code/main/comp_query.txt,
 # 4. resolves duplicate gvkey-fyear rows,
 # 5. prepares clean NAICS4 codes,
 # 6. constructs annual firm characteristics and investment measures, and
@@ -51,7 +51,7 @@ if (!exists("compustat_console_summary")) {
 
 # ---- User options -------------------------------------------------------------
 if (!exists("REFRESH_FROM_WRDS", inherits = FALSE)) {
-  REFRESH_FROM_WRDS <- TRUE
+  REFRESH_FROM_WRDS <- FALSE
 }
 if (!exists("SAVE_OUTPUTS", inherits = FALSE)) {
   SAVE_OUTPUTS <- TRUE
@@ -86,7 +86,7 @@ if (REFRESH_FROM_WRDS) {
   )
   on.exit(dbDisconnect(con), add = TRUE)
 
-  query <- readLines("code/main/3. get_panel_data/comp_query.txt") |> paste(collapse = " ")
+  query <- readLines("code/main/comp_query.txt") |> paste(collapse = " ")
   data <- dbGetQuery(con, query)
   write_csv(data, RAW_COMPUSTAT_FILE)
 }
@@ -200,30 +200,37 @@ comp[, market_cap := fifelse(
   NA_real_
 )]
 
-comp[, firm_size_at := NA_real_]
-comp[!is.na(at) & at > 0, firm_size_at := log(at)]
+comp[, log_at := NA_real_]
+comp[!is.na(at) & at > 0, log_at := log(at)]
 
-comp[, firm_size_market_cap := NA_real_]
-comp[!is.na(market_cap) & market_cap > 0, firm_size_market_cap := log(market_cap)]
+comp[, log_market_cap := NA_real_]
+comp[!is.na(market_cap) & market_cap > 0, log_market_cap := log(market_cap)]
 
 comp[, leverage := fifelse(!is.na(at) & at > 0 & !is.na(total_debt), total_debt / at, NA_real_)]
 comp[, cash_ratio := fifelse(!is.na(at) & at > 0, che / at, NA_real_)]
 comp[, roa := fifelse(!is.na(at) & at > 0, ni / at, NA_real_)]
 comp[, intangibles_ratio := fifelse(!is.na(at) & at > 0, intan / at, NA_real_)]
 
+comp[, market_value := NA_real_]
+comp[!is.na(prcc_f) & !is.na(csho), market_value := prcc_f * csho]
+
+comp[, log_market_value := NA_real_]
+comp[!is.na(market_value) & market_value > 0, log_market_value := log(market_value)]
+
 if ("sale" %in% names(comp)) {
-  comp[, firm_size_sale := NA_real_]
-  comp[!is.na(sale) & sale > 0, firm_size_sale := log(sale)]
+  comp[, log_sale := NA_real_]
+  comp[!is.na(sale) & sale > 0, log_sale := log(sale)]
 } else {
-  comp[, firm_size_sale := NA_real_]
+  comp[, log_sale := NA_real_]
 }
 
 if ("emp" %in% names(comp)) {
-  comp[, firm_size_emp := NA_real_]
-  comp[!is.na(emp) & emp > 0, firm_size_emp := log(emp)]
+  comp[, log_emp := NA_real_]
+  comp[!is.na(emp) & emp > 0, log_emp := log(emp)]
 } else {
-  comp[, firm_size_emp := NA_real_]
+  comp[, log_emp := NA_real_]
 }
+
 
 if (all(c("xlr", "emp") %in% names(comp))) {
   comp[, avg_wage := fifelse(
@@ -231,18 +238,12 @@ if (all(c("xlr", "emp") %in% names(comp))) {
     xlr / emp,
     NA_real_
   )]
-  comp[, avg_wage_log := NA_real_]
-  comp[!is.na(avg_wage), avg_wage_log := log(avg_wage)]
+  comp[, log_avg_wage := NA_real_]
+  comp[!is.na(avg_wage), log_avg_wage := log(avg_wage)]
 } else {
   comp[, avg_wage := NA_real_]
-  comp[, avg_wage_log := NA_real_]
+  comp[, log_avg_wage := NA_real_]
 }
-
-
-if ("emp" %in% names(comp)) {
-  comp[, emp_log := fifelse(!is.na(emp) & emp > 0, log(emp), NA_real_)]
-}
-
 
 if (all(c("sale", "emp") %in% names(comp))) {
   comp[, labor_productivity := fifelse(
@@ -250,11 +251,11 @@ if (all(c("sale", "emp") %in% names(comp))) {
     sale / emp,
     NA_real_
   )]
-  comp[, labor_productivity_log := NA_real_]
-  comp[!is.na(labor_productivity), labor_productivity_log := log(labor_productivity)]
+  comp[, log_labor_productivity := NA_real_]
+  comp[!is.na(labor_productivity), log_labor_productivity := log(labor_productivity)]
 } else {
   comp[, labor_productivity := NA_real_]
-  comp[, labor_productivity_log := NA_real_]
+  comp[, log_labor_productivity := NA_real_]
 }
 
 if (all(c("oibdp", "xlr", "emp") %in% names(comp))) {
@@ -268,13 +269,25 @@ if (all(c("oibdp", "xlr", "emp") %in% names(comp))) {
     value_added / emp,
     NA_real_
   )]
-  comp[, value_added_per_employee_log := NA_real_]
-  comp[!is.na(value_added_per_employee), value_added_per_employee_log := log(value_added_per_employee)]
+  comp[, log_value_added_per_employee := NA_real_]
+  comp[!is.na(value_added_per_employee), log_value_added_per_employee := log(value_added_per_employee)]
 } else {
   comp[, value_added := NA_real_]
   comp[, value_added_per_employee := NA_real_]
-  comp[, value_added_per_employee_log := NA_real_]
+  comp[, log_value_added_per_employee := NA_real_]
 }
+
+# Keep backward-compatible aliases in the built panel so downstream analysis
+# scripts can rely on one saved data structure.
+comp[, `:=`(
+  firm_size_at = log_at,
+  firm_size_market_cap = log_market_cap,
+  firm_size_sale = log_sale,
+  firm_size_emp = log_emp,
+  avg_wage_log = log_avg_wage,
+  labor_productivity_log = log_labor_productivity,
+  value_added_per_employee_log = log_value_added_per_employee
+)]
 
 
 # ---- Build annual investment measures ----------------------------------------
