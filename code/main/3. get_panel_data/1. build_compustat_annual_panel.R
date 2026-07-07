@@ -54,7 +54,7 @@ if (!exists("REFRESH_FROM_WRDS", inherits = FALSE)) {
   REFRESH_FROM_WRDS <- FALSE
 }
 if (!exists("SAVE_OUTPUTS", inherits = FALSE)) {
-  SAVE_OUTPUTS <- TRUE
+  SAVE_OUTPUTS <- FALSE
 }
 if (!exists("RAW_COMPUSTAT_FILE", inherits = FALSE)) {
   RAW_COMPUSTAT_FILE <- file.path(INPUT_DIR, "comp_funda.csv")
@@ -326,13 +326,11 @@ if (SAVE_OUTPUTS) {
 
 
 # ---- Friendly console output --------------------------------------------------
-compustat_console_summary(comp)
+if (!isTRUE(get0("QUIET_ANNUAL_PANEL_OUTPUT", ifnotfound = FALSE))) {
+  cat("\nBuilt annual Compustat panel.\n")
+  cat("Compustat raw panel:", format(nrow(comp), big.mark = ","), "\n")
 
-cat("\nBuilt annual Compustat panel.\n")
-cat("Rows in cleaned annual panel:", nrow(comp), "\n")
-cat("Duplicate gvkey-fyear pairs after dedupe:",
-    comp[, .N, by = .(gvkey, fyear)][N > 1, .N], "\n")
-
-if (SAVE_OUTPUTS) {
-  cat("Saved annual panel to:", OUTPUT_PANEL_RDS, "and", OUTPUT_PANEL_CSV, "\n")
+  if (SAVE_OUTPUTS) {
+    cat("Saved annual panel to:", OUTPUT_PANEL_RDS, "and", OUTPUT_PANEL_CSV, "\n")
+  }
 }
