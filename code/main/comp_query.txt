@@ -16,6 +16,11 @@ SELECT
     c.conm,
     c.naics,
     c.sic,
+    c.fic,
+    c.loc,
+    c.incorp,
+    c.state,
+
 
     f.act,
     f.at,
@@ -51,4 +56,5 @@ WHERE f.indfmt = 'INDL'
   AND f.datadate >= '2010-01-01'
   AND c.sic IS NOT NULL
   AND c.sic::integer NOT BETWEEN 4900 AND 4999
-  AND c.sic::integer < 6000;
+  AND c.sic::integer < 6000
+  AND c.fic = 'USA';
