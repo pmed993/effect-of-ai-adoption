@@ -26,8 +26,8 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
-SCRIPT_VERSION = "2026-07-01-get_ai_score_bulk-v7"
-PROMPT_VERSION = "ai_binary_adoption_v2"
+SCRIPT_VERSION = "2026-07-09-get_ai_binary_adoption_v4"
+PROMPT_VERSION = "ai_binary_adoption_v4"
 MODEL_NAME = "meta-llama/Llama-3.2-3B-Instruct"
 TEMPERATURE = 0.0
 DEFAULT_MAX_NEW_TOKENS = 96
@@ -954,26 +954,25 @@ def _binary_adoption_rules() -> str:
     """Return the shared binary AI-adoption decision rules."""
 
     return (
-        "Decide whether the filing text shows that the firm itself uses AI in a specific product, service, workflow, feature, or internal function.\n"
+        "Decide whether the text shows that the firm itself uses or implements AI.\n"
         "The text comes from Form 10-K Item 1 (Business) and Item 7 (MD&A).\n\n"
-        "Set ai_adoption = 1 only when the filing describes a specific AI application by the firm itself.\n"
+        "Set ai_adoption = 1 when the text describes a concrete AI application, AI-enabled capability, or AI implementation by the firm in its own products, services, workflows, features, or internal operations.\n"
         "AI includes machine learning, generative AI, natural language processing, computer vision, predictive models, recommendation systems, autonomous systems, and similar AI systems.\n\n"
-        "Count as adoption when the filing says the firm uses, launches, integrates, deploys, implements, commercializes, or is formally implementing AI for a named business use.\n"
+        "Count as adoption when the text says the firm uses, launches, integrates, deploys, implements, commercializes, or is formally implementing AI for a named business use.\n"
         "A concrete rollout or phased implementation counts if the intended use is specific.\n"
         "Do not require full rollout, quantified outcomes, or firm-wide deployment.\n\n"
-        "Set ai_adoption = 0 when the filing contains only:\n"
+        "Set ai_adoption = 0 only when the filing contains no concrete firm-specific AI application and instead contains only:\n"
         "1. Generic AI discussion, market trends, or broad statements about opportunity.\n"
         "2. AI risk disclosure only.\n"
-        "3. Exploration, evaluation, partnerships, vendor capabilities, hiring, or other discussion without a specific firm application.\n"
-        "4. Customer use of AI only, without evidence that the firm itself uses AI in its own products, services, or operations.\n"
-        "5. AI chips, cloud, software, data centres, or infrastructure that only enable others to build or run AI.\n"
+        "3. Exploration, evaluation, partnerships, vendor capabilities, hiring, or other discussion without a concrete firm application or implementation.\n"
+        "4. Customer use of AI only, without evidence that the firm itself uses or offers AI in its own products, services, or operations.\n"
+        "5. AI chips, cloud, software, data centres, or infrastructure that only enable others to build or run AI, with no evidence of the firm's own AI application.\n"
         "6. Vague analytics, automation, algorithms, or digital transformation language without explicit AI or ML use.\n"
         "7. No meaningful AI narrative about the firm's own activities.\n\n"
         "If ai_adoption = 1, evidence_summary must name the specific product, service, workflow, feature, internal function, or implementation area.\n"
-        "If you cannot state the specific use case set ai_adoption = 0.\n"
-        "If unsure, set ai_adoption = 0.\n"
+        "If you cannot state the specific use case in evidence_summary, set ai_adoption = 0.\n"
+        "If uncertain, choose 1 if firm AI use is more likely than not; otherwise choose 0.\n"
     )
-
 
 
 def _binary_output_schema() -> str:
@@ -1001,8 +1000,8 @@ def build_ai_prompt(text: str) -> str:
         "</filing_text>\n\n"
         "Use exactly this schema:\n"
         f"{_binary_output_schema()}"
-        "If ai_adoption = 1, provide a short evidence_summary and set exclusion_reason_if_zero to \"none\".\n"
-        "If ai_adoption = 0, set qualifying_evidence_found to false and provide the best exclusion_reason_if_zero.\n"
+        "If ai_adoption = 1, set qualifying_evidence_found to true, provide a short evidence_summary, and set exclusion_reason_if_zero to \"none\".\n"
+        "If ai_adoption = 0, set qualifying_evidence_found to false, set evidence_summary to \"\", and provide the best exclusion_reason_if_zero.\n"
         "Return exactly one valid JSON object and nothing else. Do not return markdown, code fences, commentary, explanations, code, pseudocode, multiple options, or any text before or after the JSON object.\n"
     )
 
@@ -1022,7 +1021,9 @@ def build_ai_retry_prompt(text: str) -> str:
         "</filing_text>\n\n"
         "Use exactly this schema:\n"
         f"{_binary_output_schema()}"
-        "Output the JSON object only."
+        "If ai_adoption = 1, set qualifying_evidence_found to true, provide a short evidence_summary, and set exclusion_reason_if_zero to \"none\".\n"
+        "If ai_adoption = 0, set qualifying_evidence_found to false, set evidence_summary to \"\", and provide the best exclusion_reason_if_zero.\n"
+        "Return exactly one valid JSON object and nothing else. Do not return markdown, code fences, explanations, code, pseudocode, multiple options, or the word \"or\".\n"
     )
 
 
