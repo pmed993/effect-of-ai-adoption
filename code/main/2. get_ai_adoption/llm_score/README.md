@@ -1,117 +1,82 @@
-# AI Adoption Labeling Methodology And Model Card
+# AI Adoption Labeling Methodology
 
-This document records the methodology for the filing-level AI adoption process in `2. get_ai_adoption/llm_score`. It is intended for project review, QA, and reproducibility.
+This folder contains the finalized binary LLM pipeline for measuring disclosed
+firm AI adoption from SEC 10-K text. The design is meant for empirical work in
+economics and finance where the target is a reproducible text-based treatment
+measure, not a free-form narrative summary.
 
-## Summary
+## Research Target
 
-The pipeline estimates firm-level AI adoption from SEC Form 10-K disclosures. It reads EDGAR extract chunks, converts Item 1 and Item 7 text into one row per filing, optionally filters to a research lookup of `cik` and `year`, extracts a short AI-relevant filing text section, and sends that filing text to a Data Workspace SageMaker endpoint.
+The output is a disclosure-based measure of whether the filing indicates that
+the firm itself uses or is implementing AI.
 
-The model now extracts structured AI-adoption evidence first, and the pipeline then derives the final adoption variables deterministically in Python:
+What counts:
 
-- `ai_adopted` as the main binary specification
-- `ai_adoption_level` as the secondary ordinal intensity measure
-- `ai_adoption_level_code` as the stored deterministic ordinal code
+- a concrete firm-specific AI application
+- an AI-enabled feature in the firm's own product or service
+- a concrete AI implementation, rollout, or integration in operations
+- a specific internal function that uses AI
 
-This replaces the earlier direct ordinal prompting design. The change improves robustness and reproducibility by separating evidence extraction from final coding.
+What does not count:
 
-- LLMs tend to be more reliable on discrete annotation than on fine-grained continuous scoring
-- earlier continuous-score runs showed clear bunching at a small number of repeated values
+- generic AI discussion or market trends
+- AI risk disclosure only
+- exploration, evaluation, partnerships, or hiring without a concrete use
+- customer use only
+- AI demand, AI-capable hardware, chips, cloud, or enabling infrastructure
+- product or platform names that mention AI but do not explain what the AI does
+- vague analytics or automation language without explicit AI or ML use
 
-Current implementation:
+This is a measure of disclosed AI adoption, not a direct measure of true AI
+deployment, AI capability, AI spending, or productivity.
 
-```text
-Main script: get_ai_score_bulk.py
-Utilities: ai_adoption_utils.py
-Merge script: merge_outputs.py
-Script version: 2026-07-01-get_ai_score_bulk-v6
-Prompt version: ai_evidence_extraction_v1
-Default endpoint: jupyterhub-llama-3-3b-instruct-endpoint
-Invocation method: dwutils.sm.bulk_invoke_endpoint_async
-```
+## Frozen Research Profile
 
-## Intended Use
-
-This process is intended to create a research measure of disclosed firm AI adoption from 10-K filings. The filing-level output can be merged into a firm-year panel for downstream analysis.
-
-Interpretation:
-
-- the LLM extracts qualifying AI use cases and excluded mentions from filing text
-- final `ai_adopted` and `ai_adoption_level_code` are assigned deterministically from that evidence
-- `ai_adoption_level` is only intended as a coarse secondary measure of disclosed intensity
-
-This is a disclosure-based measure, not a direct operational audit.
-
-## Not Intended For
-
-The output should not be used as:
-
-- investment advice
-- a compliance judgement
-- proof that a firm definitively does or does not use AI outside the filing
-- a precise interval-scale measure of AI intensity
-- a measure of AI capability, AI spending, AI productivity, or model quality
-
-## Main Design Decision
-
-The pipeline is designed around structured evidence extraction plus deterministic scoring.
-
-Model output:
+The pipeline is now frozen as:
 
 ```text
-qualifying_ai_use_cases
-excluded_mentions
+research_profile = disclosed_ai_adoption_binary_v1
+script_version   = 2026-07-10-ai_binary_research_v1
+prompt_version   = ai_binary_adoption_research_v1
 ```
 
-Derived outcomes:
+Recommended default settings:
 
 ```text
-ai_adopted ∈ {0, 1}
-ai_adoption_level ∈ {none, low, medium, high}
-ai_adoption_level_code ∈ {0, 1, 2, 3}
+model_label       = llama
+temperature       = 0.0
+max_prompt_chars  = 1800
+sentence_window   = 1
+max_new_tokens    = 128
+prefilter_mode    = hard_zero
 ```
 
-Mapping:
+These settings are written into the row-level CSV output and the chunk summary
+JSON so runs can be reproduced later.
 
-```text
-0 = none
-1 = low
-2 = medium
-3 = high
-```
+## Why This Design
 
-The pipeline derives the final ordinal code deterministically:
+The workflow is intentionally narrow and conservative in structure:
 
-- `0` = no qualifying current firm-use AI evidence
-- `1` = one distinct qualifying use case or only narrow evidence
-- `2` = two or more distinct use cases across areas, but AI is not core to the business model
-- `3` = AI is central to the core product, service, platform, or business model with at least two distinct concrete pieces of evidence
+1. one filing-level binary decision per 10-K
+2. minimal JSON output
+3. positive evidence summary only
+4. deterministic parsing and retry logic
+5. stable prefilter and snippet extraction
 
-`ai_adoption_level` should be used for robustness checks, heterogeneity, or descriptive work. The main empirical specification should use `ai_adopted`.
-
-## Why The Process Was Redesigned
-
-The earlier process used a continuous `ai_adoption_score`. That design had two practical issues:
-
-1. The literature generally supports LLMs more strongly for categorical text annotation than for fine-grained interval-style scoring.
-2. Our earlier runs showed visible clustering on a small number of repeated positive values, which suggests the model was behaving more like an ordinal coder than a smooth continuous scorer.
-
-The new design therefore:
-
-- simplifies the main decision to a binary adoption label
-- keeps a coarse intensity label for richer secondary analysis
-- removes the false precision of decimals such as `0.63` versus `0.64`
+This is closer to the text-classification literature than a looser prompt that
+asks the model to reason at length or produce multiple labels at once.
 
 ## Input Data
 
-The process reads RDS chunk files named:
+The scripts expect EDGAR chunk files such as:
 
 ```text
 extract_df_chunk_00001.rds
 extract_df_chunk_00002.rds
-...
 ```
 
-Each chunk is expected to contain a data frame with these columns:
+Each chunk should contain at least:
 
 ```text
 item
@@ -122,554 +87,192 @@ form_type
 text
 ```
 
-The current workflow reads chunks from the Data Workspace S3 team area using `dwutils.s3.read`.
+The pipeline reshapes the long data into one filing-level row using:
 
-Typical team setting:
+- Item 1 (Business)
+- Item 7 (MD&A)
 
-```text
---team effect_of_ai
-```
+By default it keeps only `10-K`. Use `--include-amended` to include `10-K/A`.
 
-If the chunk files are stored in a subfolder under the team folder, use `--chunk-prefix`.
+## Prefilter Design
 
-## Filing Construction
+The prefilter now has two distinct dictionaries:
 
-The source data is long format, with separate rows for different filing items. The process converts this into one row per filing.
+1. `AI_TRIGGER_PATTERNS`
+   These are explicit AI terms used for the hard-zero call decision.
 
-Rows are retained when:
+2. `AI_RANKING_ONLY_PATTERNS`
+   These are broader AI-adjacent terms used only for snippet ranking.
 
-```text
-form_type = 10-K
-item in {item1, item7}
-```
+This distinction matters. For research use, a filing should not be forced into
+the LLM queue just because it says `predictive analytics` or `big data`, but
+those phrases can still help rank nearby sentences once an explicit AI mention
+exists in the filing.
 
-Amended filings are excluded by default. They are included only if:
-
-```text
---include-amended
-```
-
-Rows are grouped by:
+Examples of explicit trigger terms:
 
 ```text
-accession_number
-cik
-year
-form_type
-item
-```
-
-Duplicate item text within a group is collapsed before reshaping. The process then pivots the filing into:
-
-```text
-item1_text
-item7_text
-combined_text
-```
-
-The model receives one combined filing text section per filing, not separate Item 1 and Item 7 labels.
-
-The output also records:
-
-```text
-has_item1
-has_item7
-item1_chars
-item7_chars
-combined_chars
-```
-
-These fields support QA for missing sections and short filings.
-
-## Research Lookup Filter
-
-The research sample is provided through a lookup CSV containing at least:
-
-```text
-cik
-year
-```
-
-The lookup is applied after converting chunks to filing level and before prefiltering or LLM calls. Only filing rows whose normalized `cik` and `year` appear in the lookup are labeled.
-
-The output summary records:
-
-```text
-n_filings_before_lookup
-n_filings_after_lookup
-lookup_csv
-```
-
-## Text Selection For The LLM
-
-Full 10-K filings can be very long. The process does not send the whole filing to the model. Instead, it extracts a short filing text section from the combined Item 1 and Item 7 text.
-
-The snippet extraction logic:
-
-1. Normalizes whitespace.
-2. Splits the filing into sentence-like segments.
-3. Finds sentences containing broad AI dictionary terms.
-4. Adds nearby context using `--sentence-window`.
-5. Prioritizes windows with stronger AI language and operational cues.
-6. Prioritizes windows with operational cues such as `use`, `deployed`, `integrated`, `detect`, `optimize`, or `personalize`.
-7. Downweights windows that look like risk-only, speculative, regulatory, market-theme, future-plan, pilot, or research-only discussion.
-8. Returns selected sentences in filing order up to `--max-prompt-chars`.
-
-Default QA setting:
-
-```text
---max-prompt-chars 1500
-```
-
-If no ranking keywords are found and the LLM is still called, the snippet falls back to the start of the combined filing text.
-
-## Keyword Prefilter
-
-The v4 prefilter uses a broader AI dictionary to reduce missed filings. The
-code still keeps the terms in two readable lists, but the hard-zero call
-decision now counts both groups together.
-
-Trigger terms:
-
-```text
+AI
+ML
+NLP
 artificial intelligence
 machine learning
 deep learning
-neural network
-computer vision
-natural language processing
 generative AI
 large language model
-LLM
+AI-powered
+AI-enabled
 ```
 
-Ranking-only terms:
+Examples of ranking-only terms:
 
 ```text
-big data
-business intelligence
-data science
 predictive analytics
+fraud detection
+anomaly detection
+business intelligence
 data mining
 pattern recognition
-anomaly detection
-recommendation engine
-expert systems
+robotic process automation
 ```
 
-Both groups can now justify an LLM call in `hard_zero` mode. The broader list
-raises recall by sending more AI-adjacent filings to the model.
-
-The process supports three prefilter modes.
-
-`off`:
-
-Calls the LLM for every non-empty filing.
-
-`hard_zero`:
-
-If no AI dictionary keyword is found, assigns:
+Recommended production mode:
 
 ```text
-ai_adopted = 0
-ai_adoption_level = none
-score_status = prefilter_zero_no_keyword
-llm_called = False
+--prefilter-mode hard_zero
 ```
 
-`audit`:
+Recommended audit mode for validation:
 
-Mostly behaves like `hard_zero`, but sends a deterministic sample of no-keyword
-filings to the LLM. This estimates whether the broader dictionary is still
-missing some adopters.
+```text
+--prefilter-mode audit --prefilter-audit-rate 0.02
+```
+
+## Snippet Extraction
+
+The model does not receive the full filing. The code:
+
+1. normalizes whitespace
+2. splits into sentence-like segments
+3. finds AI-ranked sentences
+4. adds nearby context with `sentence_window`
+5. scores windows using operational and low-value cues
+6. returns the best excerpt up to `max_prompt_chars`
+
+This keeps the prompt short enough for smaller instruct models while preserving
+the most relevant context.
 
 ## Prompt Design
 
-The prompt is designed for small instruct models such as `llama-3-3b`. It follows a few practical rules drawn from the text-annotation literature and official prompt-engineering guidance:
-
-- keep the task zero-shot and explicit
-- put the main decision rule near the top
-- use one ordinal classification code and derive the binary adoption variable from it
-- use short, structured JSON output
-- avoid long reasoning instructions and avoid chain-of-thought
-- define what does not count as adoption
-
-The prompt explicitly tells the model that the filing text comes from:
-
-```text
-Item 1 (Business)
-Item 7 (MD&A)
-```
-
-The core labeling rule is:
-
-```text
-Return one code:
-0 = none
-1 = low
-2 = medium
-3 = high
-```
-
-The prompt tells the model:
-
-- count adoption only when the text points to a concrete AI system, model, feature, or workflow that the firm itself uses or deploys in its own products, services, or operations
-- not count text that only suggests AI relevance or AI capability without a concrete firm use
-- not count products, chips, software, or infrastructure that enable customers to build or run AI unless the filing says the firm's own product or operation itself uses AI
-- count distinct concrete use cases, not the number of AI terms or sentences
-- not infer adoption from industry context, firm name, product names, or vague tech language
-- not count AI market exposure, customer use, general AI discussion, future plans, or pilots
-- use `1` for limited adoption: one concrete AI use case by the firm that is narrow or not central
-- use `2` for substantial adoption: clear operational AI use in multiple areas, products, or functions
-- use `3` only when the filing shows with repeated concrete evidence that AI is central to the firm's core product, service, or business model, not just one important use case
-- if there is only one concrete AI use case, not return `2` or `3`
-
-Positive clues include statements that the firm uses AI or ML to:
-
-- improve products
-- personalize services
-- support decisions
-- automate tasks
-- forecast outcomes
-- detect fraud
-- recommend content
-- design products
-- improve operations
-
-Level meanings:
-
-```text
-none = no explicit evidence of AI adoption in the filing text
-low = limited adoption; one concrete AI use case by the firm, narrow or not central
-medium = substantial adoption; clear operational AI use in multiple areas, products, or functions
-high = repeated concrete evidence that AI is central to the firm's core product, service, or business model
-```
-
-The production scoring prompt asks only for the single field needed for labeling:
-
-```text
-ai_level_code
-```
-
-The pipeline derives `ai_adopted`, `ai_adoption_level`, and `ai_adoption_level_code` from that one ordinal code. This keeps the output small and reduces inconsistency risk for smaller models.
-
-## Model Invocation
-
-The process uses Data Workspace bulk asynchronous SageMaker invocation:
-
-```text
-dwutils.sm.bulk_invoke_endpoint_async
-```
-
-Each pending LLM call is represented by:
-
-- a linked object id
-- an invocation dictionary with `EndpointName`, `Input`, and `ContentType`
-
-The `Input` is a JSON string containing:
-
-```text
-inputs: prompt text
-parameters:
-  temperature
-  max_new_tokens
-  return_full_text
-```
-
-Current default generation setting:
-
-```text
---max-new-tokens 220
-```
-
-This limits response length. Filing text length is controlled separately by `--max-prompt-chars`.
-
-## Model Output Schema
-
-The model is instructed to return exactly one JSON object:
+The prompt asks only for a binary label plus positive evidence:
 
 ```json
-{"ai_level_code": 0_or_1_or_2_or_3}
+{
+  "ai_adoption": 0,
+  "evidence_summary": ""
+}
 ```
 
-Required fields:
+Prompt principles:
 
-```text
-ai_level_code
-```
+- decide only from filing text
+- no chain-of-thought
+- no zero-reason taxonomy
+- positive cases require a short evidence summary
+- zero cases return an empty evidence summary
+- output exactly one JSON object
 
-Rules:
+The model is not asked to produce `qualifying_evidence_found` or a reason code
+for zero. Those are derived or left blank by the parser for compatibility.
 
-- `ai_level_code` must be `0`, `1`, `2`, or `3`
-- `0 = none`
-- `1 = low`
-- `2 = medium`
-- `3 = high`
+## Parsing Rules
 
-## Model Output Parsing
+The parser accepts valid JSON objects and applies deterministic rules:
 
-The parser:
+- `ai_adoption = 1` requires a non-empty `evidence_summary`
+- positive rows are stored with `qualifying_evidence_found = true`
+- zero rows are stored with `qualifying_evidence_found = false`
+- `exclusion_reason_if_zero` is retained as a compatibility column but is blank
+  in the finalized binary workflow
 
-1. Extracts generated text from common endpoint response shapes.
-2. Finds balanced JSON-looking objects while respecting quoted strings and escapes.
-3. Validates all JSON objects that satisfy the ordinal-code schema.
-4. Rejects the response if the valid JSON objects contain conflicting `ai_level_code` values.
-5. If no valid JSON is found, tries a fallback extractor that looks for one direct `ai_level_code` assignment or one plain-English classification-code statement in the raw text.
+If the first response is malformed, the row gets one retry with a stricter
+JSON-only prompt.
 
-If parsing fails on the first pass, the output keeps the row and records a failure status such as:
+## Main Outputs
 
-```text
-missing_output
-no_json_found
-no_valid_score_json
-invalid_level_code
-conflicting_level_codes
-```
-
-Parser-like failures automatically receive a second LLM call using the same labeling rule wrapped in a stricter JSON-only prompt. Successful rescues are recorded as:
-
-```text
-ok_after_retry
-prefilter_audit_ok_after_retry
-```
-
-## Output Files
-
-For each chunk, the process writes:
+Per chunk:
 
 ```text
 extract_df_chunk_XXXXX_llama_scores.csv
-extract_df_chunk_XXXXX_summary.json
+extract_df_chunk_XXXXX_llama_summary.json
 ```
 
-The filenames still use `_scores.csv` for backward compatibility, but the contents are now binary-first adoption labels rather than continuous scores.
-
-For each run, it writes:
+Per run:
 
 ```text
 run_manifest_<RUN_ID>.csv
 ```
 
-By default, outputs are written to:
-
-```text
-<out-dir>/<RUN_ID>/
-```
-
-Use `--flat-output` only when a single output folder without run subfolders is desired.
-
-## Key Output Columns
-
-Core identifiers:
+Important output fields:
 
 ```text
 run_id
 script_version
 prompt_version
-source_label
-chunk_id
-accession_number
-cik
-year
-form_type
-```
-
-Filing-text QA:
-
-```text
-has_item1
-has_item7
-item1_chars
-item7_chars
-combined_chars
-keyword_hits
-ranking_keyword_hits
-snippet_chars
-snippet_sha256
-```
-
-Prefilter and LLM QA:
-
-```text
+research_profile
+llm_model
+temperature
+max_new_tokens
+max_prompt_chars
+sentence_window
 prefilter_mode
-prefilter_decision
-prefilter_audit_sample
-llm_called
-endpoint
-job_id
-retry_job_id
-raw_json_sha256
-score_status
-initial_score_status
-retry_attempted
-retry_score_status
-```
-
-The status column names keep the older `score` wording for compatibility, but they now refer to label parsing and endpoint status rather than a continuous score.
-
-Main adoption outputs:
-
-```text
-ai_adopted
-ai_adoption_level
-ai_adoption_level_code
-explanation
-```
-
-`explanation` remains in the output schema for compatibility, but it is no longer required for a filing to be scored successfully.
-
-Optional debug output:
-
-```text
-raw_model_output
-raw_json
-```
-
-These fields are included only when `--save-raw-json` is used. `raw_model_output` stores the raw text returned by the model, which is useful for debugging parser failures.
-
-## Merge Outputs
-
-`merge_outputs.py` combines chunk outputs into:
-
-- `ai_adoption_all_chunk_outputs.csv`
-- `ai_adoption_filing_master.csv`
-- `ai_adoption_firm_year_panel.csv`
-
-The merge script now treats the main model outputs as:
-
-```text
-llama_ai_adopted
-llama_ai_adoption_level
-llama_ai_adoption_level_code
-```
-
-and similarly for Mistral when provided.
-
-Duplicate-resolution rules such as `max_llama` now prefer:
-
-1. adopted rows over non-adopted rows
-2. stronger adoption levels over weaker adoption levels
-
-The merge script also keeps backward compatibility with older continuous-score files and older legacy boolean fields when they are encountered.
-
-## Recommended Production-Style Settings
-
-Single chunk:
-
-```bash
-python3 get_ai_score_bulk.py \
-  --team effect_of_ai \
-  --chunk-ids 1 \
-  --lookup-csv ../lookup/cik_year.csv \
-  --prefilter-mode hard_zero \
-  --model-label llama \
-  --max-prompt-chars 1500 \
-  --max-new-tokens 220 \
-  --max-concurrent-invocations 10 \
-  --max-workers 5 \
-  --out-dir output/test_bulk_chunk1_full \
-  --log-level INFO
-```
-
-Small chunk range:
-
-```bash
-python3 get_ai_score_bulk.py \
-  --team effect_of_ai \
-  --chunk-range 1 3 \
-  --lookup-csv ../lookup/cik_year.csv \
-  --prefilter-mode hard_zero \
-  --model-label llama \
-  --max-prompt-chars 1500 \
-  --max-new-tokens 220 \
-  --max-concurrent-invocations 10 \
-  --max-workers 5 \
-  --out-dir output/test_bulk_chunks_1_3 \
-  --log-level INFO
-```
-
-Merge chunk outputs:
-
-```bash
-python3 merge_outputs.py \
-  --llama-dir output/test_bulk_chunks_1_3 \
-  --out-dir output/final_merged \
-  --lookup-csv ../lookup/cik_year.csv \
-  --filing-duplicate-rule max_llama \
-  --firm-year-rule max_llama
-```
-
-## QA Checks Before Scaling
-
-For every QA run, inspect:
-
-```text
-score_status
-llm_called
 keyword_hits
 ranking_keyword_hits
-prefilter_decision
-snippet_chars
-ai_adopted
-ai_adoption_level
-explanation
-has_item1
-has_item7
+llm_called
+parse_status
+score_status
+ai_adoption
+qualifying_evidence_found
+evidence_summary
 ```
 
-Healthy output should show:
+## Recommended Production Command
 
-- `score_status = ok` for most or all LLM-called rows
-- low parser-failure rates after the retry pass
-- explanations that are specific to the filing text
-- `llm_called = False` only where the prefilter decision explains the skip
-- `snippet_chars > 0` for LLM-called rows
-- plausible missing Item 1 and Item 7 counts
-- a reasonable distribution across `ai_adopted` and `ai_adoption_level`
+```bash
+python3 get_ai_score_bulk.py \
+  --team effect_of_ai \
+  --lookup-csv ../lookup/cik_year.csv \
+  --model-label llama \
+  --prefilter-mode hard_zero \
+  --max-prompt-chars 1800 \
+  --sentence-window 1 \
+  --max-new-tokens 128 \
+  --temperature 0.0 \
+  --out-dir output/final_llama_binary
+```
 
-## Known Limitations
+## Interpretation For Empirical Use
 
-Disclosure bias:
-
-The labels measure disclosed evidence, not actual adoption in all firm operations.
-
-Keyword prefilter risk:
-
-`hard_zero` can miss AI adoption if a filing describes AI-like systems without using any matched trigger term. Audit mode should be used to estimate this risk.
-
-Snippet risk:
-
-The LLM sees only selected snippets, not the full filing. Relevant evidence can still be missed.
-
-Model variability:
-
-LLM outputs can vary across runs, endpoint versions, and generation settings. `temperature = 0.0` reduces but does not eliminate variability.
-
-Parsing risk:
-
-The model may occasionally return malformed JSON. Parser failures are retained in the output through `score_status` rather than silently dropped.
-
-Concept boundary:
-
-Some filings remain genuinely ambiguous at the boundary between deployed use, strategic aspiration, and generic AI-market exposure.
-
-Temporal interpretation:
-
-The label is based on the filing period and text provided. It should not be interpreted as current real-time adoption unless the filing itself is current.
-
-## Reproducibility
-
-Each output row includes:
+The recommended main treatment is:
 
 ```text
-run_id
-script_version
-prompt_version
-endpoint
-source_label
-chunk_id
-snippet_sha256
-raw_json_sha256
+ai_adoption ∈ {0, 1}
 ```
 
-These fields allow reviewers to identify the code version, prompt version, endpoint, source chunk, and exact snippet hash used for each filing label.
+Suggested interpretation:
+
+- `1` means the firm discloses a concrete AI use or implementation in the filing
+- `0` means the filing does not disclose such evidence under this rule
+
+This variable should be described in papers as a disclosure-based AI adoption
+measure built from 10-K Item 1 and Item 7 text using a frozen prompt and
+deterministic post-processing rules.
+
+## Limitations
+
+- It measures disclosed adoption, not latent adoption.
+- It depends on the research sample and EDGAR text extraction quality.
+- Hard-zero prefiltering can still miss adopters if the explicit AI dictionary
+  misses a term, so periodic audit-mode validation is still good practice.
+- Small LLMs can still make classification errors, which is why the workflow
+  keeps prompt structure minimal and output parsing strict.

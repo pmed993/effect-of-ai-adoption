@@ -61,7 +61,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument(
         "--prefilter-mode",
         choices=["off", "hard_zero", "audit"],
-        default="hard_zero",
+        default=u.DEFAULT_PREFILTER_MODE,
         help="hard_zero skips no-keyword filings; audit samples no-keyword filings; off calls LLM on all non-empty filings.",
     )
     ap.add_argument("--prefilter-audit-rate", type=float, default=0.02)
@@ -72,8 +72,8 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--model-label", choices=["llama", "mistral"], default="llama", help="Short label used for endpoint defaulting and output naming.")
     ap.add_argument("--endpoint", default=None, help="Override SageMaker endpoint. If omitted, uses the default for --model-label.")
     ap.add_argument("--llm-checkpoint", default=None, help="Exact model checkpoint name to store in outputs. Defaults to the configured checkpoint for --model-label.")
-    ap.add_argument("--max-prompt-chars", type=int, default=1500)
-    ap.add_argument("--sentence-window", type=int, default=1)
+    ap.add_argument("--max-prompt-chars", type=int, default=u.DEFAULT_MAX_PROMPT_CHARS)
+    ap.add_argument("--sentence-window", type=int, default=u.DEFAULT_SENTENCE_WINDOW)
     ap.add_argument("--temperature", type=float, default=u.TEMPERATURE)
     ap.add_argument("--max-new-tokens", type=int, default=u.DEFAULT_MAX_NEW_TOKENS)
     ap.add_argument("--max-concurrent-invocations", type=int, default=25)
@@ -248,10 +248,13 @@ def repair_failed_rows_from_csv(
         record["run_id"] = run_id
         record["script_version"] = u.SCRIPT_VERSION
         record["prompt_version"] = u.PROMPT_VERSION
+        record["research_profile"] = u.RESEARCH_PROFILE
         record["llm_model"] = args.llm_checkpoint
         record["llm_checkpoint"] = args.llm_checkpoint
         record["temperature"] = float(args.temperature)
         record["max_new_tokens"] = int(args.max_new_tokens)
+        record["max_prompt_chars"] = int(args.max_prompt_chars)
+        record["sentence_window"] = int(args.sentence_window)
         record["endpoint"] = args.endpoint
         record["snippet_chars"] = len(snippet)
         record["snippet_sha256"] = u.sha256_text(snippet)
@@ -296,6 +299,8 @@ def repair_failed_rows_from_csv(
         "prefilter_mode": str(out_df.get("prefilter_mode", pd.Series([args.prefilter_mode])).iloc[0]),
         "prefilter_audit_rate": float(out_df.get("prefilter_audit_rate", pd.Series([args.prefilter_audit_rate])).iloc[0]) if "prefilter_audit_rate" in out_df.columns else args.prefilter_audit_rate,
         "prefilter_audit_limit": int(out_df.get("prefilter_audit_limit", pd.Series([args.prefilter_audit_limit])).iloc[0]) if "prefilter_audit_limit" in out_df.columns else args.prefilter_audit_limit,
+        "max_prompt_chars": int(out_df.get("max_prompt_chars", pd.Series([args.max_prompt_chars])).iloc[0]) if "max_prompt_chars" in out_df.columns else args.max_prompt_chars,
+        "sentence_window": int(out_df.get("sentence_window", pd.Series([args.sentence_window])).iloc[0]) if "sentence_window" in out_df.columns else args.sentence_window,
         "lookup_csv": args.lookup_csv,
         "n_filings_before_lookup": int(len(repaired_df)),
         "n_filings_after_lookup": int(len(repaired_df)),
@@ -312,6 +317,8 @@ def repair_failed_rows_from_csv(
                     "prefilter_mode": old_summary.get("prefilter_mode", summary_kwargs["prefilter_mode"]),
                     "prefilter_audit_rate": old_summary.get("prefilter_audit_rate", summary_kwargs["prefilter_audit_rate"]),
                     "prefilter_audit_limit": old_summary.get("prefilter_audit_limit", summary_kwargs["prefilter_audit_limit"]),
+                    "max_prompt_chars": old_summary.get("max_prompt_chars", summary_kwargs["max_prompt_chars"]),
+                    "sentence_window": old_summary.get("sentence_window", summary_kwargs["sentence_window"]),
                     "lookup_csv": old_summary.get("lookup_csv", summary_kwargs["lookup_csv"]),
                     "n_filings_before_lookup": old_summary.get("n_filings_before_lookup", summary_kwargs["n_filings_before_lookup"]),
                     "n_filings_after_lookup": old_summary.get("n_filings_after_lookup", summary_kwargs["n_filings_after_lookup"]),
@@ -520,6 +527,8 @@ def process_chunk(
         prefilter_mode=args.prefilter_mode,
         prefilter_audit_rate=args.prefilter_audit_rate,
         prefilter_audit_limit=args.prefilter_audit_limit,
+        max_prompt_chars=args.max_prompt_chars,
+        sentence_window=args.sentence_window,
         lookup_csv=args.lookup_csv,
         n_filings_before_lookup=n_before_lookup,
         n_filings_after_lookup=n_after_lookup,

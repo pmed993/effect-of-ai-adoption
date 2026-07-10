@@ -26,11 +26,15 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
-SCRIPT_VERSION = "2026-07-09-get_ai_binary_adoption_v4"
-PROMPT_VERSION = "ai_binary_adoption_v4"
+SCRIPT_VERSION = "2026-07-10-ai_binary_research_v1"
+PROMPT_VERSION = "ai_binary_adoption_research_v1"
+RESEARCH_PROFILE = "disclosed_ai_adoption_binary_v1"
 MODEL_NAME = "meta-llama/Llama-3.2-3B-Instruct"
 TEMPERATURE = 0.0
-DEFAULT_MAX_NEW_TOKENS = 96
+DEFAULT_MAX_NEW_TOKENS = 128
+DEFAULT_MAX_PROMPT_CHARS = 1800
+DEFAULT_SENTENCE_WINDOW = 1
+DEFAULT_PREFILTER_MODE = "hard_zero"
 
 DEFAULT_ENDPOINTS = {
     "llama": "jupyterhub-llama-3-3b-instruct-endpoint",
@@ -53,72 +57,86 @@ CHUNK_RE = re.compile(r"^extract_df_chunk_(\d{5})\.rds$")
 WHITESPACE_RE = re.compile(r"\s+")
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[\.\!\?\;])\s+|\n+")
 
-# The prefilter now uses a broader AI dictionary. We still keep explicit trigger
-# terms and broader adjacent terms in separate lists for readability, but the
-# call decision counts hits from both lists.
+# The research workflow separates high-precision trigger terms from broader
+# ranking-only terms. Trigger terms decide whether a filing reaches the LLM in
+# hard-zero mode. Ranking-only terms help snippet selection but do not justify
+# an LLM call on their own.
 AI_TRIGGER_PATTERNS = [
-    r"\bartificial intelligence\b",
     r"\bA\.I\.\b",
     r"\bAI/ML\b",
-    r"\bmachine learning\b",
-    r"\bdeep learning\b",
-    r"\bneural networks?\b",
+    r"\bAI\b",
+    r"\bML\b",
+    r"\bNLP\b",
+    r"\bai[- ]?(enabled|powered|driven|based)\b",
+    r"\bagentic ai\b",
+    r"\bai agents?\b",
+    r"\bai assistants?\b",
+    r"\bartificial intelligence\b",
     r"\bartificial neural networks?\b",
-    r"\bcomputer vision\b",
-    r"\bnatural language processing\b",
-    r"\bnatural language understanding\b",
-    r"\bmachine translation\b",
-    r"\bgenerative ai\b",
-    r"\bgenai\b",
-    r"\blarge language models?\b",
-    r"\bllms?\b",
+    r"\bbots?\b",
     r"\bchatbots?\b",
-    r"\bsupport vector machines?\b",
-    r"\bsupervised learning\b",
-    r"\bunsupervised learning\b",
     r"\bclassification algorithms?\b",
     r"\bclustering algorithms?\b",
-    r"\brecommender systems?\b",
-    r"\binformation extraction\b",
-    r"\bdimensionality reduction\b",
-    r"\bkernel methods?\b",
-    r"\bnamed entity recognition\b",
-    r"\bentity recognition\b",
-    r"\bintent classification\b",
-    r"\breinforcement learning\b",
-    r"\bfoundation models?\b",
-    r"\btransformer models?\b",
-    r"\bgenerative models?\b",
+    r"\bcomputer vision\b",
     r"\bconversational ai\b",
-    r"\bvirtual assistants?\b",
     r"\bcopilots?\b",
-    r"\bai assistants?\b",
-    r"\bai agents?\b",
-    r"\bagentic ai\b",
+    r"\bdeep[- ]learning\b",
+    r"\bdeep learning\b",
+    r"\bdimensionality reduction\b",
+    r"\bentity recognition\b",
+    r"\bfoundation models?\b",
+    r"\bgen ai\b",
+    r"\bgenai\b",
+    r"\bgenerative ai\b",
+    r"\bgenerative models?\b",
+    r"\binformation extraction\b",
+    r"\bintent classification\b",
+    r"\bkernel methods?\b",
+    r"\blarge[- ]language models?\b",
+    r"\blarge language models?\b",
+    r"\bllms?\b",
+    r"\bmachine intelligence\b",
+    r"\bmachine[- ]learning\b",
+    r"\bmachine learning\b",
+    r"\bmachine translation\b",
+    r"\bnamed entity recognition\b",
+    r"\bnatural language processing\b",
+    r"\bnatural language understanding\b",
+    r"\bneural networks?\b",
+    r"\brecommender systems?\b",
+    r"\breinforcement learning\b",
+    r"\bsupervised learning\b",
+    r"\bsupport vector machines?\b",
+    r"\btransformer models?\b",
+    r"\bunsupervised learning\b",
+    r"\bvirtual assistants?\b",
 ]
 
 AI_RANKING_ONLY_PATTERNS = [
+    r"\badaptive algorithms?\b",
+    r"\balgorithmic decision-making\b",
+    r"\banomaly detection\b",
+    r"\bautomated decision-making\b",
     r"\bbig data\b",
     r"\bbusiness intelligence\b",
+    r"\bcognitive science\b",
+    r"\bdata mining\b",
     r"\bdata science\b",
     r"\bdata scientists?\b",
-    r"\bimage recognition\b",
-    r"\bobject recognition\b",
-    r"\bspeech recognition\b",
-    r"\bfacial recognition\b",
     r"\bdecision engines?\b",
+    r"\bexpert systems?\b",
+    r"\bfacial recognition\b",
     r"\bfraud detection\b",
     r"\bhandwriting recognition\b",
-    r"\brobotic process automation\b",
+    r"\bimage recognition\b",
+    r"\blanguage models?\b",
+    r"\bobject recognition\b",
+    r"\boptical character recognition\b",
+    r"\bpattern recognition\b",
     r"\bpredictive analytics?\b",
     r"\brecommendation engines?\b",
-    r"\bexpert systems?\b",
-    r"\bdata mining\b",
-    r"\bpattern recognition\b",
-    r"\banomaly detection\b",
-    r"\blanguage models?\b",
-    r"\balgorithmic decision-making\b",
-    r"\bautomated decision-making\b",
+    r"\brobotic process automation\b",
+    r"\bspeech recognition\b",
 ]
 
 
@@ -128,9 +146,9 @@ def compile_keyword_patterns(patterns: Sequence[str]) -> re.Pattern[str]:
     return re.compile(r"(?i:" + "|".join(patterns) + r")")
 
 
-AI_TRIGGER_KEYWORDS = compile_keyword_patterns(AI_TRIGGER_PATTERNS + AI_RANKING_ONLY_PATTERNS)
+AI_TRIGGER_KEYWORDS = compile_keyword_patterns(AI_TRIGGER_PATTERNS)
 AI_RANKING_ONLY_KEYWORDS = compile_keyword_patterns(AI_RANKING_ONLY_PATTERNS)
-AI_RANKING_KEYWORDS = AI_TRIGGER_KEYWORDS
+AI_RANKING_KEYWORDS = compile_keyword_patterns(AI_TRIGGER_PATTERNS + AI_RANKING_ONLY_PATTERNS)
 
 # These words help rank snippets. They do not determine the final label.
 # They only make operational evidence more likely to be sent to the LLM.
@@ -559,10 +577,13 @@ def preferred_output_columns(save_raw_json: bool) -> list[str]:
         "run_id",
         "script_version",
         "prompt_version",
+        "research_profile",
         "llm_model",
         "llm_checkpoint",
         "temperature",
         "max_new_tokens",
+        "max_prompt_chars",
+        "sentence_window",
         "source_label",
         "chunk_id",
         "accession_number",
@@ -980,9 +1001,7 @@ def _binary_output_schema() -> str:
     return (
         "{\n"
         '  "ai_adoption": 0,\n'
-        '  "qualifying_evidence_found": false,\n'
-        '  "evidence_summary": "",\n'
-        '  "exclusion_reason_if_zero": "none|generic_ai|risk_only|future_only|customer_only|enabling_infrastructure|vague|not_ai|other"\n'
+        '  "evidence_summary": ""\n'
         "}\n"
     )
 
@@ -991,7 +1010,8 @@ def build_ai_prompt(text: str) -> str:
     """Build the main binary AI-adoption prompt for one filing text."""
 
     return (
-        "You are classifying whether a firm has adopted AI based on filing text.\n\n"
+        "You are classifying whether a firm uses or implements AI based on filing text.\n\n"
+        "Base your decision only on the filing text. Do not infer adoption from industry context or general knowledge.\n\n"
         f"{_binary_adoption_rules()}\n"
         "FILING TEXT TO EVALUATE:\n"
         "<filing_text>\n"
@@ -999,8 +1019,8 @@ def build_ai_prompt(text: str) -> str:
         "</filing_text>\n\n"
         "Use exactly this schema:\n"
         f"{_binary_output_schema()}"
-        "If ai_adoption = 1, set qualifying_evidence_found to true, provide a short evidence_summary, and set exclusion_reason_if_zero to \"none\".\n"
-        "If ai_adoption = 0, set qualifying_evidence_found to false, set evidence_summary to \"\", and provide the best exclusion_reason_if_zero.\n"
+        "If ai_adoption = 1, provide a short evidence_summary.\n"
+        "If ai_adoption = 0, set evidence_summary to \"\".\n"
         "Choose one final answer. Return exactly one valid JSON object and nothing else. Do not return markdown, code fences, commentary, explanations, code, pseudocode, template placeholders, multiple options, the word \"or\", or any text before or after the JSON object.\n"
     )
 
@@ -1013,6 +1033,7 @@ def build_ai_retry_prompt(text: str) -> str:
         "Do not explain your answer.\n"
         "Do not return markdown.\n"
         "Do not return multiple JSON objects.\n\n"
+        "Base your decision only on the filing text. Do not infer adoption from industry context or general knowledge.\n\n"
         f"{_binary_adoption_rules()}\n"
         "FILING TEXT TO EVALUATE:\n"
         "<filing_text>\n"
@@ -1020,8 +1041,8 @@ def build_ai_retry_prompt(text: str) -> str:
         "</filing_text>\n\n"
         "Use exactly this schema:\n"
         f"{_binary_output_schema()}"
-        "If ai_adoption = 1, set qualifying_evidence_found to true, provide a short evidence_summary, and set exclusion_reason_if_zero to \"none\".\n"
-        "If ai_adoption = 0, set qualifying_evidence_found to false, set evidence_summary to \"\", and provide the best exclusion_reason_if_zero.\n"
+        "If ai_adoption = 1, provide a short evidence_summary.\n"
+        "If ai_adoption = 0, set evidence_summary to \"\".\n"
         "Choose one final answer. Return exactly one valid JSON object and nothing else. Do not return markdown, code fences, explanations, code, pseudocode, template placeholders, multiple options, or the word \"or\".\n"
     )
 
@@ -1146,19 +1167,12 @@ def parse_binary_adoption_object(obj: Any) -> dict[str, Any]:
     qualifying = normalize_bool(
         obj.get("qualifying_evidence_found", obj.get("evidence_found", obj.get("qualifying_evidence")))
     )
-    if qualifying is None:
-        raise ValueError("qualifying_evidence_found must be true or false.")
-
     evidence_summary = normalize_whitespace(obj.get("evidence_summary", obj.get("summary", "")))
-    exclusion_reason = normalize_binary_exclusion_reason(
-        obj.get("exclusion_reason_if_zero", obj.get("exclusion_reason", ""))
-    )
-    if not exclusion_reason:
-        raise ValueError("exclusion_reason_if_zero is missing or invalid.")
-
-    # Apply a conservative consistency rule: a positive classification requires
-    # both ai_adoption = 1 and qualifying_evidence_found = true.
-    if ai_adoption == 1 and qualifying:
+    if ai_adoption == 1:
+        if qualifying is False:
+            raise ValueError("Positive ai_adoption cannot set qualifying_evidence_found to false.")
+        if not evidence_summary:
+            raise ValueError("Positive ai_adoption requires a non-empty evidence_summary.")
         return {
             "ai_adoption": 1,
             "qualifying_evidence_found": True,
@@ -1166,11 +1180,14 @@ def parse_binary_adoption_object(obj: Any) -> dict[str, Any]:
             "exclusion_reason_if_zero": "none",
         }
 
+    if qualifying is True:
+        raise ValueError("Zero ai_adoption cannot set qualifying_evidence_found to true.")
+
     return {
         "ai_adoption": 0,
         "qualifying_evidence_found": False,
         "evidence_summary": "",
-        "exclusion_reason_if_zero": exclusion_reason if exclusion_reason != "none" else "other",
+        "exclusion_reason_if_zero": "",
     }
 
 
@@ -1191,7 +1208,7 @@ def build_binary_parse_result(
         else (
             "Qualifying current firm-use AI evidence found."
             if ai_adoption == 1
-            else f"No qualifying current firm-use AI evidence found. Main exclusion reason: {exclusion_reason_if_zero}."
+            else "No qualifying current firm-use AI evidence found."
         )
     )
     return {
@@ -1313,6 +1330,8 @@ def base_output_record(
     llm_checkpoint: str,
     temperature: float,
     max_new_tokens: int,
+    max_prompt_chars: int,
+    sentence_window: int,
     endpoint: str,
     prefilter_mode: str,
     prefilter_audit_sample: bool,
@@ -1325,10 +1344,13 @@ def base_output_record(
         "run_id": run_id,
         "script_version": SCRIPT_VERSION,
         "prompt_version": PROMPT_VERSION,
+        "research_profile": RESEARCH_PROFILE,
         "llm_model": llm_model,
         "llm_checkpoint": llm_checkpoint,
         "temperature": float(temperature),
         "max_new_tokens": int(max_new_tokens),
+        "max_prompt_chars": int(max_prompt_chars),
+        "sentence_window": int(sentence_window),
         "source_label": source_label,
         "chunk_id": chunk_id,
         "accession_number": str(row.get("accession_number", "")).strip(),
@@ -1467,6 +1489,8 @@ def prepare_records_and_prompts(
             llm_checkpoint=llm_checkpoint,
             temperature=temperature,
             max_new_tokens=max_new_tokens,
+            max_prompt_chars=max_prompt_chars,
+            sentence_window=sentence_window,
             endpoint=endpoint,
             prefilter_mode=prefilter_mode,
             prefilter_audit_sample=audit_sample,
@@ -1480,7 +1504,7 @@ def prepare_records_and_prompts(
                 ai_adoption=0,
                 qualifying_evidence_found=False,
                 evidence_summary="",
-                exclusion_reason_if_zero="other",
+                exclusion_reason_if_zero="",
                 ai_adopted=0,
                 ai_adoption_level="none",
                 ai_adoption_level_code=0,
@@ -1496,7 +1520,7 @@ def prepare_records_and_prompts(
                 ai_adoption=0,
                 qualifying_evidence_found=False,
                 evidence_summary="",
-                exclusion_reason_if_zero="other",
+                exclusion_reason_if_zero="",
                 ai_adopted=0,
                 ai_adoption_level="none",
                 ai_adoption_level_code=0,
@@ -1678,6 +1702,8 @@ def summarize_output(
     prefilter_mode: str,
     prefilter_audit_rate: float,
     prefilter_audit_limit: int,
+    max_prompt_chars: int,
+    sentence_window: int,
     lookup_csv: Optional[str],
     n_filings_before_lookup: int,
     n_filings_after_lookup: int,
@@ -1696,10 +1722,13 @@ def summarize_output(
         "source_label": source_label,
         "script_version": SCRIPT_VERSION,
         "prompt_version": PROMPT_VERSION,
+        "research_profile": RESEARCH_PROFILE,
         "endpoint": endpoint,
         "prefilter_mode": prefilter_mode,
         "prefilter_audit_rate": prefilter_audit_rate,
         "prefilter_audit_limit": prefilter_audit_limit,
+        "max_prompt_chars": int(max_prompt_chars),
+        "sentence_window": int(sentence_window),
         "lookup_csv": lookup_csv,
         "n_filings_before_lookup": int(n_filings_before_lookup),
         "n_filings_after_lookup": int(n_filings_after_lookup),

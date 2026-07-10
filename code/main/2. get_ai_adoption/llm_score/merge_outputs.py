@@ -59,10 +59,13 @@ MODEL_METADATA_FIELDS = [
     "run_id",
     "script_version",
     "prompt_version",
+    "research_profile",
     "llm_model",
     "llm_checkpoint",
     "temperature",
     "max_new_tokens",
+    "max_prompt_chars",
+    "sentence_window",
     "llm_called",
     "endpoint_attempts",
     "parse_status",
@@ -464,10 +467,13 @@ def aggregate_model_firm_year(
             "run_id": first_non_null(group.get(f"{prefix}_run_id", pd.Series(dtype="object"))),
             "script_version": first_non_null(group.get(f"{prefix}_script_version", pd.Series(dtype="object"))),
             "prompt_version": first_non_null(group.get(f"{prefix}_prompt_version", pd.Series(dtype="object"))),
+            "research_profile": first_non_null(group.get(f"{prefix}_research_profile", pd.Series(dtype="object"))),
             "llm_model": first_non_null(group.get(f"{prefix}_llm_model", pd.Series(dtype="object"))),
             "llm_checkpoint": first_non_null(group.get(f"{prefix}_llm_checkpoint", pd.Series(dtype="object"))),
             "temperature": first_non_null(group.get(f"{prefix}_temperature", pd.Series(dtype="object"))),
             "max_new_tokens": first_non_null(group.get(f"{prefix}_max_new_tokens", pd.Series(dtype="object"))),
+            "max_prompt_chars": first_non_null(group.get(f"{prefix}_max_prompt_chars", pd.Series(dtype="object"))),
+            "sentence_window": first_non_null(group.get(f"{prefix}_sentence_window", pd.Series(dtype="object"))),
             "n_chunks": n_chunks,
             "n_chunks_scored": n_chunks_scored,
             "n_chunks_failed": n_chunks_failed,
@@ -478,7 +484,7 @@ def aggregate_model_firm_year(
             "exclusion_reason_if_zero": (
                 "none"
                 if ai_adoption == 1
-                else (exclusion_candidates.mode().iloc[0] if not exclusion_candidates.empty else "other")
+                else (exclusion_candidates.mode().iloc[0] if not exclusion_candidates.empty else "")
             ),
             "ai_adopted": ai_adoption,
             "ai_adoption_level": "adopted" if ai_adoption == 1 else "none",
