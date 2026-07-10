@@ -35,9 +35,9 @@ deployment, AI capability, AI spending, or productivity.
 The pipeline is now frozen as:
 
 ```text
-research_profile = disclosed_ai_adoption_binary_v1
-script_version   = 2026-07-10-ai_binary_research_v1
-prompt_version   = ai_binary_adoption_research_v1
+research_profile = disclosed_ai_adoption_binary_v2
+script_version   = 2026-07-10-ai_binary_research_v2
+prompt_version   = ai_binary_adoption_research_v2
 ```
 
 Recommended default settings:
@@ -107,19 +107,21 @@ The prefilter now has two distinct dictionaries:
 This distinction matters. For research use, a filing should not be forced into
 the LLM queue just because it says `predictive analytics` or `big data`, but
 those phrases can still help rank nearby sentences once an explicit AI mention
-exists in the filing.
+exists in the filing. The trigger list also avoids ambiguous standalone
+abbreviations such as bare `ML`, which can appear in non-AI contexts like
+measurement units or company initials.
 
 Examples of explicit trigger terms:
 
 ```text
 AI
-ML
 NLP
 artificial intelligence
 machine learning
 deep learning
 generative AI
 large language model
+AI/ML
 AI-powered
 AI-enabled
 ```
@@ -181,6 +183,7 @@ Prompt principles:
 - positive cases require a short evidence summary
 - zero cases return an empty evidence summary
 - output exactly one JSON object
+- if uncertain, choose 0
 
 The model is not asked to produce `qualifying_evidence_found` or a reason code
 for zero. Those are derived or left blank by the parser for compatibility.

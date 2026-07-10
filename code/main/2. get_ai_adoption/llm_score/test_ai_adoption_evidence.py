@@ -16,39 +16,57 @@ import merge_outputs as m
 
 
 class BinaryAiAdoptionTests(unittest.TestCase):
+    def test_explicit_ai_abbreviation_triggers_prefilter(self) -> None:
+        text = "We launched new AI tools and ML workflows in customer support."
+        self.assertGreater(u.count_ai_keywords(text), 0)
+        self.assertGreater(u.count_ranking_keywords(text), 0)
+
+    def test_ai_ml_trigger_phrase_still_counts(self) -> None:
+        text = "The firm launched new AI/ML features in its underwriting workflow."
+        self.assertGreater(u.count_ai_keywords(text), 0)
+
+    def test_ranking_only_term_does_not_trigger_prefilter(self) -> None:
+        text = "The company expanded predictive analytics across the business."
+        self.assertEqual(u.count_ai_keywords(text), 0)
+        self.assertGreater(u.count_ranking_keywords(text), 0)
+
+    def test_ml_unit_does_not_trigger_prefilter(self) -> None:
+        text = "The company uses a 200 mg/ml formulation in its product."
+        self.assertEqual(u.count_ai_keywords(text), 0)
+
+    def test_ml_initials_do_not_trigger_prefilter(self) -> None:
+        text = "Matson Logistics (ML) provides rail intermodal services."
+        self.assertEqual(u.count_ai_keywords(text), 0)
+
     def test_no_ai_mention_returns_zero(self) -> None:
         payload = """
         {
           "ai_adoption": 0,
-          "qualifying_evidence_found": false,
-          "evidence_summary": "",
-          "exclusion_reason_if_zero": "not_ai"
+          "evidence_summary": ""
         }
         """
         result = u.parse_model_output_payload(payload)
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["ai_adoption"], 0)
+        self.assertEqual(result["exclusion_reason_if_zero"], "")
 
-    def test_generic_ai_risk_language_returns_zero(self) -> None:
+    def test_legacy_zero_reason_is_accepted_but_ignored(self) -> None:
         payload = """
         {
           "ai_adoption": 0,
-          "qualifying_evidence_found": false,
           "evidence_summary": "",
           "exclusion_reason_if_zero": "risk_only"
         }
         """
         result = u.parse_model_output_payload(payload)
         self.assertEqual(result["ai_adoption"], 0)
-        self.assertEqual(result["exclusion_reason_if_zero"], "risk_only")
+        self.assertEqual(result["exclusion_reason_if_zero"], "")
 
     def test_future_ai_plans_only_returns_zero(self) -> None:
         payload = """
         {
           "ai_adoption": 0,
-          "qualifying_evidence_found": false,
-          "evidence_summary": "",
-          "exclusion_reason_if_zero": "future_only"
+          "evidence_summary": ""
         }
         """
         result = u.parse_model_output_payload(payload)
@@ -58,9 +76,7 @@ class BinaryAiAdoptionTests(unittest.TestCase):
         payload = """
         {
           "ai_adoption": 0,
-          "qualifying_evidence_found": false,
-          "evidence_summary": "",
-          "exclusion_reason_if_zero": "customer_only"
+          "evidence_summary": ""
         }
         """
         result = u.parse_model_output_payload(payload)
@@ -70,9 +86,7 @@ class BinaryAiAdoptionTests(unittest.TestCase):
         payload = """
         {
           "ai_adoption": 0,
-          "qualifying_evidence_found": false,
-          "evidence_summary": "",
-          "exclusion_reason_if_zero": "enabling_infrastructure"
+          "evidence_summary": ""
         }
         """
         result = u.parse_model_output_payload(payload)
@@ -82,9 +96,7 @@ class BinaryAiAdoptionTests(unittest.TestCase):
         payload = """
         {
           "ai_adoption": 1,
-          "qualifying_evidence_found": true,
-          "evidence_summary": "The firm uses machine-learning fraud detection in card authorization decisions.",
-          "exclusion_reason_if_zero": "none"
+          "evidence_summary": "The firm uses machine-learning fraud detection in card authorization decisions."
         }
         """
         result = u.parse_model_output_payload(payload)
@@ -96,9 +108,7 @@ class BinaryAiAdoptionTests(unittest.TestCase):
         payload = """
         {
           "ai_adoption": 1,
-          "qualifying_evidence_found": true,
-          "evidence_summary": "The firm uses recommendation models in its app and predictive maintenance models in operations.",
-          "exclusion_reason_if_zero": "none"
+          "evidence_summary": "The firm uses recommendation models in its app and predictive maintenance models in operations."
         }
         """
         result = u.parse_model_output_payload(payload)
@@ -109,9 +119,17 @@ class BinaryAiAdoptionTests(unittest.TestCase):
         payload = """
         {
           "ai_adoption": 2,
-          "qualifying_evidence_found": true,
-          "evidence_summary": "bad",
-          "exclusion_reason_if_zero": "none"
+          "evidence_summary": "bad"
+        }
+        """
+        result = u.parse_model_output_payload(payload)
+        self.assertIn(result["status"], {"no_valid_score_json", "no_json_found"})
+
+    def test_positive_requires_evidence_summary(self) -> None:
+        payload = """
+        {
+          "ai_adoption": 1,
+          "evidence_summary": ""
         }
         """
         result = u.parse_model_output_payload(payload)
@@ -164,8 +182,7 @@ class BinaryAiAdoptionTests(unittest.TestCase):
         {
           "ai_adoption": 1,
           "qualifying_evidence_found": true,
-          "evidence_summary": "The firm uses NLP triage in customer support.",
-          "exclusion_reason_if_zero": "none"
+          "evidence_summary": "The firm uses NLP triage in customer support."
         }
         """
         result = u.parse_model_output_payload(payload)

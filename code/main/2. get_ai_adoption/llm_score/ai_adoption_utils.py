@@ -26,9 +26,9 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
-SCRIPT_VERSION = "2026-07-10-ai_binary_research_v1"
-PROMPT_VERSION = "ai_binary_adoption_research_v1"
-RESEARCH_PROFILE = "disclosed_ai_adoption_binary_v1"
+SCRIPT_VERSION = "2026-07-10-ai_binary_research_v2"
+PROMPT_VERSION = "ai_binary_adoption_research_v2"
+RESEARCH_PROFILE = "disclosed_ai_adoption_binary_v2"
 MODEL_NAME = "meta-llama/Llama-3.2-3B-Instruct"
 TEMPERATURE = 0.0
 DEFAULT_MAX_NEW_TOKENS = 128
@@ -65,7 +65,6 @@ AI_TRIGGER_PATTERNS = [
     r"\bA\.I\.\b",
     r"\bAI/ML\b",
     r"\bAI\b",
-    r"\bML\b",
     r"\bNLP\b",
     r"\bai[- ]?(enabled|powered|driven|based)\b",
     r"\bagentic ai\b",
@@ -976,22 +975,22 @@ def _binary_adoption_rules() -> str:
 
     return (
         "Decide whether the text shows that the firm itself uses or is implementing AI.\n"
-        "Set ai_adoption = 1 when the text describes a concrete AI application, AI-enabled feature, model-driven capability, or AI implementation by the firm in its own products, services, workflows, features, or internal operations.\n"
+        "Set ai_adoption = 1 when the text describes a concrete AI application, AI-enabled feature, or AI implementation by the firm in its own products, services, workflows, features, or internal operations.\n"
         "AI includes machine learning, generative AI, natural language processing, computer vision, predictive models, recommendation systems, autonomous systems, and similar AI systems.\n\n"
-        "Count as adoption when the text says the firm uses, embeds, offers, launches, integrates, deploys, implements, commercializes, or is formally implementing AI for a specific business use.\n"
-        "A concrete rollout, phased implementation, or AI-enabled feature counts if the intended use is specific.\n"
+        "Count as adoption when the text says the firm uses, embeds, launches, integrates, deploys, implements, or is formally implementing AI for a specific business use and states what the AI does.\n"
+        "A concrete rollout, phased implementation, or AI-enabled feature counts only if the intended use is specific and the filing explains the AI function.\n"
         "Do not require full rollout, quantified outcomes, or firm-wide deployment.\n\n"
         "Set ai_adoption = 0 only when the filing contains no concrete firm-specific AI application and instead contains only:\n"
         "1. Generic AI discussion, market trends, broad statements about opportunity, or AI risk disclosure only.\n"
-        "2. Exploration, evaluation, partnerships, vendor capabilities, hiring, or other discussion without a concrete firm application or implementation.\n"
+        "2. Exploration, evaluation, investment, innovation, product development, partnerships, vendor capabilities, hiring, or other discussion without a concrete firm application or implementation.\n"
         "3. Customer use of AI only, without evidence that the firm itself uses or offers AI in its own products, services, or operations.\n"
         "4. AI demand, AI chips, cloud, software, data centres, devices, or infrastructure that only enable others to build or run AI, without evidence of the firm's own AI application.\n"
-        "5. AI platform names, AI product labels, or AI-capable hardware claims without a description of what the AI does for a specific business use.\n"
-        "6. Vague analytics, automation, algorithms, or digital transformation language without explicit AI or ML use.\n"
+        "5. AI platform names, AI product labels, AI/ML workloads, or AI-capable hardware claims without a description of what the AI does for the firm's own product or operation.\n"
+        "6. Vague analytics, automation, algorithms, digital transformation, or general revenue, cost, efficiency, or productivity claims without a specific AI use case.\n"
         "7. No meaningful AI narrative about the firm's own activities.\n\n"
         "If ai_adoption = 1, evidence_summary must name the product, service, workflow, feature, internal function, or implementation area and briefly state what the AI does.\n"
         "If you cannot state the specific use case in evidence_summary, set ai_adoption = 0.\n"
-        "If uncertain, choose 1 if firm AI use is more likely than not; otherwise choose 0.\n"
+        "If uncertain, choose 0.\n"
     )
 
 
