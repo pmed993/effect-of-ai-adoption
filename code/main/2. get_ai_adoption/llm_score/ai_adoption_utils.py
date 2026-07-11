@@ -26,9 +26,9 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
-SCRIPT_VERSION = "2026-07-10-ai_binary_research_v3"
+SCRIPT_VERSION = "2026-07-11-ai_binary_research_v4"
 PROMPT_VERSION = "ai_binary_adoption_research_v3"
-RESEARCH_PROFILE = "disclosed_ai_adoption_binary_v3"
+RESEARCH_PROFILE = "disclosed_ai_adoption_binary_v4"
 MODEL_NAME = "meta-llama/Llama-3.2-3B-Instruct"
 TEMPERATURE = 0.0
 DEFAULT_MAX_NEW_TOKENS = 128
@@ -271,6 +271,23 @@ RETRYABLE_PARSE_STATUSES = {
 TEMPLATE_OUTPUT_CUES = re.compile(
     r"(?im)(^\s*def\s+|^\s*return\b|^\s*if\b|^\s*elif\b|^\s*else\s*:|^\s*###|^\s*##\s*step\b|^\s*solution\b)"
 )
+
+# These patterns catch model-written positive summaries that are too generic to
+# qualify as disclosed AI adoption under the research design. They are applied
+# after JSON parsing so the prompt can stay simple while obvious weak positives
+# are deterministically forced back to zero.
+WEAK_POSITIVE_SUMMARY_PATTERNS = [
+    re.compile(r"(?i)\b(?:intend(?:s|ed)? to |is )?invest(?:s|ed|ing)? in (?:technologies|artificial intelligence|ai|machine learning)\b"),
+    re.compile(r"(?i)\binnovative new products?\b"),
+    re.compile(r"(?i)\badopt(?:s|ed|ing)? new technologies\b"),
+    re.compile(r"(?i)\bbuild(?:s|ing)? ai capabilities\b"),
+    re.compile(r"(?i)\bstrengthening and leveraging (?:its )?capabilities\b"),
+    re.compile(r"(?i)\bsupport(?:s|ing)? use cases\b"),
+    re.compile(r"(?i)\bprovide(?:s|ing)? capabilities\b"),
+    re.compile(r"(?i)\bimprov(?:e|es|ing) outcomes\b"),
+    re.compile(r"(?i)\bai[- ]driven data and solutions\b"),
+    re.compile(r"(?i)^the filing describes a concrete ai application\b"),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -1155,6 +1172,14 @@ def normalize_binary_exclusion_reason(value: Any) -> str:
     )
 
 
+def has_weak_positive_summary(text: str) -> bool:
+    """Return True when a positive evidence summary is too generic to qualify."""
+
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in WEAK_POSITIVE_SUMMARY_PATTERNS)
+
+
 def parse_binary_adoption_object(obj: Any) -> dict[str, Any]:
     """Validate one parsed JSON object as a binary AI-adoption response."""
 
@@ -1174,6 +1199,13 @@ def parse_binary_adoption_object(obj: Any) -> dict[str, Any]:
             raise ValueError("Positive ai_adoption cannot set qualifying_evidence_found to false.")
         if not evidence_summary:
             raise ValueError("Positive ai_adoption requires a non-empty evidence_summary.")
+        if has_weak_positive_summary(evidence_summary):
+            return {
+                "ai_adoption": 0,
+                "qualifying_evidence_found": False,
+                "evidence_summary": "",
+                "exclusion_reason_if_zero": "",
+            }
         return {
             "ai_adoption": 1,
             "qualifying_evidence_found": True,

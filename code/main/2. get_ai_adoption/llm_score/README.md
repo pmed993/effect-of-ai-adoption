@@ -21,11 +21,11 @@ What does not count:
 
 - generic AI discussion or market trends
 - AI risk disclosure only
-- exploration, evaluation, partnerships, or hiring without a concrete use
+- exploration, evaluation, investment, innovation, adopting technologies, partnerships, or hiring without a concrete use
 - customer use only
-- AI demand, AI-capable hardware, chips, cloud, or enabling infrastructure
-- product or platform names that mention AI but do not explain what the AI does
-- vague analytics or automation language without explicit AI or ML use
+- AI demand, AI-capable hardware, processors, chips, cloud, or enabling infrastructure
+- product or platform names that mention AI, or generic platform language about supported use cases, without explaining what the AI does
+- vague analytics or automation language, or generic cost/productivity claims, without explicit AI or ML use
 
 This is a measure of disclosed AI adoption, not a direct measure of true AI
 deployment, AI capability, AI spending, or productivity.
@@ -35,9 +35,9 @@ deployment, AI capability, AI spending, or productivity.
 The pipeline is now frozen as:
 
 ```text
-research_profile = disclosed_ai_adoption_binary_v2
-script_version   = 2026-07-10-ai_binary_research_v2
-prompt_version   = ai_binary_adoption_research_v2
+research_profile = disclosed_ai_adoption_binary_v4
+script_version   = 2026-07-11-ai_binary_research_v4
+prompt_version   = ai_binary_adoption_research_v3
 ```
 
 Recommended default settings:
@@ -197,6 +197,9 @@ The parser accepts valid JSON objects and applies deterministic rules:
 - zero rows are stored with `qualifying_evidence_found = false`
 - `exclusion_reason_if_zero` is retained as a compatibility column but is blank
   in the finalized binary workflow
+- obvious weak positive summaries are deterministically forced back to `0`
+  when they only describe investment, innovation, generic use cases,
+  AI-driven solutions, or prompt-echo language rather than a concrete use
 
 If the first response is malformed, the row gets one retry with a stricter
 JSON-only prompt.

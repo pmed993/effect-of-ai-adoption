@@ -115,6 +115,50 @@ class BinaryAiAdoptionTests(unittest.TestCase):
         self.assertEqual(result["ai_adoption"], 1)
         self.assertEqual(result["ai_level_code"], 1)
 
+    def test_investment_language_positive_is_forced_to_zero(self) -> None:
+        payload = """
+        {
+          "ai_adoption": 1,
+          "evidence_summary": "The firm intends to invest in technologies such as artificial intelligence and machine learning."
+        }
+        """
+        result = u.parse_model_output_payload(payload)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["ai_adoption"], 0)
+
+    def test_generic_platform_use_case_language_is_forced_to_zero(self) -> None:
+        payload = """
+        {
+          "ai_adoption": 1,
+          "evidence_summary": "The firm uses AI in its platform to support use cases such as public safety and location intelligence."
+        }
+        """
+        result = u.parse_model_output_payload(payload)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["ai_adoption"], 0)
+
+    def test_ai_driven_data_and_solutions_is_forced_to_zero(self) -> None:
+        payload = """
+        {
+          "ai_adoption": 1,
+          "evidence_summary": "AI driven data and solutions"
+        }
+        """
+        result = u.parse_model_output_payload(payload)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["ai_adoption"], 0)
+
+    def test_prompt_echo_positive_is_forced_to_zero(self) -> None:
+        payload = """
+        {
+          "ai_adoption": 1,
+          "evidence_summary": "The filing describes a concrete AI application, specifically Telemetry and Pure1."
+        }
+        """
+        result = u.parse_model_output_payload(payload)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["ai_adoption"], 0)
+
     def test_parser_rejects_invalid_binary_json(self) -> None:
         payload = """
         {
