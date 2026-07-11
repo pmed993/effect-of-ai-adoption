@@ -35,8 +35,8 @@ deployment, AI capability, AI spending, or productivity.
 The pipeline is now frozen as:
 
 ```text
-research_profile = disclosed_ai_adoption_binary_v4
-script_version   = 2026-07-11-ai_binary_research_v4
+research_profile = disclosed_ai_adoption_binary_v5
+script_version   = 2026-07-11-ai_binary_research_v5
 prompt_version   = ai_binary_adoption_research_v3
 ```
 
@@ -199,7 +199,9 @@ The parser accepts valid JSON objects and applies deterministic rules:
   in the finalized binary workflow
 - obvious weak positive summaries are deterministically forced back to `0`
   when they only describe investment, innovation, generic use cases,
-  AI-driven solutions, or prompt-echo language rather than a concrete use
+  AI-driven solutions, regulatory innovation, customer-facing common platforms,
+  generic business-outcome language, or prompt-echo language rather than a
+  concrete use
 
 If the first response is malformed, the row gets one retry with a stricter
 JSON-only prompt.

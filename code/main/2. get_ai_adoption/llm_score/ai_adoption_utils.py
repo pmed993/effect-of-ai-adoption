@@ -26,9 +26,9 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
-SCRIPT_VERSION = "2026-07-11-ai_binary_research_v4"
+SCRIPT_VERSION = "2026-07-11-ai_binary_research_v5"
 PROMPT_VERSION = "ai_binary_adoption_research_v3"
-RESEARCH_PROFILE = "disclosed_ai_adoption_binary_v4"
+RESEARCH_PROFILE = "disclosed_ai_adoption_binary_v5"
 MODEL_NAME = "meta-llama/Llama-3.2-3B-Instruct"
 TEMPERATURE = 0.0
 DEFAULT_MAX_NEW_TOKENS = 128
@@ -278,13 +278,23 @@ TEMPLATE_OUTPUT_CUES = re.compile(
 # are deterministically forced back to zero.
 WEAK_POSITIVE_SUMMARY_PATTERNS = [
     re.compile(r"(?i)\b(?:intend(?:s|ed)? to |is )?invest(?:s|ed|ing)? in (?:technologies|artificial intelligence|ai|machine learning)\b"),
+    re.compile(r"(?i)\binvest(?:s|ed|ing)? in the development of new products?\b"),
     re.compile(r"(?i)\binnovative new products?\b"),
+    re.compile(r"(?i)\bimprov(?:e|es|ing)? existing products?\b.*\badvanc(?:e|es|ing)? technology\b"),
     re.compile(r"(?i)\badopt(?:s|ed|ing)? new technologies\b"),
     re.compile(r"(?i)\bbuild(?:s|ing)? ai capabilities\b"),
     re.compile(r"(?i)\bstrengthening and leveraging (?:its )?capabilities\b"),
+    re.compile(r"(?i)\bsupport innovation\b"),
+    re.compile(r"(?i)\binnovative framework\b"),
+    re.compile(r"(?i)\bregulat(?:e|es|ing|ion)\b.*\bartificial intelligence\b"),
     re.compile(r"(?i)\bsupport(?:s|ing)? use cases\b"),
     re.compile(r"(?i)\bprovide(?:s|ing)? capabilities\b"),
     re.compile(r"(?i)\bimprov(?:e|es|ing) outcomes\b"),
+    re.compile(r"(?i)\bcommon platforms?\b.*\bcustomer facing applications\b"),
+    re.compile(r"(?i)\benhanc(?:e|es|ing) customer experience\b.*\bdriv(?:e|es|ing) efficiency\b"),
+    re.compile(r"(?i)\bdevelopment of technologies\b.*\bbusiness operations\b"),
+    re.compile(r"(?i)\brevenue growth\b.*\bcost reduction\b.*\brisk management\b"),
+    re.compile(r"(?i)\bmonetiz(?:e|es|ing) data\b.*\bpay-for-performance\b"),
     re.compile(r"(?i)\bai[- ]driven data and solutions\b"),
     re.compile(r"(?i)^the filing describes a concrete ai application\b"),
 ]
