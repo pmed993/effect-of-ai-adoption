@@ -1,31 +1,29 @@
-# AI Adoption Labeling Methodology
+# LLM Extraction Scoring Methodology
 
-This folder contains the finalized binary LLM pipeline for measuring disclosed
-firm AI adoption from SEC 10-K text. The design is meant for empirical work in
-economics and finance where the target is a reproducible text-based treatment
-measure, not a free-form narrative summary.
+This folder contains the simplified LLM extraction pipeline for scoring firm AI
+adoption from SEC 10-K text. The design is meant for empirical work where the
+goal is a reproducible filing-level score, not a long-form model explanation.
 
 ## Research Target
 
-The output is a disclosure-based measure of whether the filing indicates that
-the firm itself uses or is implementing AI.
+The output is a disclosure-based 1-3 score of the firm's level of current AI
+adoption in the filing text.
 
-What counts:
+Rubric:
 
-- a concrete firm-specific AI application
-- an AI-enabled feature in the firm's own product or service
-- a concrete AI implementation, rollout, or integration in operations
-- a specific internal function that uses AI
+- `1`: no current AI adoption
+- `2`: limited or targeted AI adoption
+- `3`: production-level or strategic AI adoption
 
-What does not count:
+Interpretation:
 
-- generic AI discussion or market trends
-- AI risk disclosure only
-- exploration, evaluation, investment, innovation, adopting technologies, partnerships, or hiring without a concrete use
-- customer use only
-- AI demand, AI-capable hardware, processors, chips, cloud, or enabling infrastructure
-- product or platform names that mention AI, or generic platform language about supported use cases, without explaining what the AI does
-- vague analytics or automation language, or generic cost/productivity claims, without explicit AI or ML use
+- `1` includes no AI mention, industry context only, competitor discussion,
+  future plans, exploration, or risk language.
+- `2` includes early implementation, limited use cases, or clear AI use in
+  some products or operations, without evidence that AI is central to strategy
+  or financial performance.
+- `3` includes production-level deployment, strategic importance, or explicit
+  links to cost savings, revenue, performance, or broad operational use.
 
 This is a measure of disclosed AI adoption, not a direct measure of true AI
 deployment, AI capability, AI spending, or productivity.
@@ -35,15 +33,16 @@ deployment, AI capability, AI spending, or productivity.
 The pipeline is now frozen as:
 
 ```text
-research_profile = disclosed_ai_adoption_binary_v5
-script_version   = 2026-07-11-ai_binary_research_v5
-prompt_version   = ai_binary_adoption_research_v3
+research_profile = llm_extraction_ai_1to3_v1
+script_version   = 2026-07-22-llm_extraction_v1
+prompt_version   = llm_extraction_claude_v1
 ```
 
 Recommended default settings:
 
 ```text
-model_label       = llama
+model_label       = claude
+model_id          = eu.anthropic.claude-haiku-4-5-20251001-v1:0
 temperature       = 0.0
 max_prompt_chars  = 1800
 sentence_window   = 1
@@ -58,14 +57,14 @@ JSON so runs can be reproduced later.
 
 The workflow is intentionally narrow and conservative in structure:
 
-1. one filing-level binary decision per 10-K
-2. minimal JSON output
-3. positive evidence summary only
+1. one filing-level score per 10-K
+2. one shared keyword dictionary
+3. one short ordinal rubric
 4. deterministic parsing and retry logic
 5. stable prefilter and snippet extraction
 
-This is closer to the text-classification literature than a looser prompt that
-asks the model to reason at length or produce multiple labels at once.
+This is closer to a text-classification pipeline than a free-form reasoning
+prompt.
 
 ## Input Data
 
@@ -96,47 +95,24 @@ By default it keeps only `10-K`. Use `--include-amended` to include `10-K/A`.
 
 ## Prefilter Design
 
-The prefilter now has two distinct dictionaries:
+The pipeline now uses one shared published dictionary:
 
-1. `AI_TRIGGER_PATTERNS`
-   These are explicit AI terms used for the hard-zero call decision.
+1. `AI_KEYWORD_PATTERNS`
+   This single keyword list is used for both the hard-zero prefilter and
+   snippet ranking.
 
-2. `AI_RANKING_ONLY_PATTERNS`
-   These are broader AI-adjacent terms used only for snippet ranking.
+This keeps the process simpler and easier to document. A filing is sent to the
+LLM only if this shared dictionary appears in the filing text, and the same
+dictionary is used to find candidate sentences for excerpt construction. The
+list is based on explicit AI, ML, and model-method terminology such as
+`artificial intelligence`, `machine learning`, `computer vision`,
+`natural language processing`, `neural networks`, `transformer`,
+`reinforcement learning`, `OpenCV`, `XGBoost`, and `Word2vec`.
 
-This distinction matters. For research use, a filing should not be forced into
-the LLM queue just because it says `predictive analytics` or `big data`, but
-those phrases can still help rank nearby sentences once an explicit AI mention
-exists in the filing. The trigger list also avoids ambiguous standalone
-abbreviations such as bare `ML`, which can appear in non-AI contexts like
-measurement units or company initials.
-
-Examples of explicit trigger terms:
-
-```text
-AI
-NLP
-artificial intelligence
-machine learning
-deep learning
-generative AI
-large language model
-AI/ML
-AI-powered
-AI-enabled
-```
-
-Examples of ranking-only terms:
-
-```text
-predictive analytics
-fraud detection
-anomaly detection
-business intelligence
-data mining
-pattern recognition
-robotic process automation
-```
+The one place where the implementation is intentionally stricter than the raw
+term list is standalone `ML`: the code still counts `ML`, but it guards
+against obvious false positives such as `mg/ml` dosage units or company initials
+written as `(ML)`.
 
 Recommended production mode:
 
@@ -166,53 +142,41 @@ the most relevant context.
 
 ## Prompt Design
 
-The prompt asks only for a binary label plus positive evidence:
+The prompt is intentionally short:
 
-```json
-{
-  "ai_adoption": 0,
-  "evidence_summary": ""
-}
+```text
+You are an expert analyst.
+Using the rubric below, assign one integer score from 1 to 3 for the firm's level of AI adoption.
+Return only one character: 1, 2, or 3.
 ```
 
 Prompt principles:
 
 - decide only from filing text
 - no chain-of-thought
-- no zero-reason taxonomy
-- positive cases require a short evidence summary
-- zero cases return an empty evidence summary
-- output exactly one JSON object
-- if uncertain, choose 0
-
-The model is not asked to produce `qualifying_evidence_found` or a reason code
-for zero. Those are derived or left blank by the parser for compatibility.
+- no JSON output
+- no evidence-summary field
+- one final score only
+- if the text is weak or only speculative, stay at the lower score
 
 ## Parsing Rules
 
-The parser accepts valid JSON objects and applies deterministic rules:
+The parser accepts:
 
-- `ai_adoption = 1` requires a non-empty `evidence_summary`
-- positive rows are stored with `qualifying_evidence_found = true`
-- zero rows are stored with `qualifying_evidence_found = false`
-- `exclusion_reason_if_zero` is retained as a compatibility column but is blank
-  in the finalized binary workflow
-- obvious weak positive summaries are deterministically forced back to `0`
-  when they only describe investment, innovation, generic use cases,
-  AI-driven solutions, regulatory innovation, customer-facing common platforms,
-  generic business-outcome language, or prompt-echo language rather than a
-  concrete use
+- an exact response of `1`, `2`, or `3`
+- a JSON fallback containing a score field
+- a single unambiguous score token in the response
 
-If the first response is malformed, the row gets one retry with a stricter
-JSON-only prompt.
+If the model returns conflicting scores, the row is marked failed and retried
+once with a stricter score-only prompt.
 
 ## Main Outputs
 
 Per chunk:
 
 ```text
-extract_df_chunk_XXXXX_llama_scores.csv
-extract_df_chunk_XXXXX_llama_summary.json
+extract_df_chunk_XXXXX_claude_scores.csv
+extract_df_chunk_XXXXX_claude_summary.json
 ```
 
 Per run:
@@ -239,9 +203,9 @@ ranking_keyword_hits
 llm_called
 parse_status
 score_status
-ai_adoption
-qualifying_evidence_found
-evidence_summary
+ai_score
+ai_score_label
+score_explanation
 ```
 
 ## Recommended Production Command
@@ -250,13 +214,14 @@ evidence_summary
 python3 get_ai_score_bulk.py \
   --team effect_of_ai \
   --lookup-csv ../lookup/cik_year.csv \
-  --model-label llama \
+  --model-label claude \
+  --model-id eu.anthropic.claude-haiku-4-5-20251001-v1:0 \
   --prefilter-mode hard_zero \
   --max-prompt-chars 1800 \
   --sentence-window 1 \
   --max-new-tokens 128 \
   --temperature 0.0 \
-  --out-dir output/final_llama_binary
+  --out-dir output/final_llm_extraction
 ```
 
 ## Interpretation For Empirical Use
@@ -264,16 +229,17 @@ python3 get_ai_score_bulk.py \
 The recommended main treatment is:
 
 ```text
-ai_adoption ∈ {0, 1}
+ai_score ∈ {1, 2, 3}
 ```
 
 Suggested interpretation:
 
-- `1` means the firm discloses a concrete AI use or implementation in the filing
-- `0` means the filing does not disclose such evidence under this rule
+- `1` means no current AI adoption is disclosed
+- `2` means limited or targeted AI adoption is disclosed
+- `3` means production-level or strategic AI adoption is disclosed
 
 This variable should be described in papers as a disclosure-based AI adoption
-measure built from 10-K Item 1 and Item 7 text using a frozen prompt and
+score built from 10-K Item 1 and Item 7 text using a frozen prompt and
 deterministic post-processing rules.
 
 ## Limitations

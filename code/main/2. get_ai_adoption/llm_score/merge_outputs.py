@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Merge chunk-level LLM label outputs into filing-level and firm-year datasets.
+"""Merge chunk-level LLM extraction outputs into filing-level and firm-year datasets.
 
-This script is designed for the bulk AI-adoption labeling workflow.
+This script is designed for the bulk LLM extraction scoring workflow.
 It:
 1. collects all chunk CSVs under a model output folder,
 2. builds a filing-level master dataset,
@@ -13,7 +13,8 @@ It:
 
 Typical usage:
     python3 merge_outputs.py \
-      --llama-dir output/final_llama \
+      --primary-dir output/final_claude \
+      --primary-label claude \
       --out-dir output/final_merged
 """
 
@@ -26,9 +27,6 @@ from typing import Iterable
 
 import pandas as pd
 
-
-LLAMA_PATTERN = "*_llama_scores.csv"
-MISTRAL_PATTERN = "*_mistral_scores.csv"
 
 IDENTITY_COLS = ["accession_number", "cik", "year"]
 FILING_BASE_COLS = [
@@ -50,9 +48,10 @@ FILING_BASE_COLS = [
     "snippet_sha256",
 ]
 
-ADOPTION_LEVEL_CODES = {
-    "none": 0,
-    "adopted": 1,
+AI_SCORE_LABELS = {
+    1: "no_current_adoption",
+    2: "limited_or_targeted_adoption",
+    3: "production_or_strategic_adoption",
 }
 
 MODEL_METADATA_FIELDS = [
@@ -72,15 +71,9 @@ MODEL_METADATA_FIELDS = [
     "initial_score_status",
     "retry_attempted",
     "retry_score_status",
-    "ai_adoption",
-    "qualifying_evidence_found",
-    "evidence_summary",
-    "exclusion_reason_if_zero",
-    "ai_adopted",
-    "ai_adoption_level",
-    "ai_adoption_level_code",
-    "ai_level_code",
-    "explanation",
+    "ai_score",
+    "ai_score_label",
+    "score_explanation",
     "score_status",
     "endpoint",
     "job_id",
@@ -92,8 +85,12 @@ MODEL_METADATA_FIELDS = [
 
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Merge AI-adoption chunk outputs into final datasets.")
-    ap.add_argument("--llama-dir", required=True, help="Root folder containing Llama chunk outputs.")
-    ap.add_argument("--mistral-dir", default=None, help="Optional root folder containing Mistral chunk outputs.")
+    ap.add_argument("--primary-dir", default=None, help="Root folder containing the main model's chunk outputs.")
+    ap.add_argument("--primary-label", default="claude", help="Short label used in score filenames and merged columns, e.g. claude.")
+    ap.add_argument("--secondary-dir", default=None, help="Optional root folder containing a second model's chunk outputs.")
+    ap.add_argument("--secondary-label", default="secondary", help="Short label used in filenames and merged columns for the optional second model.")
+    ap.add_argument("--llama-dir", dest="primary_dir", default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--mistral-dir", dest="secondary_dir", default=None, help=argparse.SUPPRESS)
     ap.add_argument("--out-dir", required=True, help="Folder for merged outputs.")
     ap.add_argument(
         "--lookup-csv",
@@ -104,13 +101,13 @@ def parse_args() -> argparse.Namespace:
         "--filing-duplicate-rule",
         choices=["error", "best_context", "max_llama"],
         default="error",
-        help="How to handle duplicate accession_number rows before building the filing master. max_llama prefers adopted rows and stronger adoption labels.",
+        help="How to handle duplicate accession_number rows before building the filing master. max_llama prefers higher AI scores and richer filing context.",
     )
     ap.add_argument(
         "--firm-year-rule",
         choices=["error", "first", "last", "max_llama"],
         default="error",
-        help="How to handle duplicate cik-year rows when building the firm-year panel. max_llama prefers adopted rows and stronger adoption labels.",
+        help="How to handle duplicate cik-year rows when building the firm-year panel. max_llama prefers higher AI scores.",
     )
     ap.add_argument(
         "--compustat-csv",
@@ -125,7 +122,10 @@ def parse_args() -> argparse.Namespace:
         choices=["left", "inner", "right", "outer"],
         help="Pandas merge how= for the optional Compustat merge.",
     )
-    return ap.parse_args()
+    args = ap.parse_args()
+    if not args.primary_dir:
+        ap.error("--primary-dir is required")
+    return args
 
 
 def find_score_files(root: str, pattern: str) -> list[Path]:
@@ -133,6 +133,10 @@ def find_score_files(root: str, pattern: str) -> list[Path]:
     if not files:
         raise FileNotFoundError(f"No files found under {root!r} matching {pattern!r}")
     return files
+
+
+def pattern_for_label(label: str) -> str:
+    return f"*_{label}_scores.csv"
 
 
 def read_concat(files: Iterable[Path]) -> pd.DataFrame:
@@ -208,80 +212,39 @@ def filter_to_lookup(df: pd.DataFrame, lookup: pd.DataFrame | None, label: str) 
     return out
 
 
-def model_priority_columns(df: pd.DataFrame, prefix: str) -> tuple[pd.Series, pd.Series]:
-    """Return adoption and intensity priority series for duplicate resolution."""
+def model_priority_columns(df: pd.DataFrame, prefix: str) -> pd.Series:
+    """Return the filing score priority series used for duplicate resolution."""
 
-    adopted_col = f"{prefix}_ai_adoption"
-    adopted_legacy_col = f"{prefix}_ai_adopted"
-    level_code_col = f"{prefix}_ai_level_code"
-    level_code_legacy_col = f"{prefix}_ai_adoption_level_code"
-    level_col = f"{prefix}_ai_adoption_level"
-    legacy_score_col = f"{prefix}_score"
+    score_col = f"{prefix}_ai_score"
+    label_col = f"{prefix}_ai_score_label"
 
-    if adopted_col in df.columns:
-        adopted = pd.to_numeric(df[adopted_col], errors="coerce").fillna(-1)
-    elif adopted_legacy_col in df.columns:
-        adopted = pd.to_numeric(df[adopted_legacy_col], errors="coerce").fillna(-1)
-    elif legacy_score_col in df.columns:
-        legacy_score = pd.to_numeric(df[legacy_score_col], errors="coerce")
-        adopted = legacy_score.gt(0).astype(float).fillna(-1)
-    else:
-        adopted = pd.Series(-1, index=df.index, dtype=float)
-
-    if level_code_col in df.columns:
-        level_code = pd.to_numeric(df[level_code_col], errors="coerce").fillna(-1)
-    elif level_code_legacy_col in df.columns:
-        level_code = pd.to_numeric(df[level_code_legacy_col], errors="coerce").fillna(-1)
-    elif level_col in df.columns:
-        level_code = df[level_col].astype("string").str.lower().map(ADOPTION_LEVEL_CODES).fillna(-1)
-    elif legacy_score_col in df.columns:
-        legacy_score = pd.to_numeric(df[legacy_score_col], errors="coerce")
-        level_code = legacy_score.fillna(float("-inf"))
-    else:
-        level_code = pd.Series(-1, index=df.index, dtype=float)
-
-    return adopted, level_code
+    if score_col in df.columns:
+        return pd.to_numeric(df[score_col], errors="coerce").fillna(-1)
+    if label_col in df.columns:
+        reverse_map = {label: score for score, label in AI_SCORE_LABELS.items()}
+        return df[label_col].astype("string").str.lower().map(reverse_map).fillna(-1)
+    return pd.Series(-1, index=df.index, dtype=float)
 
 
-def rename_llama_columns(df: pd.DataFrame) -> pd.DataFrame:
+def rename_model_columns(df: pd.DataFrame, prefix: str) -> pd.DataFrame:
     out = ensure_identity_types(df)
-    rename_map = {field: f"llama_{field}" for field in MODEL_METADATA_FIELDS}
-    rename_map["explicit_operational_ai"] = "llama_explicit_operational_ai"
+    rename_map = {field: f"{prefix}_{field}" for field in MODEL_METADATA_FIELDS}
+    rename_map["explicit_operational_ai"] = f"{prefix}_explicit_operational_ai"
     out = out.rename(columns=rename_map)
     preferred = (
         IDENTITY_COLS
         + FILING_BASE_COLS
-        + [f"llama_{field}" for field in MODEL_METADATA_FIELDS]
+        + [f"{prefix}_{field}" for field in MODEL_METADATA_FIELDS]
     )
     existing = [col for col in preferred if col in out.columns]
     extra = [col for col in out.columns if col not in existing]
     return out[existing + extra]
 
-
-def rename_mistral_columns(df: pd.DataFrame) -> pd.DataFrame:
-    out = ensure_identity_types(df)
-    rename_map = {field: f"mistral_{field}" for field in MODEL_METADATA_FIELDS}
-    rename_map["explicit_operational_ai"] = "mistral_explicit_operational_ai"
-    out = out.rename(columns=rename_map)
-    keep = (
-        IDENTITY_COLS
-        + FILING_BASE_COLS
-        + [f"mistral_{field}" for field in MODEL_METADATA_FIELDS]
-    )
-    existing = [col for col in keep if col in out.columns]
-    extra = [col for col in out.columns if col not in existing]
-    return out[existing + extra]
-
-
 def load_model_outputs(root: str, pattern: str, model: str) -> pd.DataFrame:
     files = find_score_files(root, pattern)
     print(f"Found {len(files)} {model} output files under {root}")
     df = read_concat(files)
-    if model == "llama":
-        return rename_llama_columns(df)
-    if model == "mistral":
-        return rename_mistral_columns(df)
-    raise ValueError(f"Unsupported model: {model}")
+    return rename_model_columns(df, model)
 
 
 def write_duplicate_report(dupes: pd.DataFrame, out_dir: str, filename: str) -> str:
@@ -321,52 +284,50 @@ def deduplicate_accessions(df: pd.DataFrame, label: str, rule: str, out_dir: str
     snippet_chars = pd.to_numeric(out.get("snippet_chars"), errors="coerce").fillna(-1)
     llm_called_col = f"{label.lower()}_llm_called"
     llm_called = out.get(llm_called_col, pd.Series(False, index=out.index)).fillna(False).astype(bool).astype(int)
-    adopted_rank, level_rank = model_priority_columns(out, label.lower())
+    score_rank = model_priority_columns(out, label.lower())
 
     out = out.assign(
         _section_count=section_count,
         _combined_chars_num=combined_chars,
         _snippet_chars_num=snippet_chars,
         _llm_called_num=llm_called,
-        _adopted_rank=adopted_rank,
-        _level_rank=level_rank,
+        _score_rank=score_rank,
     )
 
     if rule == "best_context":
         out = out.sort_values(
             [
                 "accession_number",
-                "_adopted_rank",
-                "_level_rank",
+                "_score_rank",
                 "_section_count",
                 "_combined_chars_num",
                 "_snippet_chars_num",
                 "_llm_called_num",
             ],
-            ascending=[True, False, False, False, False, False, False],
+            ascending=[True, False, False, False, False, False],
         )
     elif rule == "max_llama":
         out = out.sort_values(
-            ["accession_number", "_adopted_rank", "_level_rank", "_section_count", "_combined_chars_num", "_snippet_chars_num"],
-            ascending=[True, False, False, False, False, False],
+            ["accession_number", "_score_rank", "_section_count", "_combined_chars_num", "_snippet_chars_num"],
+            ascending=[True, False, False, False, False],
         )
     else:
         raise ValueError(f"Unsupported filing duplicate rule: {rule}")
 
     out = out.drop_duplicates(subset=["accession_number"], keep="first").reset_index(drop=True)
-    out = out.drop(columns=["_section_count", "_combined_chars_num", "_snippet_chars_num", "_llm_called_num", "_adopted_rank", "_level_rank"])
+    out = out.drop(columns=["_section_count", "_combined_chars_num", "_snippet_chars_num", "_llm_called_num", "_score_rank"])
     return out
 
 
-def merge_models(llama_df: pd.DataFrame, mistral_df: pd.DataFrame | None, filing_duplicate_rule: str, out_dir: str) -> pd.DataFrame:
-    llama_df = deduplicate_accessions(llama_df, "Llama", filing_duplicate_rule, out_dir)
-    if mistral_df is None:
-        return llama_df
+def merge_models(primary_df: pd.DataFrame, secondary_df: pd.DataFrame | None, filing_duplicate_rule: str, out_dir: str) -> pd.DataFrame:
+    primary_df = deduplicate_accessions(primary_df, "Primary", filing_duplicate_rule, out_dir)
+    if secondary_df is None:
+        return primary_df
 
-    mistral_df = deduplicate_accessions(mistral_df, "Mistral", filing_duplicate_rule, out_dir)
-    merge_keys = [col for col in IDENTITY_COLS + FILING_BASE_COLS if col in llama_df.columns and col in mistral_df.columns]
-    merged = llama_df.merge(
-        mistral_df,
+    secondary_df = deduplicate_accessions(secondary_df, "Secondary", filing_duplicate_rule, out_dir)
+    merge_keys = [col for col in IDENTITY_COLS + FILING_BASE_COLS if col in primary_df.columns and col in secondary_df.columns]
+    merged = primary_df.merge(
+        secondary_df,
         on=merge_keys,
         how="outer",
         validate="one_to_one",
@@ -415,30 +376,23 @@ def aggregate_model_firm_year(
     *,
     generic_output: bool,
 ) -> pd.DataFrame:
-    """Aggregate binary filing-level AI adoption into one firm-year score."""
+    """Aggregate filing-level 1-3 AI scores into one firm-year score."""
 
-    adoption_col = f"{prefix}_ai_adoption"
-    legacy_adoption_col = f"{prefix}_ai_adopted"
-    summary_col = f"{prefix}_evidence_summary"
-    exclusion_col = f"{prefix}_exclusion_reason_if_zero"
+    score_col = f"{prefix}_ai_score"
+    label_col = f"{prefix}_ai_score_label"
+    explanation_col = f"{prefix}_score_explanation"
     parse_status_col = f"{prefix}_parse_status"
-    if (
-        adoption_col not in filing_df.columns
-        and legacy_adoption_col not in filing_df.columns
-        and parse_status_col not in filing_df.columns
-    ):
+    if score_col not in filing_df.columns and parse_status_col not in filing_df.columns:
         return pd.DataFrame(columns=["cik", "year"])
 
     out = ensure_identity_types(filing_df)
     rows: list[dict[str, object]] = []
 
     for (cik, year), group in out.groupby(["cik", "year"], dropna=False, sort=True):
-        if adoption_col in group.columns:
-            adoption_series = pd.to_numeric(group[adoption_col], errors="coerce")
-        elif legacy_adoption_col in group.columns:
-            adoption_series = pd.to_numeric(group[legacy_adoption_col], errors="coerce")
+        if score_col in group.columns:
+            score_series = pd.to_numeric(group[score_col], errors="coerce")
         else:
-            adoption_series = pd.Series(pd.NA, index=group.index, dtype="Float64")
+            score_series = pd.Series(pd.NA, index=group.index, dtype="Float64")
         accessions = sorted(
             {
                 str(value).strip()
@@ -450,16 +404,13 @@ def aggregate_model_firm_year(
         n_chunks = int(len(group))
         n_chunks_scored = int(parse_status_series.isin(["success", "retry_success"]).sum())
         n_chunks_failed = int((parse_status_series == "failed").sum())
-        ai_adoption = int((adoption_series == 1).any())
-        evidence_summary = (
-            combine_evidence_summaries(group.loc[adoption_series == 1, summary_col])
-            if ai_adoption == 1 and summary_col in group.columns
-            else ""
-        )
-        exclusion_series = group.get(exclusion_col, pd.Series(dtype="string")).astype("string").str.strip()
-        exclusion_candidates = exclusion_series[
-            exclusion_series.notna() & exclusion_series.ne("") & exclusion_series.ne("none")
-        ]
+        valid_scores = score_series.dropna()
+        ai_score = int(valid_scores.max()) if not valid_scores.empty else pd.NA
+        ai_score_label = AI_SCORE_LABELS.get(int(ai_score), pd.NA) if pd.notna(ai_score) else pd.NA
+        max_score_explanation = ""
+        if pd.notna(ai_score) and explanation_col in group.columns:
+            explanation_series = group.loc[score_series == ai_score, explanation_col]
+            max_score_explanation = str(first_non_null(explanation_series) or "").strip()
         row = {
             "cik": cik,
             "year": year,
@@ -478,19 +429,9 @@ def aggregate_model_firm_year(
             "n_chunks_scored": n_chunks_scored,
             "n_chunks_failed": n_chunks_failed,
             "parse_status": aggregate_parse_status(parse_status_series),
-            "ai_adoption": ai_adoption,
-            "qualifying_evidence_found": bool(ai_adoption),
-            "evidence_summary": evidence_summary,
-            "exclusion_reason_if_zero": (
-                "none"
-                if ai_adoption == 1
-                else (exclusion_candidates.mode().iloc[0] if not exclusion_candidates.empty else "")
-            ),
-            "ai_adopted": ai_adoption,
-            "ai_adoption_level": "adopted" if ai_adoption == 1 else "none",
-            "ai_adoption_level_code": ai_adoption,
-            # Compatibility field: ai_level_code is now binary (0/1), not ordinal.
-            "ai_level_code": ai_adoption,
+            "ai_score": ai_score,
+            "ai_score_label": ai_score_label,
+            "score_explanation": max_score_explanation,
         }
         if generic_output:
             rows.append(row)
@@ -504,24 +445,25 @@ def aggregate_model_firm_year(
 
 def build_firm_year_panel(filing_df: pd.DataFrame, rule: str, out_dir: str) -> pd.DataFrame:
     """
-    Aggregate all filing-level binary adoption decisions within each firm-year.
+    Aggregate all filing-level AI scores within each firm-year.
 
     The `rule` argument is retained for CLI compatibility, but firm-years are no
-    longer reduced by picking one row. A firm-year is classified as adopting AI
-    if any chunk or filing row in the same cik-year is classified as positive.
+    longer reduced by picking one row. A firm-year receives the maximum filing
+    score observed within the same cik-year.
     """
 
     del rule, out_dir
-    prefixes = [
-        prefix
-        for prefix in ["llama", "mistral"]
-        if f"{prefix}_ai_adoption" in filing_df.columns
-        or f"{prefix}_ai_adopted" in filing_df.columns
-    ]
+    prefixes = sorted(
+        {
+            col[: -len("_ai_score")]
+            for col in filing_df.columns
+            if col.endswith("_ai_score")
+        }
+    )
     if not prefixes:
         return ensure_identity_types(filing_df)[["cik", "year"]].drop_duplicates().reset_index(drop=True)
 
-    primary_prefix = "llama" if "llama" in prefixes else prefixes[0]
+    primary_prefix = prefixes[0]
     panel = aggregate_model_firm_year(filing_df, primary_prefix, generic_output=True)
     for prefix in prefixes:
         if prefix == primary_prefix:
@@ -561,33 +503,33 @@ def main() -> int:
     os.makedirs(args.out_dir, exist_ok=True)
     lookup = load_lookup(args.lookup_csv)
 
-    llama_df = load_model_outputs(args.llama_dir, LLAMA_PATTERN, "llama")
-    llama_df = filter_to_lookup(llama_df, lookup, "Llama")
-    mistral_df = None
-    if args.mistral_dir:
-        mistral_df = load_model_outputs(args.mistral_dir, MISTRAL_PATTERN, "mistral")
-        mistral_df = filter_to_lookup(mistral_df, lookup, "Mistral")
+    primary_df = load_model_outputs(args.primary_dir, pattern_for_label(args.primary_label), args.primary_label)
+    primary_df = filter_to_lookup(primary_df, lookup, args.primary_label)
+    secondary_df = None
+    if args.secondary_dir:
+        secondary_df = load_model_outputs(args.secondary_dir, pattern_for_label(args.secondary_label), args.secondary_label)
+        secondary_df = filter_to_lookup(secondary_df, lookup, args.secondary_label)
 
-    filing_df = merge_models(llama_df, mistral_df, args.filing_duplicate_rule, args.out_dir)
+    filing_df = merge_models(primary_df, secondary_df, args.filing_duplicate_rule, args.out_dir)
     filing_df = filing_df.sort_values(["year", "cik", "accession_number"]).reset_index(drop=True)
 
-    all_chunks_out = os.path.join(args.out_dir, "ai_adoption_all_chunk_outputs.csv")
+    all_chunks_out = os.path.join(args.out_dir, "llm_extraction_all_chunk_outputs.csv")
     filing_df.to_csv(all_chunks_out, index=False)
     print(f"Wrote all-chunk merged output: {all_chunks_out} ({len(filing_df)} rows)")
 
-    filing_out = os.path.join(args.out_dir, "ai_adoption_filing_master.csv")
+    filing_out = os.path.join(args.out_dir, "llm_extraction_filing_master.csv")
     filing_df.to_csv(filing_out, index=False)
     print(f"Wrote filing-level master: {filing_out} ({len(filing_df)} rows)")
 
     panel_df = build_firm_year_panel(filing_df, args.firm_year_rule, args.out_dir)
     panel_sort_cols = [col for col in ["year", "cik", "filing_accession"] if col in panel_df.columns]
     panel_df = panel_df.sort_values(panel_sort_cols).reset_index(drop=True) if panel_sort_cols else panel_df.reset_index(drop=True)
-    panel_out = os.path.join(args.out_dir, "ai_adoption_firm_year_panel.csv")
+    panel_out = os.path.join(args.out_dir, "llm_extraction_firm_year_panel.csv")
     panel_df.to_csv(panel_out, index=False)
     print(f"Wrote firm-year panel: {panel_out} ({len(panel_df)} rows)")
 
     if args.compustat_csv:
-        comp_out = os.path.join(args.out_dir, "compustat_ai_adoption_merged.csv")
+        comp_out = os.path.join(args.out_dir, "compustat_llm_extraction_merged.csv")
         merged_df = merge_with_compustat(
             panel_df,
             args.compustat_csv,

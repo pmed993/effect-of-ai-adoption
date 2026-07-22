@@ -12,7 +12,6 @@ import logging
 import os
 import re
 import tempfile
-from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,10 +25,10 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
-SCRIPT_VERSION = "2026-07-11-ai_binary_research_v5"
-PROMPT_VERSION = "ai_binary_adoption_research_v3"
-RESEARCH_PROFILE = "disclosed_ai_adoption_binary_v5"
-MODEL_NAME = "meta-llama/Llama-3.2-3B-Instruct"
+SCRIPT_VERSION = "2026-07-22-llm_extraction_v1"
+PROMPT_VERSION = "llm_extraction_claude_v1"
+RESEARCH_PROFILE = "llm_extraction_ai_1to3_v1"
+MODEL_NAME = "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
 TEMPERATURE = 0.0
 DEFAULT_MAX_NEW_TOKENS = 128
 DEFAULT_MAX_PROMPT_CHARS = 1800
@@ -37,16 +36,14 @@ DEFAULT_SENTENCE_WINDOW = 1
 DEFAULT_PREFILTER_MODE = "hard_zero"
 
 DEFAULT_ENDPOINTS = {
-    "llama": "jupyterhub-llama-3-3b-instruct-endpoint",
-    "mistral": "jupyterhub-mistral-7b-instruct-endpoint"
+    "claude": MODEL_NAME,
 }
 
 DEFAULT_MODEL_NAMES = {
-    "llama": MODEL_NAME,
-    "mistral": "mistralai/Mistral-7B-Instruct-v0.3",
+    "claude": MODEL_NAME,
 }
 
-DEFAULT_ENDPOINT = DEFAULT_ENDPOINTS["llama"]
+DEFAULT_ENDPOINT = DEFAULT_ENDPOINTS["claude"]
 
 DEFAULT_BUCKET = "jupyter.notebook.uktrade.io"
 
@@ -57,85 +54,62 @@ CHUNK_RE = re.compile(r"^extract_df_chunk_(\d{5})\.rds$")
 WHITESPACE_RE = re.compile(r"\s+")
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[\.\!\?\;])\s+|\n+")
 
-# The research workflow separates high-precision trigger terms from broader
-# ranking-only terms. Trigger terms decide whether a filing reaches the LLM in
-# hard-zero mode. Ranking-only terms help snippet selection but do not justify
-# an LLM call on their own.
-AI_TRIGGER_PATTERNS = [
+# The research workflow now uses one shared AI keyword dictionary for both the
+# hard-zero prefilter and snippet ranking. This keeps the process simpler and
+# makes the prefilter directly traceable to one published term list.
+AI_KEYWORD_PATTERNS = [
     r"\bA\.I\.\b",
-    r"\bAI/ML\b",
     r"\bAI\b",
-    r"\bNLP\b",
-    r"\bai[- ]?(enabled|powered|driven|based)\b",
-    r"\bagentic ai\b",
-    r"\bai agents?\b",
-    r"\bai assistants?\b",
+    r"\bAI chatbot\b",
+    r"\bLibsvm\b",
+    r"\bMahout\b",
+    # Keep standalone ML, but avoid obvious false positives like mg/ml and
+    # company abbreviations written as "(ML)".
+    r"(?<!\()(?<![A-Za-z0-9/])ML(?![A-Za-z0-9/])",
+    r"\bOpenCV\b",
+    r"\bWord2vec\b",
+    r"\bXGBoost\b",
+    r"\badversarial networks?\b",
     r"\bartificial intelligence\b",
-    r"\bartificial neural networks?\b",
-    r"\bbots?\b",
-    r"\bchatbots?\b",
-    r"\bclassification algorithms?\b",
-    r"\bclustering algorithms?\b",
     r"\bcomputer vision\b",
-    r"\bconversational ai\b",
-    r"\bcopilots?\b",
+    r"\bdecision trees?\b",
     r"\bdeep[- ]learning\b",
-    r"\bdeep learning\b",
-    r"\bdimensionality reduction\b",
-    r"\bentity recognition\b",
-    r"\bfoundation models?\b",
-    r"\bgen ai\b",
-    r"\bgenai\b",
-    r"\bgenerative ai\b",
-    r"\bgenerative models?\b",
-    r"\binformation extraction\b",
-    r"\bintent classification\b",
+    r"\bfeature extraction\b",
+    r"\bgenetic algorithms?\b",
+    r"\bgradient boosting\b",
+    r"\bimage processing\b",
+    r"\bimage recognition\b",
+    r"\bimage segmentation\b",
     r"\bkernel methods?\b",
-    r"\blarge[- ]language models?\b",
-    r"\blarge language models?\b",
-    r"\bllms?\b",
-    r"\bmachine intelligence\b",
-    r"\bmachine[- ]learning\b",
+    r"\bkeras\b",
+    r"\blatent Dirichlet allocation\b",
+    r"\blatent semantic analysis\b",
+    r"\blearning models?\b",
     r"\bmachine learning\b",
     r"\bmachine translation\b",
-    r"\bnamed entity recognition\b",
+    r"\bmachine vision\b",
     r"\bnatural language processing\b",
-    r"\bnatural language understanding\b",
     r"\bneural networks?\b",
+    r"\bobject detection\b",
+    r"\bobject recognition\b",
+    r"\bopinion mining\b",
+    r"\bpattern recognition\b",
+    r"\bpredictive models?\b",
+    r"\bprincipal component analysis\b",
+    r"\brandom forests?\b",
+    r"\brecognition systems?\b",
     r"\brecommender systems?\b",
     r"\breinforcement learning\b",
+    r"\bsentiment analysis\b",
+    r"\bsentiment classification\b",
+    r"\bspeech recognition\b",
     r"\bsupervised learning\b",
     r"\bsupport vector machines?\b",
-    r"\btransformer models?\b",
+    r"\btext mining\b",
+    r"\btransformers?\b",
     r"\bunsupervised learning\b",
-    r"\bvirtual assistants?\b",
-]
-
-AI_RANKING_ONLY_PATTERNS = [
-    r"\badaptive algorithms?\b",
-    r"\balgorithmic decision-making\b",
-    r"\banomaly detection\b",
-    r"\bautomated decision-making\b",
-    r"\bbig data\b",
-    r"\bbusiness intelligence\b",
-    r"\bcognitive science\b",
-    r"\bdata mining\b",
-    r"\bdata science\b",
-    r"\bdata scientists?\b",
-    r"\bdecision engines?\b",
-    r"\bexpert systems?\b",
-    r"\bfacial recognition\b",
-    r"\bfraud detection\b",
-    r"\bhandwriting recognition\b",
-    r"\bimage recognition\b",
-    r"\blanguage models?\b",
-    r"\bobject recognition\b",
-    r"\boptical character recognition\b",
-    r"\bpattern recognition\b",
-    r"\bpredictive analytics?\b",
-    r"\brecommendation engines?\b",
-    r"\brobotic process automation\b",
-    r"\bspeech recognition\b",
+    r"\bvirtual agents?\b",
+    r"\bword embeddings?\b",
 ]
 
 
@@ -145,9 +119,9 @@ def compile_keyword_patterns(patterns: Sequence[str]) -> re.Pattern[str]:
     return re.compile(r"(?i:" + "|".join(patterns) + r")")
 
 
-AI_TRIGGER_KEYWORDS = compile_keyword_patterns(AI_TRIGGER_PATTERNS)
-AI_RANKING_ONLY_KEYWORDS = compile_keyword_patterns(AI_RANKING_ONLY_PATTERNS)
-AI_RANKING_KEYWORDS = compile_keyword_patterns(AI_TRIGGER_PATTERNS + AI_RANKING_ONLY_PATTERNS)
+AI_KEYWORDS = compile_keyword_patterns(AI_KEYWORD_PATTERNS)
+AI_TRIGGER_KEYWORDS = AI_KEYWORDS
+AI_RANKING_KEYWORDS = AI_KEYWORDS
 
 # These words help rank snippets. They do not determine the final label.
 # They only make operational evidence more likely to be sent to the LLM.
@@ -171,133 +145,23 @@ LOW_VALUE_CUES = re.compile(
     r")\b"
 )
 
-AI_ADOPTION_LEVEL_CODES = {
-    "none": 0,
-    "low": 1,
-    "medium": 2,
-    "high": 3,
+AI_SCORE_LABELS = {
+    1: "no_current_adoption",
+    2: "limited_or_targeted_adoption",
+    3: "production_or_strategic_adoption",
 }
-
-AI_LEVEL_CODE_LABELS = {code: label for label, code in AI_ADOPTION_LEVEL_CODES.items()}
-
-BUSINESS_AREAS = {
-    "product_service",
-    "operations",
-    "customer_service",
-    "marketing_sales",
-    "risk_fraud",
-    "finance",
-    "supply_chain",
-    "r_and_d",
-    "other",
-}
-
-BUSINESS_AREA_ALIASES = {
-    "product": "product_service",
-    "products": "product_service",
-    "service": "product_service",
-    "services": "product_service",
-    "product/service": "product_service",
-    "product_service": "product_service",
-    "product services": "product_service",
-    "customer service": "customer_service",
-    "marketing": "marketing_sales",
-    "sales": "marketing_sales",
-    "marketing_sales": "marketing_sales",
-    "risk": "risk_fraud",
-    "fraud": "risk_fraud",
-    "risk_fraud": "risk_fraud",
-    "research": "r_and_d",
-    "r&d": "r_and_d",
-    "rd": "r_and_d",
-}
-
-EVIDENCE_STRENGTHS = {"weak", "moderate", "strong"}
-EVIDENCE_STRENGTH_RANK = {"weak": 1, "moderate": 2, "strong": 3}
-
-CENTRALITY_LEVELS = {"peripheral", "operational", "core"}
-CENTRALITY_RANK = {"peripheral": 1, "operational": 2, "core": 3}
-
-SOURCE_ITEMS = {"item_1", "item_7", "unknown"}
-SOURCE_ITEM_ALIASES = {
-    "1": "item_1",
-    "item1": "item_1",
-    "item_1": "item_1",
-    "item 1": "item_1",
-    "business": "item_1",
-    "7": "item_7",
-    "item7": "item_7",
-    "item_7": "item_7",
-    "item 7": "item_7",
-    "md&a": "item_7",
-    "mda": "item_7",
-}
-
-BINARY_EXCLUSION_REASONS = {
-    "none",
-    "generic_ai",
-    "risk_only",
-    "future_only",
-    "customer_only",
-    "enabling_infrastructure",
-    "vague",
-    "not_ai",
-    "other",
-}
-
-BINARY_EXCLUSION_REASON_ALIASES = {
-    "generic_market_discussion": "generic_ai",
-    "generic_market": "generic_ai",
-    "market_trend": "generic_ai",
-    "market_trends": "generic_ai",
-    "market_discussion": "generic_ai",
-    "customer_use": "customer_only",
-    "future_plans": "future_only",
-    "future_plan": "future_only",
-    "plans_only": "future_only",
-}
-
-# Backward-compatible alias used by a few older helpers below.
-EXCLUSION_REASONS = BINARY_EXCLUSION_REASONS
 
 RETRYABLE_PARSE_STATUSES = {
     "missing_output",
-    "no_json_found",
-    "no_valid_score_json",
-    "invalid_level_code",
-    "conflicting_level_codes",
+    "no_score_found",
+    "invalid_score",
+    "conflicting_scores",
 }
 
 TEMPLATE_OUTPUT_CUES = re.compile(
     r"(?im)(^\s*def\s+|^\s*return\b|^\s*if\b|^\s*elif\b|^\s*else\s*:|^\s*###|^\s*##\s*step\b|^\s*solution\b)"
 )
-
-# These patterns catch model-written positive summaries that are too generic to
-# qualify as disclosed AI adoption under the research design. They are applied
-# after JSON parsing so the prompt can stay simple while obvious weak positives
-# are deterministically forced back to zero.
-WEAK_POSITIVE_SUMMARY_PATTERNS = [
-    re.compile(r"(?i)\b(?:intend(?:s|ed)? to |is )?invest(?:s|ed|ing)? in (?:technologies|artificial intelligence|ai|machine learning)\b"),
-    re.compile(r"(?i)\binvest(?:s|ed|ing)? in the development of new products?\b"),
-    re.compile(r"(?i)\binnovative new products?\b"),
-    re.compile(r"(?i)\bimprov(?:e|es|ing)? existing products?\b.*\badvanc(?:e|es|ing)? technology\b"),
-    re.compile(r"(?i)\badopt(?:s|ed|ing)? new technologies\b"),
-    re.compile(r"(?i)\bbuild(?:s|ing)? ai capabilities\b"),
-    re.compile(r"(?i)\bstrengthening and leveraging (?:its )?capabilities\b"),
-    re.compile(r"(?i)\bsupport innovation\b"),
-    re.compile(r"(?i)\binnovative framework\b"),
-    re.compile(r"(?i)\bregulat(?:e|es|ing|ion)\b.*\bartificial intelligence\b"),
-    re.compile(r"(?i)\bsupport(?:s|ing)? use cases\b"),
-    re.compile(r"(?i)\bprovide(?:s|ing)? capabilities\b"),
-    re.compile(r"(?i)\bimprov(?:e|es|ing) outcomes\b"),
-    re.compile(r"(?i)\bcommon platforms?\b.*\bcustomer facing applications\b"),
-    re.compile(r"(?i)\benhanc(?:e|es|ing) customer experience\b.*\bdriv(?:e|es|ing) efficiency\b"),
-    re.compile(r"(?i)\bdevelopment of technologies\b.*\bbusiness operations\b"),
-    re.compile(r"(?i)\brevenue growth\b.*\bcost reduction\b.*\brisk management\b"),
-    re.compile(r"(?i)\bmonetiz(?:e|es|ing) data\b.*\bpay-for-performance\b"),
-    re.compile(r"(?i)\bai[- ]driven data and solutions\b"),
-    re.compile(r"(?i)^the filing describes a concrete ai application\b"),
-]
+SCORE_TOKEN_RE = re.compile(r"\b([123])\b")
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +226,7 @@ def count_ai_keywords(text: str) -> int:
 
 
 def count_ranking_keywords(text: str) -> int:
-    """Count broader AI-adjacent keyword hits used for snippet ranking QA."""
+    """Count AI keyword hits used for snippet ranking QA."""
 
     return len(list(AI_RANKING_KEYWORDS.finditer(text))) if text else 0
 
@@ -375,219 +239,6 @@ def chunk_name_from_id(chunk_id: int) -> str:
     return f"extract_df_chunk_{chunk_id:05d}.rds"
 
 
-def normalize_enum(
-    value: Any,
-    *,
-    allowed: set[str],
-    aliases: Optional[dict[str, str]] = None,
-) -> str:
-    """Normalize a categorical value against an allowed set."""
-
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return ""
-    raw = normalize_whitespace(value).lower()
-
-    def canonicalize(text: str) -> str:
-        text = text.strip().replace("-", "_").replace("/", "_").replace("&", "and")
-        text = re.sub(r"\s+", "_", text)
-        if aliases:
-            text = aliases.get(text, text)
-        return text
-
-    text = canonicalize(raw)
-    if text in allowed:
-        return text
-
-    multi_tokens = re.split(r"\s*(?:\||,|;| or )\s*", raw)
-    for token in multi_tokens:
-        candidate = canonicalize(token)
-        if candidate in allowed:
-            return candidate
-
-    return ""
-
-
-def normalize_bool(value: Any) -> Optional[bool]:
-    """Normalize common truthy/falsey values to bool."""
-
-    if isinstance(value, bool):
-        return value
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return None
-    if isinstance(value, (int, float)) and value in {0, 1, 0.0, 1.0}:
-        return bool(int(value))
-    text = normalize_whitespace(value).lower()
-    if text in {"true", "yes", "y", "1"}:
-        return True
-    if text in {"false", "no", "n", "0"}:
-        return False
-    return None
-
-
-def canonical_use_case_key(use_case: str, business_area: str) -> str:
-    """Create a deterministic key used to deduplicate repeated use-case mentions."""
-
-    text = normalize_whitespace(use_case).lower()
-    text = re.sub(r"[^a-z0-9\s]", " ", text)
-    tokens = [token for token in text.split() if token not in {"the", "a", "an", "our", "their", "its"}]
-    return f"{business_area}|{' '.join(tokens[:12])}"
-
-
-def normalize_qualifying_use_case(obj: Any) -> dict[str, Any]:
-    """Validate and normalize one qualifying AI use-case object."""
-
-    if not isinstance(obj, dict):
-        raise ValueError("qualifying_ai_use_cases entries must be JSON objects.")
-
-    normalized = {
-        "use_case": normalize_whitespace(obj.get("use_case", "")),
-        "business_area": normalize_enum(
-            obj.get("business_area"),
-            allowed=BUSINESS_AREAS,
-            aliases=BUSINESS_AREA_ALIASES,
-        ),
-        "current_use": normalize_bool(obj.get("current_use")),
-        "firm_itself_uses_or_deploys": normalize_bool(obj.get("firm_itself_uses_or_deploys")),
-        "evidence_strength": normalize_enum(obj.get("evidence_strength"), allowed=EVIDENCE_STRENGTHS),
-        "centrality": normalize_enum(obj.get("centrality"), allowed=CENTRALITY_LEVELS),
-        "source_item": normalize_enum(
-            obj.get("source_item"),
-            allowed=SOURCE_ITEMS,
-            aliases=SOURCE_ITEM_ALIASES,
-        ),
-    }
-
-    missing = [key for key, value in normalized.items() if value in {"", None}]
-    if missing:
-        raise ValueError(f"qualifying_ai_use_cases entry missing or invalid fields: {missing}")
-    return normalized
-
-
-def normalize_excluded_mention(obj: Any) -> dict[str, str]:
-    """Validate and normalize one excluded mention object."""
-
-    if not isinstance(obj, dict):
-        raise ValueError("excluded_mentions entries must be JSON objects.")
-
-    normalized = {
-        "brief_description": normalize_whitespace(obj.get("brief_description", "")),
-        "reason": normalize_enum(obj.get("reason"), allowed=EXCLUSION_REASONS),
-    }
-    missing = [key for key, value in normalized.items() if not value]
-    if missing:
-        raise ValueError(f"excluded_mentions entry missing or invalid fields: {missing}")
-    return normalized
-
-
-def deduplicate_qualifying_use_cases(use_cases: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Deduplicate repeated use-case mentions while preserving the strongest record."""
-
-    best_by_key: dict[str, dict[str, Any]] = {}
-    for use_case in use_cases:
-        key = canonical_use_case_key(use_case.get("use_case", ""), use_case.get("business_area", "other"))
-        current = best_by_key.get(key)
-        if current is None:
-            best_by_key[key] = dict(use_case)
-            continue
-        candidate = dict(use_case)
-        candidate_rank = (
-            CENTRALITY_RANK.get(candidate.get("centrality", ""), 0),
-            EVIDENCE_STRENGTH_RANK.get(candidate.get("evidence_strength", ""), 0),
-            len(candidate.get("use_case", "")),
-        )
-        current_rank = (
-            CENTRALITY_RANK.get(current.get("centrality", ""), 0),
-            EVIDENCE_STRENGTH_RANK.get(current.get("evidence_strength", ""), 0),
-            len(current.get("use_case", "")),
-        )
-        if candidate_rank > current_rank:
-            best_by_key[key] = candidate
-    return list(best_by_key.values())
-
-
-def normalized_evidence_object(evidence: Optional[dict[str, Any]] = None) -> dict[str, list[dict[str, Any]]]:
-    """Return an evidence object with guaranteed list fields."""
-
-    evidence = evidence or {}
-    qualifying = evidence.get("qualifying_ai_use_cases", [])
-    excluded = evidence.get("excluded_mentions", [])
-    return {
-        "qualifying_ai_use_cases": list(qualifying) if isinstance(qualifying, list) else [],
-        "excluded_mentions": list(excluded) if isinstance(excluded, list) else [],
-    }
-
-
-def filter_qualifying_current_use_cases(evidence: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return deduplicated current firm-use AI cases that qualify for scoring."""
-
-    evidence = normalized_evidence_object(evidence)
-    qualifying = [
-        dict(use_case)
-        for use_case in evidence["qualifying_ai_use_cases"]
-        if bool(use_case.get("current_use")) and bool(use_case.get("firm_itself_uses_or_deploys"))
-    ]
-    return deduplicate_qualifying_use_cases(qualifying)
-
-
-def determine_main_exclusion_reason(
-    evidence: dict[str, Any],
-    *,
-    fallback_reason: str = "",
-) -> str:
-    """Choose the main exclusion reason used when final score is zero."""
-
-    evidence = normalized_evidence_object(evidence)
-    reasons = [item.get("reason", "") for item in evidence["excluded_mentions"] if item.get("reason")]
-    if reasons:
-        return Counter(reasons).most_common(1)[0][0]
-    return fallback_reason
-
-
-def classify_ai_adoption_from_evidence(evidence: dict) -> int:
-    """Assign the final 0-3 AI adoption code deterministically from structured evidence."""
-
-    qualifying = filter_qualifying_current_use_cases(evidence)
-    if not qualifying:
-        return 0
-
-    n_use_cases = len(qualifying)
-    business_areas = {item.get("business_area", "") for item in qualifying if item.get("business_area")}
-    has_core_ai = any(item.get("centrality") == "core" for item in qualifying)
-    n_strong_or_moderate = sum(
-        1 for item in qualifying if item.get("evidence_strength") in {"moderate", "strong"}
-    )
-
-    if has_core_ai and n_use_cases >= 2 and n_strong_or_moderate >= 2:
-        return 3
-    if n_use_cases >= 2 or len(business_areas) >= 2:
-        return 2
-    return 1
-
-
-def summarize_evidence(evidence: dict[str, Any], *, fallback_zero_reason: str = "") -> dict[str, Any]:
-    """Return deterministic summary metrics derived from structured evidence."""
-
-    qualifying = filter_qualifying_current_use_cases(evidence)
-    ai_level_code = classify_ai_adoption_from_evidence(evidence)
-    return {
-        "qualifying_ai_use_cases": qualifying,
-        "excluded_mentions": normalized_evidence_object(evidence)["excluded_mentions"],
-        "n_qualifying_use_cases": len(qualifying),
-        "n_business_areas": len({item.get("business_area", "") for item in qualifying if item.get("business_area")}),
-        "has_core_ai": any(item.get("centrality") == "core" for item in qualifying),
-        "main_exclusion_reason_if_zero": determine_main_exclusion_reason(
-            evidence,
-            fallback_reason=fallback_zero_reason,
-        )
-        if ai_level_code == 0
-        else "",
-        "ai_level_code": ai_level_code,
-        "ai_adopted_binary": int(ai_level_code >= 1),
-        "ai_adopted_medium": int(ai_level_code >= 2),
-        "ai_adopted_core": int(ai_level_code >= 3),
-    }
-
-
 # ---------------------------------------------------------------------------
 # Output formatting helpers
 # ---------------------------------------------------------------------------
@@ -596,9 +247,6 @@ def summarize_evidence(evidence: dict[str, Any], *, fallback_zero_reason: str = 
 def preferred_output_columns(save_raw_json: bool) -> list[str]:
     """Return the preferred CSV column order."""
 
-    # Status fields keep the historical "score" wording for compatibility with
-    # older QA outputs and merge scripts, even though the main output is now a
-    # binary AI-adoption decision.
     cols = [
         "run_id",
         "script_version",
@@ -634,15 +282,9 @@ def preferred_output_columns(save_raw_json: bool) -> list[str]:
         "initial_score_status",
         "retry_attempted",
         "retry_score_status",
-        "ai_adoption",
-        "qualifying_evidence_found",
-        "evidence_summary",
-        "exclusion_reason_if_zero",
-        "ai_adopted",
-        "ai_adoption_level",
-        "ai_adoption_level_code",
-        "ai_level_code",
-        "explanation",
+        "ai_score",
+        "ai_score_label",
+        "score_explanation",
         "score_status",
         "endpoint",
         "job_id",
@@ -944,7 +586,7 @@ def extract_relevant_snippets(full_text: str, max_chars: int, sentence_window: i
             score += 5
         if AI_TRIGGER_KEYWORDS.search(sentences[idx]):
             score += 3
-        if AI_RANKING_ONLY_KEYWORDS.search(sentences[idx]):
+        if AI_RANKING_KEYWORDS.search(sentences[idx]):
             score += 1
         if OPERATIONAL_CUES.search(window_text):
             score += 4
@@ -995,83 +637,48 @@ def extract_relevant_snippets(full_text: str, max_chars: int, sentence_window: i
 # ---------------------------------------------------------------------------
 # Prompt construction
 # ---------------------------------------------------------------------------
-# The prompt is intentionally narrow. The model only decides whether at least
-# one concrete firm-use AI case appears in the filing text.
-def _binary_adoption_rules() -> str:
-    """Return the shared binary AI-adoption decision rules."""
+# The scoring prompt is intentionally short and rigid so Claude can return one
+# clean ordinal score with minimal parsing risk.
+def _score_rubric() -> str:
+    """Return the 1-3 AI-adoption scoring rubric."""
 
     return (
-        "Decide whether the text shows that the firm itself uses or is implementing AI.\n"
-        "Set ai_adoption = 1 when the text describes a concrete AI application, AI-enabled feature, or AI implementation by the firm in its own products, services, workflows, features, or internal operations.\n"
-        "AI includes machine learning, generative AI, natural language processing, computer vision, predictive models, recommendation systems, autonomous systems, and similar AI systems.\n\n"
-        "Count as adoption when the text says the firm uses, embeds, launches, integrates, deploys, implements, or is formally implementing AI for a specific business use and states what the AI does.\n"
-        "A concrete rollout, phased implementation, or AI-enabled feature counts only if the intended use is specific and the filing explains the AI function.\n"
-        "Do not count statements that the firm is investing in AI, innovating with AI, adopting new technologies, or building AI capabilities unless the filing identifies a specific business application and states what the AI does.\n"
-        "Do not require full rollout, quantified outcomes, or firm-wide deployment.\n\n"
-        "Set ai_adoption = 0 only when the filing contains no concrete firm-specific AI application and instead contains only:\n"
-        "1. Generic AI discussion, market trends, broad statements about opportunity, or AI risk disclosure only.\n"
-        "2. Exploration, evaluation, investment, innovation, product development, partnerships, vendor capabilities, hiring, or other discussion without a concrete firm application or implementation.\n"
-        "3. Customer use of AI only, without evidence that the firm itself uses or offers AI in its own products, services, or operations.\n"
-        "4. AI demand, AI chips, processors, semiconductors, cloud, software, data centres, devices, or infrastructure that only enable others to build or run AI, without evidence of the firm's own AI application.\n"
-        "5. AI platform names, AI product labels, AI/ML workloads, or AI-capable hardware claims without a description of what the AI does for the firm's own product or operation.\n"
-        "6. Generic platform language saying the product supports use cases, provides capabilities, improves outcomes, or enables applications without explaining the firm's own AI function.\n"
-        "7. Vague analytics, automation, algorithms, digital transformation, or general revenue, cost, efficiency, or productivity claims without a specific AI use case.\n"
-        "8. No meaningful AI narrative about the firm's own activities.\n\n"
-        "If ai_adoption = 1, evidence_summary must name the product, service, workflow, feature, internal function, or implementation area and briefly state what the AI does.\n"
-        "If you cannot state the specific use case in evidence_summary, set ai_adoption = 0.\n"
-        "If uncertain, choose 0.\n"
-    )
-
-
-def _binary_output_schema() -> str:
-    """Return the required binary JSON schema."""
-
-    return (
-        "{\n"
-        '  "ai_adoption": 0,\n'
-        '  "evidence_summary": ""\n'
-        "}\n"
+        "Score 1: No current AI adoption. This includes no AI mention, or AI mentioned only as industry context, competitor activity, future plans, exploration, or risk, with no evidence of current firm use.\n"
+        "Score 2: Limited or targeted AI adoption. The firm is building AI capacity, piloting or experimenting with AI, or using AI in a limited set of products or operational processes, but AI does not yet appear central to strategy or financial performance.\n"
+        "Score 3: Production-level or strategic AI adoption. AI is used in a clear, ongoing way and is described as important for strategy, operations, cost savings, revenue generation, or broad business performance.\n"
     )
 
 
 def build_ai_prompt(text: str) -> str:
-    """Build the main binary AI-adoption prompt for one filing text."""
+    """Build the main Claude-style 1-3 AI-adoption scoring prompt."""
 
     return (
-        "You are classifying whether a firm uses or implements AI based on filing text.\n\n"
-        "Base your decision only on the filing text. Do not infer adoption from industry context or general knowledge.\n\n"
-        f"{_binary_adoption_rules()}\n"
-        "FILING TEXT TO EVALUATE:\n"
+        "You are an expert analyst.\n"
+        "Using the rubric below, assign one integer score from 1 to 3 for the firm's level of AI adoption.\n"
+        "Use only the filing text. Do not rely on outside knowledge.\n\n"
+        f"{_score_rubric()}\n"
+        "Choose the single best score.\n"
+        "Return only one character: 1, 2, or 3.\n\n"
+        "FILING TEXT:\n"
         "<filing_text>\n"
         f"{text}\n"
-        "</filing_text>\n\n"
-        "Use exactly this schema:\n"
-        f"{_binary_output_schema()}"
-        "If ai_adoption = 1, provide a short evidence_summary.\n"
-        "If ai_adoption = 0, set evidence_summary to \"\".\n"
-        "Choose one final answer. Return exactly one valid JSON object and nothing else. Do not return markdown, code fences, commentary, explanations, code, pseudocode, template placeholders, multiple options, the word \"or\", or any text before or after the JSON object.\n"
+        "</filing_text>\n"
     )
 
 
 def build_ai_retry_prompt(text: str) -> str:
-    """Build a stricter JSON-only retry prompt for binary classification."""
+    """Build a stricter retry prompt that asks for only one digit."""
 
     return (
-        "Return ONLY one valid JSON object.\n"
+        "Return only one character: 1, 2, or 3.\n"
         "Do not explain your answer.\n"
-        "Do not return markdown.\n"
-        "Do not return multiple JSON objects.\n\n"
-        "Base your decision only on the filing text. Do not infer adoption from industry context or general knowledge.\n\n"
-        f"{_binary_adoption_rules()}\n"
-        "FILING TEXT TO EVALUATE:\n"
+        "Do not return markdown, JSON, or any extra text.\n"
+        "Use only the filing text.\n\n"
+        f"{_score_rubric()}\n"
+        "FILING TEXT:\n"
         "<filing_text>\n"
         f"{text}\n"
-        "</filing_text>\n\n"
-        "Use exactly this schema:\n"
-        f"{_binary_output_schema()}"
-        "If ai_adoption = 1, provide a short evidence_summary.\n"
-        "If ai_adoption = 0, set evidence_summary to \"\".\n"
-        "Choose one final answer. Return exactly one valid JSON object and nothing else. Do not return markdown, code fences, explanations, code, pseudocode, template placeholders, multiple options, or the word \"or\".\n"
+        "</filing_text>\n"
     )
 
 
@@ -1153,195 +760,95 @@ def extract_balanced_json_objects(text: str) -> list[str]:
     return objects
 
 
-def parse_binary_int(value: Any) -> Optional[int]:
-    """Parse a conservative binary 0/1 value."""
+def parse_score_int(value: Any) -> Optional[int]:
+    """Parse a conservative 1-3 score value."""
 
     if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value in {1, 2, 3}:
         return int(value)
-    if isinstance(value, int) and value in {0, 1}:
-        return int(value)
-    if isinstance(value, float) and value in {0.0, 1.0}:
+    if isinstance(value, float) and value in {1.0, 2.0, 3.0}:
         return int(value)
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
-    text = normalize_whitespace(value).lower()
-    if text in {"0", "false", "no", "none", "non_adopter", "non-adopter"}:
-        return 0
-    if text in {"1", "true", "yes", "adopted"}:
-        return 1
-    return None
+    text = normalize_whitespace(value)
+    return int(text) if text in {"1", "2", "3"} else None
 
 
-def normalize_binary_exclusion_reason(value: Any) -> str:
-    """Normalize the binary exclusion reason."""
-
-    return normalize_enum(
-        value,
-        allowed=BINARY_EXCLUSION_REASONS,
-        aliases=BINARY_EXCLUSION_REASON_ALIASES,
-    )
-
-
-def has_weak_positive_summary(text: str) -> bool:
-    """Return True when a positive evidence summary is too generic to qualify."""
-
-    if not text:
-        return False
-    return any(pattern.search(text) for pattern in WEAK_POSITIVE_SUMMARY_PATTERNS)
-
-
-def parse_binary_adoption_object(obj: Any) -> dict[str, Any]:
-    """Validate one parsed JSON object as a binary AI-adoption response."""
-
-    if not isinstance(obj, dict):
-        raise ValueError("Parsed JSON was not an object.")
-
-    ai_adoption = parse_binary_int(obj.get("ai_adoption", obj.get("ai_adopted")))
-    if ai_adoption is None:
-        raise ValueError("ai_adoption must be 0 or 1.")
-
-    qualifying = normalize_bool(
-        obj.get("qualifying_evidence_found", obj.get("evidence_found", obj.get("qualifying_evidence")))
-    )
-    evidence_summary = normalize_whitespace(obj.get("evidence_summary", obj.get("summary", "")))
-    if ai_adoption == 1:
-        if qualifying is False:
-            raise ValueError("Positive ai_adoption cannot set qualifying_evidence_found to false.")
-        if not evidence_summary:
-            raise ValueError("Positive ai_adoption requires a non-empty evidence_summary.")
-        if has_weak_positive_summary(evidence_summary):
-            return {
-                "ai_adoption": 0,
-                "qualifying_evidence_found": False,
-                "evidence_summary": "",
-                "exclusion_reason_if_zero": "",
-            }
-        return {
-            "ai_adoption": 1,
-            "qualifying_evidence_found": True,
-            "evidence_summary": evidence_summary,
-            "exclusion_reason_if_zero": "none",
-        }
-
-    if qualifying is True:
-        raise ValueError("Zero ai_adoption cannot set qualifying_evidence_found to true.")
-
-    return {
-        "ai_adoption": 0,
-        "qualifying_evidence_found": False,
-        "evidence_summary": "",
-        "exclusion_reason_if_zero": "",
-    }
-
-
-def build_binary_parse_result(
-    payload: dict[str, Any],
+def build_score_parse_result(
+    score: int,
     *,
     raw_json: str,
-    parse_error_code: str,
+    status: str,
 ) -> dict[str, Any]:
-    """Build the standardized parse result for the binary adoption workflow."""
+    """Build the standard parsed-result object for the 1-3 score workflow."""
 
-    ai_adoption = int(payload["ai_adoption"])
-    evidence_summary = payload["evidence_summary"]
-    exclusion_reason_if_zero = payload["exclusion_reason_if_zero"]
-    explanation = (
-        f"Qualifying current firm-use AI evidence found: {evidence_summary}"
-        if ai_adoption == 1 and evidence_summary
-        else (
-            "Qualifying current firm-use AI evidence found."
-            if ai_adoption == 1
-            else "No qualifying current firm-use AI evidence found."
-        )
-    )
+    score_label = AI_SCORE_LABELS[int(score)]
     return {
-        "ai_adoption": ai_adoption,
-        "qualifying_evidence_found": bool(payload["qualifying_evidence_found"]),
-        "evidence_summary": evidence_summary,
-        "exclusion_reason_if_zero": exclusion_reason_if_zero,
-        "ai_adopted": ai_adoption,
-        "ai_adoption_level": "adopted" if ai_adoption == 1 else "none",
-        "ai_adoption_level_code": ai_adoption,
-        # Compatibility field: ai_level_code is now binary (0/1), not ordinal.
-        "ai_level_code": ai_adoption,
-        "explanation": explanation,
-        "status": parse_error_code,
+        "ai_score": int(score),
+        "ai_score_label": score_label,
+        "score_explanation": f"Parsed AI adoption score {int(score)} ({score_label}).",
+        "status": status,
         "raw_json": raw_json,
     }
 
 
 def parse_model_output_payload(text: str) -> dict[str, Any]:
-    """Parse raw model output into a validated binary AI-adoption decision."""
+    """Parse raw model output into one validated 1-3 AI adoption score."""
 
     if not text:
         return {
-            "ai_adoption": pd.NA,
-            "qualifying_evidence_found": pd.NA,
-            "evidence_summary": "",
-            "exclusion_reason_if_zero": "",
-            "ai_adopted": pd.NA,
-            "ai_adoption_level": pd.NA,
-            "ai_adoption_level_code": pd.NA,
-            "ai_level_code": pd.NA,
-            "explanation": "No model output returned.",
+            "ai_score": pd.NA,
+            "ai_score_label": pd.NA,
+            "score_explanation": "No model output returned.",
             "status": "missing_output",
             "raw_json": "",
         }
 
-    candidates = extract_balanced_json_objects(text)
-    valid_candidates: list[tuple[dict[str, Any], str]] = []
-    for candidate in candidates:
+    normalized_text = normalize_whitespace(text)
+    candidates: list[tuple[int, str]] = []
+
+    exact_score = parse_score_int(normalized_text)
+    if exact_score is not None:
+        candidates.append((exact_score, normalized_text))
+
+    for candidate in extract_balanced_json_objects(text):
         try:
             obj = json.loads(candidate)
         except Exception:
             continue
-        try:
-            payload = parse_binary_adoption_object(obj)
-        except Exception:
+        if not isinstance(obj, dict):
             continue
-        valid_candidates.append((payload, candidate))
+        for key in ["ai_score", "score", "ai_adoption_score", "ai_level_code", "ai_adoption_level_code"]:
+            parsed = parse_score_int(obj.get(key))
+            if parsed is not None:
+                candidates.append((parsed, candidate))
+                break
 
-    if valid_candidates:
-        adoption_values = {item[0]["ai_adoption"] for item in valid_candidates}
-        if len(adoption_values) > 1:
-            return {
-                "ai_adoption": pd.NA,
-                "qualifying_evidence_found": pd.NA,
-                "evidence_summary": "",
-                "exclusion_reason_if_zero": "",
-                "ai_adopted": pd.NA,
-                "ai_adoption_level": pd.NA,
-                "ai_adoption_level_code": pd.NA,
-                "ai_level_code": pd.NA,
-                "explanation": "Model output contained conflicting binary JSON objects.",
-                "status": "conflicting_level_codes",
-                "raw_json": valid_candidates[-1][1],
-            }
-        payload, raw_json = max(
-            valid_candidates,
-            key=lambda item: (int(item[0]["ai_adoption"]), len(item[0]["evidence_summary"])),
-        )
-        return build_binary_parse_result(payload, raw_json=raw_json, parse_error_code="ok")
+    for match in SCORE_TOKEN_RE.finditer(normalized_text):
+        candidates.append((int(match.group(1)), match.group(1)))
 
-    status = "no_json_found" if not candidates else "no_valid_score_json"
-    explanation = (
-        "Model output did not contain valid JSON."
-        if status == "no_json_found"
-        else "Model output did not contain usable binary AI-adoption JSON."
-    )
-    return {
-        "ai_adoption": pd.NA,
-        "qualifying_evidence_found": pd.NA,
-        "evidence_summary": "",
-        "exclusion_reason_if_zero": "",
-        "ai_adopted": pd.NA,
-        "ai_adoption_level": pd.NA,
-        "ai_adoption_level_code": pd.NA,
-        "ai_level_code": pd.NA,
-        "explanation": explanation,
-        "status": status,
-        "raw_json": candidates[-1] if candidates else "",
-    }
+    if not candidates:
+        return {
+            "ai_score": pd.NA,
+            "ai_score_label": pd.NA,
+            "score_explanation": "Model output did not contain a usable score.",
+            "status": "no_score_found",
+            "raw_json": "",
+        }
+
+    unique_scores = {score for score, _ in candidates}
+    if len(unique_scores) > 1:
+        return {
+            "ai_score": pd.NA,
+            "ai_score_label": pd.NA,
+            "score_explanation": "Model output contained conflicting score values.",
+            "status": "conflicting_scores",
+            "raw_json": candidates[-1][1],
+        }
+
+    score, raw_json = candidates[-1]
+    return build_score_parse_result(score, raw_json=raw_json, status="ok")
 
 
 def parse_model_output(text: str) -> tuple[Any, Any, Any, str, str, str]:
@@ -1349,10 +856,10 @@ def parse_model_output(text: str) -> tuple[Any, Any, Any, str, str, str]:
 
     result = parse_model_output_payload(text)
     return (
-        result["ai_adopted"],
-        result["ai_adoption_level"],
-        result["ai_adoption_level_code"],
-        result["explanation"],
+        result["ai_score"],
+        result["ai_score_label"],
+        result["ai_score"],
+        result["score_explanation"],
         result["status"],
         result["raw_json"],
     )
@@ -1418,16 +925,9 @@ def base_output_record(
         "initial_score_status": "",
         "retry_attempted": False,
         "retry_score_status": "",
-        "ai_adoption": pd.NA,
-        "qualifying_evidence_found": pd.NA,
-        "evidence_summary": "",
-        "exclusion_reason_if_zero": "",
-        "ai_adopted": pd.NA,
-        "ai_adoption_level": pd.NA,
-        "ai_adoption_level_code": pd.NA,
-        # Compatibility field: ai_level_code is now binary (0/1), not ordinal.
-        "ai_level_code": pd.NA,
-        "explanation": "",
+        "ai_score": pd.NA,
+        "ai_score_label": pd.NA,
+        "score_explanation": "",
         "score_status": "",
         "endpoint": endpoint,
         "job_id": "",
@@ -1437,41 +937,18 @@ def base_output_record(
     }
 
 
-def build_sagemaker_payload(prompt: str, parameters: dict[str, Any]) -> str:
-    """Wrap a prompt and generation parameters in the JSON SageMaker expects."""
-
-    return json.dumps({"inputs": prompt, "parameters": parameters})
-
-
 # ---------------------------------------------------------------------------
-# Bulk invocation argument preparation
+# Bedrock bulk invocation preparation
 # ---------------------------------------------------------------------------
-# bulk_invoke_endpoint_async expects an iterable of (linked object, kwargs)
-# pairs. The linked object is a row identifier that lets us join results back to
-# the correct output record after SageMaker returns.
-def iter_bulk_invoke_args(
+# dwutils.bedrock.invoke_bulk expects an iterable of (identifier, prompt)
+# pairs. The identifier is the bridge back to the correct filing row.
+def iter_bedrock_prompts(
     pending: dict[str, dict[str, Any]],
-    *,
-    endpoint: str,
-    temperature: float,
-    max_new_tokens: int,
-) -> Iterable[tuple[str, dict[str, Any]]]:
-    """Yield arguments for dwutils.sm.bulk_invoke_endpoint_async."""
+) -> Iterable[tuple[str, str]]:
+    """Yield prompt pairs for dwutils.bedrock.invoke_bulk."""
 
-    parameters = {
-        "temperature": temperature,
-        "max_new_tokens": max_new_tokens,
-        "return_full_text": False,
-    }
     for linked_obj, item in pending.items():
-        yield (
-            linked_obj,
-            {
-                "EndpointName": endpoint,
-                "Input": build_sagemaker_payload(item["prompt"], parameters),
-                "ContentType": "application/json",
-            },
-        )
+        yield linked_obj, str(item["prompt"])
 
 
 def prepare_records_and_prompts(
@@ -1544,15 +1021,9 @@ def prepare_records_and_prompts(
         # Empty filings get a transparent zero without an LLM call.
         if not full_text:
             record.update(
-                ai_adoption=0,
-                qualifying_evidence_found=False,
-                evidence_summary="",
-                exclusion_reason_if_zero="",
-                ai_adopted=0,
-                ai_adoption_level="none",
-                ai_adoption_level_code=0,
-                ai_level_code=0,
-                explanation="No text was available after combining Item 1 and Item 7.",
+                ai_score=1,
+                ai_score_label=AI_SCORE_LABELS[1],
+                score_explanation="No text was available after combining Item 1 and Item 7.",
                 score_status="empty_text_zero",
                 prefilter_decision="empty_text",
             )
@@ -1560,15 +1031,9 @@ def prepare_records_and_prompts(
         # in audit mode.
         elif keyword_hits == 0 and prefilter_mode in {"hard_zero", "audit"} and not audit_sample:
             record.update(
-                ai_adoption=0,
-                qualifying_evidence_found=False,
-                evidence_summary="",
-                exclusion_reason_if_zero="",
-                ai_adopted=0,
-                ai_adoption_level="none",
-                ai_adoption_level_code=0,
-                ai_level_code=0,
-                explanation="No AI dictionary keywords were detected by the prefilter, so the filing was labeled as a non-adopter without an LLM call.",
+                ai_score=1,
+                ai_score_label=AI_SCORE_LABELS[1],
+                score_explanation="No AI dictionary keywords were detected by the prefilter, so the filing was assigned score 1 without an LLM call.",
                 score_status="prefilter_zero_no_keyword",
                 prefilter_decision=f"{prefilter_mode}_zero_no_keyword",
             )
@@ -1578,7 +1043,7 @@ def prepare_records_and_prompts(
             if not snippet:
                 record.update(
                     parse_status="failed",
-                    explanation="Snippet extraction returned empty text.",
+                    score_explanation="Snippet extraction returned empty text.",
                     score_status="snippet_extraction_failed",
                 )
             else:
@@ -1609,73 +1074,57 @@ def prepare_records_and_prompts(
 # ---------------------------------------------------------------------------
 # Bulk result handling
 # ---------------------------------------------------------------------------
-# This function takes the iterator returned by bulk_invoke_endpoint_async,
-# matches each result back to the correct filing row, and fills in the label
-# status, adoption outputs, explanation, and raw JSON hashes.
+# This function takes the iterator returned by dwutils.bedrock.invoke_bulk,
+# matches each result back to the correct filing row, and fills in the score,
+# status, and raw-response hashes.
 def apply_bulk_results(
     records: list[dict[str, Any]],
     pending: dict[str, dict[str, Any]],
-    results: Iterable[tuple[Any, Any, Any, Any, str, str]],
+    results: Iterable[tuple[Any, dict[str, Any]]],
     *,
     save_raw_json: bool,
     is_retry: bool = False,
 ) -> None:
-    """Apply SageMaker bulk results to the prepared output records in place."""
+    """Apply Bedrock bulk results to the prepared output records in place."""
 
-    for linked_obj, _invoke_kwargs, _job_id, _inference_id, response_type, result_body in results:
+    for linked_obj, result_body in results:
         item = pending[str(linked_obj)]
         record = records[item["record_index"]]
         if is_retry:
             record["retry_attempted"] = True
             record["endpoint_attempts"] = int(record.get("endpoint_attempts", 0) or 0) + 1
-        if _job_id and is_retry:
-            record["retry_job_id"] = str(_job_id)
-        elif _job_id:
-            record["job_id"] = str(_job_id)
-        if _inference_id:
-            record["inference_id"] = str(_inference_id)
 
-        # Non-success responses are kept as endpoint_error rows rather than
-        # stopping the whole chunk.
-        if response_type != "success":
-            try:
-                body = json.loads(result_body)
-                error = body.get("error", result_body)
-            except Exception:
-                error = result_body
+        if isinstance(result_body, dict) and "error" in result_body:
+            error = result_body.get("error", "")
             if save_raw_json:
-                record["raw_response"] = str(result_body)
+                record["raw_response"] = str(error)
             status = "endpoint_error"
             if is_retry:
                 record.update(
                     parse_status="failed",
                     retry_score_status=status,
-                    explanation=f"Retry endpoint error: {str(error)[:500]}",
+                    score_explanation=f"Retry endpoint error: {str(error)[:500]}",
                     score_status="retry_endpoint_error",
                 )
             else:
                 record.update(
                     parse_status="failed",
-                    ai_adoption=pd.NA,
-                    qualifying_evidence_found=pd.NA,
-                    evidence_summary="",
-                    exclusion_reason_if_zero="",
-                    ai_adopted=pd.NA,
-                    ai_adoption_level=pd.NA,
-                    ai_adoption_level_code=pd.NA,
-                    ai_level_code=pd.NA,
-                    explanation=f"Endpoint error: {str(error)[:500]}",
+                    ai_score=pd.NA,
+                    ai_score_label=pd.NA,
+                    score_explanation=f"Endpoint error: {str(error)[:500]}",
                     initial_score_status=status,
                     score_status=status,
                 )
             continue
 
-        # Successful responses still need JSON parsing and validation.
-        try:
-            response_body = json.loads(result_body)
-        except Exception:
-            response_body = result_body
-        raw_text = extract_text_from_response(response_body)
+        response_body = result_body.get("response_json", result_body) if isinstance(result_body, dict) else result_body
+        raw_text = (
+            str(result_body.get("model_response_string", "")).strip()
+            if isinstance(result_body, dict)
+            else ""
+        )
+        if not raw_text:
+            raw_text = extract_text_from_response(response_body)
         result = parse_model_output_payload(raw_text)
         status = result["status"]
         raw_json = result["raw_json"]
@@ -1687,15 +1136,9 @@ def apply_bulk_results(
         if status == "ok":
             success_updates = {
                 "parse_status": "retry_success" if is_retry else "success",
-                "ai_adoption": result["ai_adoption"],
-                "qualifying_evidence_found": result["qualifying_evidence_found"],
-                "evidence_summary": result["evidence_summary"],
-                "exclusion_reason_if_zero": result["exclusion_reason_if_zero"],
-                "ai_adopted": result["ai_adopted"],
-                "ai_adoption_level": result["ai_adoption_level"],
-                "ai_adoption_level_code": result["ai_adoption_level_code"],
-                "ai_level_code": result["ai_level_code"],
-                "explanation": result["explanation"],
+                "ai_score": result["ai_score"],
+                "ai_score_label": result["ai_score_label"],
+                "score_explanation": result["score_explanation"],
                 "raw_json_sha256": sha256_text(raw_json) if raw_json else "",
             }
             if is_retry:
@@ -1712,11 +1155,9 @@ def apply_bulk_results(
 
         failure_updates = {
             "parse_status": "failed",
-            "ai_adoption": pd.NA,
-            "qualifying_evidence_found": pd.NA,
-            "evidence_summary": "",
-            "exclusion_reason_if_zero": "",
-            "explanation": result["explanation"],
+            "ai_score": pd.NA,
+            "ai_score_label": pd.NA,
+            "score_explanation": result["score_explanation"],
             "raw_json_sha256": sha256_text(raw_json) if raw_json else "",
         }
         if is_retry:
@@ -1754,11 +1195,8 @@ def summarize_output(
 ) -> dict[str, Any]:
     """Build the per-chunk JSON summary."""
 
-    adoption_series = pd.to_numeric(out_df["ai_adoption"], errors="coerce") if not out_df.empty else pd.Series(dtype=float)
-    n_scored = int(adoption_series.notna().sum()) if not out_df.empty else 0
-    n_adopted = int((adoption_series == 1).sum()) if not out_df.empty else 0
-    n_non_adopted = int((adoption_series == 0).sum()) if not out_df.empty else 0
-    level_series = pd.to_numeric(out_df["ai_level_code"], errors="coerce") if not out_df.empty and "ai_level_code" in out_df.columns else pd.Series(dtype=float)
+    score_series = pd.to_numeric(out_df["ai_score"], errors="coerce") if not out_df.empty else pd.Series(dtype=float)
+    n_scored = int(score_series.notna().sum()) if not out_df.empty else 0
     return {
         "run_id": run_id,
         "chunk_name": chunk_name,
@@ -1780,12 +1218,9 @@ def summarize_output(
         "n_llm_called": int(out_df["llm_called"].sum()) if not out_df.empty else 0,
         "n_scored": n_scored,
         "n_unscored": int(len(out_df) - n_scored),
-        "n_ai_adopted": n_adopted,
-        "n_ai_non_adopted": n_non_adopted,
-        # Compatibility counts: ai_level_code is now binary, so "low" is just adoption=1.
-        "n_level_low": int((level_series == 1).sum()) if not out_df.empty else 0,
-        "n_level_medium": 0,
-        "n_level_high": 0,
+        "n_score_1": int((score_series == 1).sum()) if not out_df.empty else 0,
+        "n_score_2": int((score_series == 2).sum()) if not out_df.empty else 0,
+        "n_score_3": int((score_series == 3).sum()) if not out_df.empty else 0,
         "n_ok": int((out_df["score_status"] == "ok").sum()) if not out_df.empty else 0,
         "n_ok_after_retry": int((out_df["score_status"] == "ok_after_retry").sum()) if not out_df.empty else 0,
         "n_prefilter_audit_ok_after_retry": int((out_df["score_status"] == "prefilter_audit_ok_after_retry").sum()) if not out_df.empty else 0,
@@ -1795,6 +1230,6 @@ def summarize_output(
         "n_missing_item1": int((~out_df["has_item1"]).sum()) if not out_df.empty else 0,
         "n_missing_item7": int((~out_df["has_item7"]).sum()) if not out_df.empty else 0,
         "status_counts": out_df["score_status"].value_counts(dropna=False).to_dict() if not out_df.empty else {},
-        "adoption_rate": None if n_scored == 0 else float(n_adopted / n_scored),
+        "mean_ai_score": None if n_scored == 0 else float(score_series.mean()),
         "output_csv": output_csv,
     }

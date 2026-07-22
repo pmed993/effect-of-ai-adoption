@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Bulk LLM classification for filing-level AI adoption.
+"""Bulk LLM scoring for filing-level AI adoption.
 
-The process estimates firm-level AI adoption from SEC Form 10-K disclosures.
+The process scores firm-level AI adoption from SEC Form 10-K disclosures.
 It reads EDGAR extract chunks from the Data Workspace team S3 folder, 
 converts Item 1 and Item 7 text into one row per filing,
 optionally filters to a research lookup of `cik` and `year`, 
-and sends relevant filing text sections to a Data Workspace SageMaker Llama endpoint.
+and sends relevant filing text sections to AWS Bedrock via the Data Workspace
+bedrock proxy.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ import ai_adoption_utils as u
 # It also checks that numeric options are sensible before the process starts.
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
-        description="Classify selected EDGAR chunk files for AI adoption using Data Workspace bulk async SageMaker invocation."
+        description="Score selected EDGAR chunk files for AI adoption using AWS Bedrock bulk prompt invocation."
     )
 
     # Data Workspace S3 location. In normal use, the team folder is enough.
@@ -69,15 +70,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     ap.add_argument("--audit-seed", default="ai-adoption-prefilter-audit-v1")
 
     # LLM and bulk invocation settings.
-    ap.add_argument("--model-label", choices=["llama", "mistral"], default="llama", help="Short label used for endpoint defaulting and output naming.")
-    ap.add_argument("--endpoint", default=None, help="Override SageMaker endpoint. If omitted, uses the default for --model-label.")
-    ap.add_argument("--llm-checkpoint", default=None, help="Exact model checkpoint name to store in outputs. Defaults to the configured checkpoint for --model-label.")
+    ap.add_argument("--model-label", choices=["claude"], default="claude", help="Short label used for default Bedrock model_id and output naming.")
+    ap.add_argument("--model-id", default=None, help="Bedrock model_id, e.g. eu.anthropic.claude-haiku-4-5-20251001-v1:0 or eu.anthropic.claude-sonnet-4-6.")
+    ap.add_argument("--endpoint", dest="model_id", default=None, help=argparse.SUPPRESS)
+    ap.add_argument("--llm-checkpoint", default=None, help="Model identifier to store in outputs. Defaults to --model-id.")
     ap.add_argument("--max-prompt-chars", type=int, default=u.DEFAULT_MAX_PROMPT_CHARS)
     ap.add_argument("--sentence-window", type=int, default=u.DEFAULT_SENTENCE_WINDOW)
     ap.add_argument("--temperature", type=float, default=u.TEMPERATURE)
     ap.add_argument("--max-new-tokens", type=int, default=u.DEFAULT_MAX_NEW_TOKENS)
-    ap.add_argument("--max-concurrent-invocations", type=int, default=25)
-    ap.add_argument("--max-workers", type=int, default=9)
+    ap.add_argument("--max-workers", type=int, default=5, help="Parallel Bedrock requests. Keep low to avoid 429 errors.")
     ap.add_argument("--no-retry-pass", action="store_true", help="Disable the automatic second-pass retry for parser failures.")
     ap.add_argument(
         "--repair-failed-after-chunk",
@@ -100,10 +101,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     args = ap.parse_args(argv)
 
     # Fail early for invalid arguments so the run does not start half-configured.
-    if args.endpoint is None:
-        args.endpoint = u.DEFAULT_ENDPOINTS[args.model_label]
+    if args.model_id is None:
+        args.model_id = u.DEFAULT_ENDPOINTS[args.model_label]
     if args.llm_checkpoint is None:
-        args.llm_checkpoint = u.DEFAULT_MODEL_NAMES[args.model_label]
+        args.llm_checkpoint = args.model_id
     if args.max_chunks < 0:
         ap.error("--max-chunks must be >= 0")
     if args.max_filings_per_chunk < 0:
@@ -118,8 +119,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         ap.error("--prefilter-audit-rate must be between 0 and 1")
     if args.prefilter_audit_limit < 0:
         ap.error("--prefilter-audit-limit must be >= 0")
-    if args.max_concurrent_invocations <= 0:
-        ap.error("--max-concurrent-invocations must be > 0")
     if args.max_workers <= 0:
         ap.error("--max-workers must be > 0")
     if args.lookup_csv and not os.path.exists(args.lookup_csv):
@@ -179,8 +178,6 @@ def repair_failed_rows_from_csv(
     run_id: str,
 ) -> dict[str, object]:
     """Repair only the rows that finished with parse_status=failed in an existing output CSV."""
-
-    from dwutils import sm
 
     csv_path = os.path.abspath(csv_path)
     if not os.path.exists(csv_path):
@@ -255,7 +252,7 @@ def repair_failed_rows_from_csv(
         record["max_new_tokens"] = int(args.max_new_tokens)
         record["max_prompt_chars"] = int(args.max_prompt_chars)
         record["sentence_window"] = int(args.sentence_window)
-        record["endpoint"] = args.endpoint
+        record["endpoint"] = args.model_id
         record["snippet_chars"] = len(snippet)
         record["snippet_sha256"] = u.sha256_text(snippet)
         pending[str(idx)] = {
@@ -274,15 +271,12 @@ def repair_failed_rows_from_csv(
             "n_repaired": 0,
         }
 
-    invoke_args = u.iter_bulk_invoke_args(
-        pending,
-        endpoint=args.endpoint,
-        temperature=args.temperature,
-        max_new_tokens=args.max_new_tokens,
-    )
-    results = sm.bulk_invoke_endpoint_async(
-        invoke_args,
-        max_concurrent_invocations=args.max_concurrent_invocations,
+    from dwutils import bedrock
+
+    bedrock_prompts = u.iter_bedrock_prompts(pending)
+    results = bedrock.invoke_bulk(
+        bedrock_prompts,
+        model_id=args.model_id,
         max_workers=args.max_workers,
     )
     u.apply_bulk_results(records, pending, results, save_raw_json=save_raw_json, is_retry=True)
@@ -295,12 +289,12 @@ def repair_failed_rows_from_csv(
         "run_id": run_id,
         "chunk_name": Path(chunk_path).name,
         "source_label": source_label,
-        "endpoint": args.endpoint,
-        "prefilter_mode": str(out_df.get("prefilter_mode", pd.Series([args.prefilter_mode])).iloc[0]),
-        "prefilter_audit_rate": float(out_df.get("prefilter_audit_rate", pd.Series([args.prefilter_audit_rate])).iloc[0]) if "prefilter_audit_rate" in out_df.columns else args.prefilter_audit_rate,
-        "prefilter_audit_limit": int(out_df.get("prefilter_audit_limit", pd.Series([args.prefilter_audit_limit])).iloc[0]) if "prefilter_audit_limit" in out_df.columns else args.prefilter_audit_limit,
-        "max_prompt_chars": int(out_df.get("max_prompt_chars", pd.Series([args.max_prompt_chars])).iloc[0]) if "max_prompt_chars" in out_df.columns else args.max_prompt_chars,
-        "sentence_window": int(out_df.get("sentence_window", pd.Series([args.sentence_window])).iloc[0]) if "sentence_window" in out_df.columns else args.sentence_window,
+        "endpoint": args.model_id,
+        "prefilter_mode": str(repaired_df.get("prefilter_mode", pd.Series([args.prefilter_mode])).iloc[0]),
+        "prefilter_audit_rate": float(repaired_df.get("prefilter_audit_rate", pd.Series([args.prefilter_audit_rate])).iloc[0]) if "prefilter_audit_rate" in repaired_df.columns else args.prefilter_audit_rate,
+        "prefilter_audit_limit": int(repaired_df.get("prefilter_audit_limit", pd.Series([args.prefilter_audit_limit])).iloc[0]) if "prefilter_audit_limit" in repaired_df.columns else args.prefilter_audit_limit,
+        "max_prompt_chars": int(repaired_df.get("max_prompt_chars", pd.Series([args.max_prompt_chars])).iloc[0]) if "max_prompt_chars" in repaired_df.columns else args.max_prompt_chars,
+        "sentence_window": int(repaired_df.get("sentence_window", pd.Series([args.sentence_window])).iloc[0]) if "sentence_window" in repaired_df.columns else args.sentence_window,
         "lookup_csv": args.lookup_csv,
         "n_filings_before_lookup": int(len(repaired_df)),
         "n_filings_after_lookup": int(len(repaired_df)),
@@ -341,7 +335,9 @@ def repair_failed_rows_from_csv(
         "n_failed_remaining": int((repaired_df.get("parse_status", pd.Series(dtype='string')).astype(str) == "failed").sum()),
         "n_filings": int(len(repaired_df)),
         "n_llm_called": int(repaired_df["llm_called"].sum()) if "llm_called" in repaired_df.columns else 0,
-        "n_ai_adopted": int((pd.to_numeric(repaired_df["ai_adoption"], errors="coerce") == 1).sum()) if "ai_adoption" in repaired_df.columns else 0,
+        "n_score_1": int((pd.to_numeric(repaired_df["ai_score"], errors="coerce") == 1).sum()) if "ai_score" in repaired_df.columns else 0,
+        "n_score_2": int((pd.to_numeric(repaired_df["ai_score"], errors="coerce") == 2).sum()) if "ai_score" in repaired_df.columns else 0,
+        "n_score_3": int((pd.to_numeric(repaired_df["ai_score"], errors="coerce") == 3).sum()) if "ai_score" in repaired_df.columns else 0,
         "n_ok": int((repaired_df["score_status"] == "ok").sum()) if "score_status" in repaired_df.columns else 0,
         "n_ok_after_retry": int((repaired_df["score_status"] == "ok_after_retry").sum()) if "score_status" in repaired_df.columns else 0,
         "n_retry_attempted": int(repaired_df["retry_attempted"].sum()) if "retry_attempted" in repaired_df.columns else 0,
@@ -382,7 +378,9 @@ def maybe_repair_output_csv(
     for key in [
         "n_filings",
         "n_llm_called",
-        "n_ai_adopted",
+        "n_score_1",
+        "n_score_2",
+        "n_score_3",
         "n_ok",
         "n_ok_after_retry",
         "n_retry_attempted",
@@ -453,7 +451,7 @@ def process_chunk(
         llm_checkpoint=args.llm_checkpoint,
         temperature=args.temperature,
         max_new_tokens=args.max_new_tokens,
-        endpoint=args.endpoint,
+        endpoint=args.model_id,
         prefilter_mode=args.prefilter_mode,
         audit_seed=args.audit_seed,
         prefilter_audit_rate=args.prefilter_audit_rate,
@@ -465,18 +463,13 @@ def process_chunk(
     # Submit all required LLM calls in bulk. Rows skipped by the prefilter are
     # already complete and do not appear in pending.
     if pending:
-        from dwutils import sm
+        from dwutils import bedrock
 
-        logging.info("Submitting %d LLM calls for %s using bulk async invocation", len(pending), ref.name)
-        invoke_args = u.iter_bulk_invoke_args(
-            pending,
-            endpoint=args.endpoint,
-            temperature=args.temperature,
-            max_new_tokens=args.max_new_tokens,
-        )
-        results = sm.bulk_invoke_endpoint_async(
-            invoke_args,
-            max_concurrent_invocations=args.max_concurrent_invocations,
+        logging.info("Submitting %d LLM calls for %s using Bedrock bulk invocation", len(pending), ref.name)
+        bedrock_prompts = u.iter_bedrock_prompts(pending)
+        results = bedrock.invoke_bulk(
+            bedrock_prompts,
+            model_id=args.model_id,
             max_workers=args.max_workers,
         )
         u.apply_bulk_results(records, pending, results, save_raw_json=args.save_raw_json)
@@ -491,16 +484,11 @@ def process_chunk(
                 if records[item["record_index"]].get("score_status") in u.RETRYABLE_PARSE_STATUSES
             }
             if retry_pending:
-                logging.info("Retrying %d parser-failure rows for %s with stricter JSON retry prompt", len(retry_pending), ref.name)
-                retry_invoke_args = u.iter_bulk_invoke_args(
-                    retry_pending,
-                    endpoint=args.endpoint,
-                    temperature=args.temperature,
-                    max_new_tokens=args.max_new_tokens,
-                )
-                retry_results = sm.bulk_invoke_endpoint_async(
-                    retry_invoke_args,
-                    max_concurrent_invocations=args.max_concurrent_invocations,
+                logging.info("Retrying %d parser-failure rows for %s with stricter score-only retry prompt", len(retry_pending), ref.name)
+                retry_prompts = u.iter_bedrock_prompts(retry_pending)
+                retry_results = bedrock.invoke_bulk(
+                    retry_prompts,
+                    model_id=args.model_id,
                     max_workers=args.max_workers,
                 )
                 u.apply_bulk_results(
@@ -523,7 +511,7 @@ def process_chunk(
         run_id=run_id,
         chunk_name=ref.name,
         source_label=source_label,
-        endpoint=args.endpoint,
+        endpoint=args.model_id,
         prefilter_mode=args.prefilter_mode,
         prefilter_audit_rate=args.prefilter_audit_rate,
         prefilter_audit_limit=args.prefilter_audit_limit,
@@ -548,7 +536,9 @@ def process_chunk(
         "n_filings_after_lookup": n_after_lookup,
         "n_filings": int(len(out_df)),
         "n_llm_called": int(out_df["llm_called"].sum()) if not out_df.empty else 0,
-        "n_ai_adopted": int((pd.to_numeric(out_df["ai_adopted"], errors="coerce") == 1).sum()) if not out_df.empty else 0,
+        "n_score_1": int((pd.to_numeric(out_df["ai_score"], errors="coerce") == 1).sum()) if not out_df.empty else 0,
+        "n_score_2": int((pd.to_numeric(out_df["ai_score"], errors="coerce") == 2).sum()) if not out_df.empty else 0,
+        "n_score_3": int((pd.to_numeric(out_df["ai_score"], errors="coerce") == 3).sum()) if not out_df.empty else 0,
         "n_ok": int((out_df["score_status"] == "ok").sum()) if not out_df.empty else 0,
         "n_ok_after_retry": int((out_df["score_status"] == "ok_after_retry").sum()) if not out_df.empty else 0,
         "n_retry_attempted": int(out_df["retry_attempted"].sum()) if not out_df.empty and "retry_attempted" in out_df.columns else 0,
