@@ -53,7 +53,7 @@ WHERE f.indfmt = 'INDL'
   AND f.popsrc = 'D'
   AND f.consol = 'C'
   AND f.costat = 'A'
-  AND f.datadate >= '2016-01-01'
+  AND f.datadate >= '2015-01-01'
   AND c.sic IS NOT NULL
   AND c.sic::integer NOT BETWEEN 4900 AND 4999
   AND c.sic::integer < 6000
