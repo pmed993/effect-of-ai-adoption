@@ -212,7 +212,7 @@ if (!exists("AI_EXPOSURE_SHEET", inherits = FALSE)) {
   AI_EXPOSURE_SHEET <- "Appendix B"
 }
 if (!exists("AI_ADOPTION_FILE", inherits = FALSE)) {
-  AI_ADOPTION_FILE <- file.path(INPUT_DIR, "llm_score", "ai_adoption_firm_year_panel.csv")
+  AI_ADOPTION_FILE <- file.path(INPUT_DIR, "llm_score", "llm_extraction_firm_year_panel.csv") # V3 name"ai_adoption_firm_year_panel.csv"
 }
 if (!exists("ANNUAL_PANEL_RDS", inherits = FALSE)) {
   ANNUAL_PANEL_RDS <- file.path(INPUT_DIR, "compustat_annual_panel.rds")

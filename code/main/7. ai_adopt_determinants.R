@@ -47,9 +47,10 @@ var_labels <- c(
   roa_l1 = "ROA (t-1)",
   cash_ratio_l1 = "Cash Ratio (t-1)",
   markup_l1 = "Operating Margin (OIBDP/Sales, t-1)",
+  tobins_q_l1 = "tobins_q_l1",
   leverage_l1 = "Leverage (t-1)",
   capx_intensity_l1 = "CAPX intensity (t-1)",
-  rd_intensity_l1 = "R&D intensity (t-1)",
+#  rd_intensity_l1 = "R&D intensity (t-1)",
   aiie = "Industry AI exposure",
   log_labor_productivity_l1 = "Labour productivity (t-1)"
 )
@@ -65,7 +66,7 @@ uni_models <- map(
   )
 )
 
-names(uni_models) <- rhs_vars
+names(uni_models) <- unname(var_labels[rhs_vars])
 
 # -------------------------------------------------------------------
 # 3. Joint spec
@@ -75,10 +76,11 @@ joint_model <- feols(
     log_at_l1 +
     roa_l1 + 
     cash_ratio_l1 +
-    markup_l1 +
+    markup_l1 + 
+    tobins_q_l1 +
     leverage_l1 +
     capx_intensity_l1 +
-    rd_intensity_l1 +
+ #   rd_intensity_l1 +
     aiie +
     log_labor_productivity_l1
   | year + naics2,
