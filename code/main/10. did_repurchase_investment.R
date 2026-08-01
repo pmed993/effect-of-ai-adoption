@@ -1,8 +1,10 @@
 #!/usr/bin/env Rscript
 
 # ------------------------------------------------------------------------------
-# Staggered DiD: firm outcomes after AI adoption
+# Staggered DiD: repurchases and productive investment after AI adoption
 # ------------------------------------------------------------------------------
+
+source("code/config/global_settings.R")
 
 library(dplyr)
 library(did)
@@ -11,41 +13,40 @@ library(purrr)
 library(readr)
 library(tibble)
 
-
-# ---- Build/source panel data --------------------------------------------------
-BUILD_PANEL_DATA <- FALSE
-REBUILD_ANNUAL_PANEL <- FALSE
-REFRESH_FROM_WRDS <- FALSE
-source("code/main/4. build_or_load_panel_data.R")
-
-
 # ---- Settings ----------------------------------------------------------------
+ANALYSIS_PANEL_REQUIRED_MESSAGE <- paste0(
+  "Final analysis panel not found: ", ANALYSIS_PANEL_RDS,
+  ". Run 4. build_or_load_panel_data.R first."
+)
+
 SAVE_DID_OUTPUTS <- TRUE
-DID_OUTPUT_DIR <- file.path(OUTPUT_DIR, "did_firm_outcomes")
+DID_OUTPUT_DIR <- file.path(OUTPUT_DIR, "did_repurchase_investment")
 DID_ATT_TABLE_CSV <- file.path(DID_OUTPUT_DIR, "did_att_table.csv")
 DID_EVENT_STUDY_TABLE_CSV <- file.path(DID_OUTPUT_DIR, "did_event_study_table.csv")
 
 MIN_TREATED_COHORT <- 2016L
-CONTROL_GROUP <- "nevertreated"
+CONTROL_GROUP <- "notyettreated"
 DID_EST_METHOD <- "dr"
 DID_BITERS <- 1000L
 MIN_EVENT_TIME <- -5L
 MAX_EVENT_TIME <- 5L
 
 did_outcomes <- c(
-  "log_emp",
-  "log_market_value",
-  "log_labor_productivity",
-  "log_sale"
+  "repurchase_binary",
+  "repurchase_intensity_at",
+  "rd_intensity_y_w",
+  "capx_intensity_y_w",
+  "total_inv_intensity_y_w"
 )
 
-DID_CONTROLS <- c("log_at_l1", "cash_ratio_l1", "aiie")
+DID_CONTROLS <- c("log_at_l1", "cash_ratio_l1", "roa_l1", "tobins_q_l1", "aiie")
 
 outcome_labels <- c(
-  log_emp = "Employment (log)",
-  log_market_value = "Market value (log)",
-  log_labor_productivity = "Labour productivity (log)",
-  log_sale = "Sales (log)"
+  repurchase_binary = "Repurchase indicator",
+  repurchase_intensity_at = "Repurchases / lagged assets",
+  rd_intensity_y_w = "R&D / lagged assets (winsorized)",
+  capx_intensity_y_w = "CAPX / lagged assets (winsorized)",
+  total_inv_intensity_y_w = "Total investment / lagged assets (winsorized)"
 )
 
 
@@ -91,7 +92,24 @@ build_did_panel <- function(data) {
       cik_n = cur_group_id(),
       at_l1 = lag(at),
       log_at_l1 = lag(log_at),
-      cash_ratio_l1 = lag(cash_ratio)
+      cash_ratio_l1 = lag(cash_ratio),
+      roa_l1 = lag(roa),
+      repurchases = case_when(
+        is.na(prstkc) ~ 0,
+        prstkc < 0 ~ NA_real_,
+        TRUE ~ prstkc
+      ),
+      repurchase_binary = case_when(
+        is.na(prstkc) ~ 0L,
+        prstkc < 0 ~ NA_integer_,
+        prstkc > 0 ~ 1L,
+        TRUE ~ 0L
+      ),
+      repurchase_intensity_at = if_else(
+        !is.na(at_l1) & at_l1 > 0,
+        repurchases / at_l1,
+        NA_real_
+      )
     ) |>
     ungroup() |>
     filter(ai_adoption_year == 0L | ai_adoption_year >= MIN_TREATED_COHORT)
@@ -219,6 +237,14 @@ run_cs_did <- function(outcome, data, controls = DID_CONTROLS) {
 }
 
 
+# ---- Load final analysis panel ------------------------------------------------
+if (!file.exists(ANALYSIS_PANEL_RDS)) {
+  stop(ANALYSIS_PANEL_REQUIRED_MESSAGE)
+}
+
+panel_ai <- readRDS(ANALYSIS_PANEL_RDS)
+
+
 # ---- Build analysis panel ----------------------------------------------------
 panel_did <- build_did_panel(panel_ai)
 
@@ -258,7 +284,7 @@ if (SAVE_DID_OUTPUTS) {
 
 
 # ---- Console output -----------------------------------------------------------
-cat("\nBuilt firm-outcomes DiD analysis panel.\n")
+cat("\nBuilt repurchase-investment DiD analysis panel.\n")
 cat("Rows:", nrow(panel_did), "\n")
 cat("Firms:", n_distinct(panel_did$cik_n), "\n")
 cat("Never-treated firms:", cohort_counts$n_firms[cohort_counts$ai_adoption_year == 0L], "\n")
@@ -267,5 +293,5 @@ cat("\nOverall ATT table:\n")
 print(att_table)
 
 if (SAVE_DID_OUTPUTS) {
-  cat("\nSaved firm-outcomes DiD outputs to:", DID_OUTPUT_DIR, "\n")
+  cat("\nSaved repurchase-investment DiD outputs to:", DID_OUTPUT_DIR, "\n")
 }

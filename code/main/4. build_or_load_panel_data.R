@@ -1,11 +1,11 @@
 #!/usr/bin/env Rscript
 
 # ------------------------------------------------------------------------------
-# Get panel data for analysis
+# Build or load the panel data used in the analysis
 # ------------------------------------------------------------------------------
 # Default behaviour:
 #   source("code/main/4. build_or_load_panel_data.R")
-#   Loads saved panel files from disk.
+#   Loads saved panel files from disk and refreshes the final analysis panel.
 #
 # Rebuild merged panel from the current AI adoption file:
 #   BUILD_PANEL_DATA <- TRUE
@@ -86,6 +86,12 @@ if (needs_merged_build) {
   panel_ai <- readRDS(MATCHED_PANEL_RDS)
 }
 
+panel_analysis <- build_final_analysis_panel(panel_ai)
+
+dir.create(dirname(ANALYSIS_PANEL_RDS), recursive = TRUE, showWarnings = FALSE)
+saveRDS(panel_analysis, ANALYSIS_PANEL_RDS)
+
 setDT(comp)
 setDT(panel)
 setDT(panel_ai)
+setDT(panel_analysis)
