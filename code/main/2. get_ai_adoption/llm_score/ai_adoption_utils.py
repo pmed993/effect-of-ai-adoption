@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 import tempfile
 from dataclasses import dataclass
@@ -25,25 +24,15 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
-SCRIPT_VERSION = "2026-07-22-llm_extraction_v1"
-PROMPT_VERSION = "llm_extraction_claude_v1"
-RESEARCH_PROFILE = "llm_extraction_ai_1to3_v1"
+SCRIPT_VERSION = "2026-08-01-llm_extraction_v4"
+PROMPT_VERSION = "llm_extraction_claude_v2"
+RESEARCH_PROFILE = "llm_extraction_ai_1to3_v2"
 MODEL_NAME = "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
 TEMPERATURE = 0.0
 DEFAULT_MAX_NEW_TOKENS = 128
 DEFAULT_MAX_PROMPT_CHARS = 1800
 DEFAULT_SENTENCE_WINDOW = 1
 DEFAULT_PREFILTER_MODE = "hard_zero"
-
-DEFAULT_ENDPOINTS = {
-    "claude": MODEL_NAME,
-}
-
-DEFAULT_MODEL_NAMES = {
-    "claude": MODEL_NAME,
-}
-
-DEFAULT_ENDPOINT = DEFAULT_ENDPOINTS["claude"]
 
 DEFAULT_BUCKET = "jupyter.notebook.uktrade.io"
 
@@ -58,7 +47,7 @@ SENTENCE_SPLIT_RE = re.compile(r"(?<=[\.\!\?\;])\s+|\n+")
 # hard-zero prefilter and snippet ranking. This keeps the process simpler and
 # makes the prefilter directly traceable to one published term list.
 AI_KEYWORD_PATTERNS = [
-    r"\bA\.I\.\b",
+    r"(?<!\w)A\.I\.(?!\w)",
     r"\bAI\b",
     r"\bAI chatbot\b",
     r"\bLibsvm\b",
@@ -110,6 +99,18 @@ AI_KEYWORD_PATTERNS = [
     r"\bunsupervised learning\b",
     r"\bvirtual agents?\b",
     r"\bword embeddings?\b",
+    r"\bLLMs?\b",
+    r"\blarge[- ]language models?\b",
+    r"\bfoundation models?\b",
+    r"\bgenerative AI\b",
+    r"\bGenAI\b",
+    r"\bgenerative artificial intelligence\b",
+    r"\bmultimodal models?\b",
+    r"\bGPT(?:-\d+(?:\.\d+)?)?\b",
+    r"\bChatGPT\b",
+    r"\bClaude\b",
+    r"\bGemini\b",
+    r"\bCopilots?\b",
 ]
 
 
@@ -120,8 +121,6 @@ def compile_keyword_patterns(patterns: Sequence[str]) -> re.Pattern[str]:
 
 
 AI_KEYWORDS = compile_keyword_patterns(AI_KEYWORD_PATTERNS)
-AI_TRIGGER_KEYWORDS = AI_KEYWORDS
-AI_RANKING_KEYWORDS = AI_KEYWORDS
 
 # These words help rank snippets. They do not determine the final label.
 # They only make operational evidence more likely to be sent to the LLM.
@@ -151,6 +150,23 @@ AI_SCORE_LABELS = {
     3: "production_or_strategic_adoption",
 }
 
+SNIPPET_AUDIT_COLUMNS = [
+    "cik",
+    "year",
+    "filing_accession",
+    "chunk_id",
+    "llm_processed",
+    "snippet_text_length",
+    "max_prompt_chars",
+    "snippet_at_limit",
+    "keyword_hits",
+    "prefilter_decision",
+    "parse_status",
+    "ai_score",
+    "score_status",
+    "snippet_text",
+]
+
 RETRYABLE_PARSE_STATUSES = {
     "missing_output",
     "no_score_found",
@@ -158,9 +174,6 @@ RETRYABLE_PARSE_STATUSES = {
     "conflicting_scores",
 }
 
-TEMPLATE_OUTPUT_CUES = re.compile(
-    r"(?im)(^\s*def\s+|^\s*return\b|^\s*if\b|^\s*elif\b|^\s*else\s*:|^\s*###|^\s*##\s*step\b|^\s*solution\b)"
-)
 SCORE_TOKEN_RE = re.compile(r"\b([123])\b")
 
 
@@ -196,7 +209,7 @@ def stable_unit_interval(value: str) -> float:
     """Map a string to a stable 0-to-1 value for reproducible audit sampling."""
 
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
-    return int(digest[:16], 16) / float(16 ** 16)
+    return int(digest[:16], 16) / float(16**16)
 
 
 def normalize_whitespace(text: Any) -> str:
@@ -219,16 +232,18 @@ def normalize_cik(value: Any) -> str:
     return text.lstrip("0") or ("0" if text else "")
 
 
+def coerce_bool(value: Any) -> bool:
+    """Convert scalar CSV-style boolean values without treating 'False' as true."""
+
+    if value is None or pd.isna(value):
+        return False
+    return str(value).strip().lower() in {"true", "1", "yes"}
+
+
 def count_ai_keywords(text: str) -> int:
     """Count broad AI prefilter keyword hits in filing text."""
 
-    return len(list(AI_TRIGGER_KEYWORDS.finditer(text))) if text else 0
-
-
-def count_ranking_keywords(text: str) -> int:
-    """Count AI keyword hits used for snippet ranking QA."""
-
-    return len(list(AI_RANKING_KEYWORDS.finditer(text))) if text else 0
+    return sum(1 for _ in AI_KEYWORDS.finditer(text)) if text else 0
 
 
 def chunk_name_from_id(chunk_id: int) -> str:
@@ -271,7 +286,6 @@ def preferred_output_columns(save_raw_json: bool) -> list[str]:
         "item7_chars",
         "combined_chars",
         "keyword_hits",
-        "ranking_keyword_hits",
         "prefilter_mode",
         "prefilter_decision",
         "prefilter_audit_sample",
@@ -288,7 +302,6 @@ def preferred_output_columns(save_raw_json: bool) -> list[str]:
         "score_status",
         "endpoint",
         "job_id",
-        "retry_job_id",
         "snippet_sha256",
         "raw_json_sha256",
     ]
@@ -307,6 +320,54 @@ def order_columns(df: pd.DataFrame, save_raw_json: bool) -> pd.DataFrame:
     existing = [col for col in preferred if col in df.columns]
     extra = [col for col in df.columns if col not in existing]
     return df[existing + extra]
+
+
+def build_snippet_audit_table(
+    records: Sequence[dict[str, Any]],
+    pending: dict[str, dict[str, Any]],
+) -> pd.DataFrame:
+    """Build the filing-level snippet table used for manual inspection.
+
+    ``llm_processed`` records whether the filing was submitted to the LLM. Rows
+    skipped by the prefilter remain in the table with an empty snippet and a
+    zero snippet length.
+    """
+
+    snippet_by_record_index = {
+        int(item["record_index"]): str(item.get("snippet_text", "") or "")
+        for item in pending.values()
+    }
+    rows: list[dict[str, Any]] = []
+    for record_index, record in enumerate(records):
+        snippet_text = snippet_by_record_index.get(record_index, "")
+        llm_processed = coerce_bool(record.get("llm_called", False))
+        max_prompt_chars = int(record.get("max_prompt_chars", 0) or 0)
+        rows.append(
+            {
+                "cik": record.get("cik", ""),
+                "year": record.get("year", pd.NA),
+                "filing_accession": record.get(
+                    "filing_accession", record.get("accession_number", "")
+                ),
+                "chunk_id": record.get("chunk_id", ""),
+                "llm_processed": llm_processed,
+                "snippet_text_length": len(snippet_text),
+                "max_prompt_chars": max_prompt_chars,
+                "snippet_at_limit": bool(
+                    llm_processed
+                    and max_prompt_chars > 0
+                    and len(snippet_text) >= max_prompt_chars
+                ),
+                "keyword_hits": int(record.get("keyword_hits", 0) or 0),
+                "prefilter_decision": record.get("prefilter_decision", ""),
+                "parse_status": record.get("parse_status", ""),
+                "ai_score": record.get("ai_score", pd.NA),
+                "score_status": record.get("score_status", ""),
+                "snippet_text": snippet_text,
+            }
+        )
+
+    return pd.DataFrame(rows, columns=SNIPPET_AUDIT_COLUMNS)
 
 
 def write_json(path: str, payload: dict[str, Any]) -> None:
@@ -333,13 +394,17 @@ def get_team_prefix(team: str) -> str:
     return teams[team]["s3_key"].strip("/")
 
 
-def list_chunks(team: str, chunk_prefix: str = "", bucket: str = DEFAULT_BUCKET) -> dict[str, ChunkRef]:
+def list_chunks(
+    team: str, chunk_prefix: str = "", bucket: str = DEFAULT_BUCKET
+) -> dict[str, ChunkRef]:
     """List valid chunk files under a Data Workspace team folder."""
 
     import boto3
 
     team_prefix = get_team_prefix(team)
-    prefix = "/".join(part.strip("/") for part in [team_prefix, chunk_prefix] if part.strip("/"))
+    prefix = "/".join(
+        part.strip("/") for part in [team_prefix, chunk_prefix] if part.strip("/")
+    )
     paginator = boto3.client("s3").get_paginator("list_objects_v2")
 
     refs: dict[str, ChunkRef] = {}
@@ -381,7 +446,9 @@ def select_chunks(
         selected = list(available.values())
         return selected[:max_chunks] if max_chunks else selected
     else:
-        raise ValueError("No chunks selected. Use --chunk-ids, --chunk-range, --chunk-names, or --all-chunks.")
+        raise ValueError(
+            "No chunks selected. Use --chunk-ids, --chunk-range, --chunk-names, or --all-chunks."
+        )
 
     selected = []
     seen = set()
@@ -441,7 +508,9 @@ def load_cik_year_lookup(path: Optional[str]) -> Optional[pd.DataFrame]:
 
     lookup = lookup[["cik", "year"]].copy()
     lookup["cik_match"] = lookup["cik"].apply(normalize_cik)
-    lookup["year_match"] = pd.to_numeric(lookup["year"], errors="coerce").astype("Int64")
+    lookup["year_match"] = pd.to_numeric(lookup["year"], errors="coerce").astype(
+        "Int64"
+    )
     lookup = lookup[(lookup["cik_match"] != "") & lookup["year_match"].notna()]
     lookup = lookup.drop_duplicates(["cik_match", "year_match"]).reset_index(drop=True)
     if lookup.empty:
@@ -495,10 +564,9 @@ def long_to_wide(df: pd.DataFrame, include_amended: bool) -> pd.DataFrame:
         return pd.DataFrame(columns=base_cols)
 
     # Collapse duplicate section rows, then pivot item1/item7 into columns.
-    collapsed = (
-        work.groupby(["accession_number", "cik", "year", "form_type", "item"], as_index=False)
-        .agg(text=("text", lambda x: " ".join([t for t in pd.unique(x) if t])))
-    )
+    collapsed = work.groupby(
+        ["accession_number", "cik", "year", "form_type", "item"], as_index=False
+    ).agg(text=("text", lambda x: " ".join([t for t in pd.unique(x) if t])))
 
     wide = collapsed.pivot_table(
         index=["accession_number", "cik", "year", "form_type"],
@@ -530,7 +598,9 @@ def long_to_wide(df: pd.DataFrame, include_amended: bool) -> pd.DataFrame:
     return wide[base_cols].sort_values(["accession_number"]).reset_index(drop=True)
 
 
-def filter_to_lookup(wide: pd.DataFrame, lookup: Optional[pd.DataFrame]) -> pd.DataFrame:
+def filter_to_lookup(
+    wide: pd.DataFrame, lookup: Optional[pd.DataFrame]
+) -> pd.DataFrame:
     """Keep only filing rows whose normalized cik/year appears in the lookup."""
 
     if lookup is None or wide.empty:
@@ -541,7 +611,11 @@ def filter_to_lookup(wide: pd.DataFrame, lookup: Optional[pd.DataFrame]) -> pd.D
     work["year_match"] = pd.to_numeric(work["year"], errors="coerce").astype("Int64")
     filtered = work.merge(lookup, on=["cik_match", "year_match"], how="inner")
     filtered = filtered.drop(columns=["cik_match", "year_match"])
-    dedupe_cols = [col for col in ["accession_number", "cik", "year", "form_type"] if col in filtered.columns]
+    dedupe_cols = [
+        col
+        for col in ["accession_number", "cik", "year", "form_type"]
+        if col in filtered.columns
+    ]
     filtered = filtered.drop_duplicates(dedupe_cols)
     return filtered.reset_index(drop=True)
 
@@ -558,10 +632,14 @@ def split_into_sentences(text: str) -> list[str]:
     text = normalize_whitespace(text)
     if not text:
         return []
-    return [part.strip() for part in SENTENCE_SPLIT_RE.split(text) if part and part.strip()] or [text]
+    return [
+        part.strip() for part in SENTENCE_SPLIT_RE.split(text) if part and part.strip()
+    ] or [text]
 
 
-def extract_relevant_snippets(full_text: str, max_chars: int, sentence_window: int) -> str:
+def extract_relevant_snippets(
+    full_text: str, max_chars: int, sentence_window: int
+) -> str:
     """Extract a prompt-sized excerpt from the filing text."""
 
     full_text = normalize_whitespace(full_text)
@@ -569,7 +647,9 @@ def extract_relevant_snippets(full_text: str, max_chars: int, sentence_window: i
         return ""
 
     sentences = split_into_sentences(full_text)
-    hit_idx = [i for i, sentence in enumerate(sentences) if AI_RANKING_KEYWORDS.search(sentence)]
+    hit_idx = [
+        i for i, sentence in enumerate(sentences) if AI_KEYWORDS.search(sentence)
+    ]
     if not hit_idx:
         return full_text[:max_chars]
 
@@ -582,12 +662,6 @@ def extract_relevant_snippets(full_text: str, max_chars: int, sentence_window: i
         window_text = " ".join(sentences[i] for i in indices)
         # Rank windows with operational cues above risk/future-looking text.
         score = 0
-        if AI_TRIGGER_KEYWORDS.search(window_text):
-            score += 5
-        if AI_TRIGGER_KEYWORDS.search(sentences[idx]):
-            score += 3
-        if AI_RANKING_KEYWORDS.search(sentences[idx]):
-            score += 1
         if OPERATIONAL_CUES.search(window_text):
             score += 4
         if OPERATIONAL_CUES.search(sentences[idx]):
@@ -616,7 +690,7 @@ def extract_relevant_snippets(full_text: str, max_chars: int, sentence_window: i
             break
 
     # Return selected sentences in original filing order for readability.
-    chunks = []
+    chunks: list[str] = []
     used = 0
     last_i = None
     for i in sorted(selected):
@@ -670,11 +744,13 @@ def build_ai_retry_prompt(text: str) -> str:
     """Build a stricter retry prompt that asks for only one digit."""
 
     return (
-        "Return only one character: 1, 2, or 3.\n"
-        "Do not explain your answer.\n"
-        "Do not return markdown, JSON, or any extra text.\n"
-        "Use only the filing text.\n\n"
+        "You are an expert analyst.\n"
+        "Using the rubric below, assign one integer score from 1 to 3 for the firm's level of AI adoption.\n"
+        "Use only the filing text. Do not rely on outside knowledge.\n\n"
         f"{_score_rubric()}\n"
+        "Choose the single best score.\n"
+        "Output exactly one ASCII digit—1, 2, or 3—and nothing else. "
+        "Do not include an explanation, punctuation, markdown, or JSON.\n\n"
         "FILING TEXT:\n"
         "<filing_text>\n"
         f"{text}\n"
@@ -702,7 +778,14 @@ def extract_text_from_response(resp: Any) -> str:
                 return text
         return json.dumps(resp, ensure_ascii=False)
     if isinstance(resp, dict):
-        for key in ["generated_text", "text", "output", "response", "completion", "content"]:
+        for key in [
+            "generated_text",
+            "text",
+            "output",
+            "response",
+            "completion",
+            "content",
+        ]:
             if key in resp and resp[key] is not None:
                 text = extract_text_from_response(resp[key])
                 if text:
@@ -819,7 +902,13 @@ def parse_model_output_payload(text: str) -> dict[str, Any]:
             continue
         if not isinstance(obj, dict):
             continue
-        for key in ["ai_score", "score", "ai_adoption_score", "ai_level_code", "ai_adoption_level_code"]:
+        for key in [
+            "ai_score",
+            "score",
+            "ai_adoption_score",
+            "ai_level_code",
+            "ai_adoption_level_code",
+        ]:
             parsed = parse_score_int(obj.get(key))
             if parsed is not None:
                 candidates.append((parsed, candidate))
@@ -849,20 +938,6 @@ def parse_model_output_payload(text: str) -> dict[str, Any]:
 
     score, raw_json = candidates[-1]
     return build_score_parse_result(score, raw_json=raw_json, status="ok")
-
-
-def parse_model_output(text: str) -> tuple[Any, Any, Any, str, str, str]:
-    """Compatibility wrapper that returns the historical tuple shape."""
-
-    result = parse_model_output_payload(text)
-    return (
-        result["ai_score"],
-        result["ai_score_label"],
-        result["ai_score"],
-        result["score_explanation"],
-        result["status"],
-        result["raw_json"],
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -914,7 +989,6 @@ def base_output_record(
         "item7_chars": int(row.get("item7_chars", 0) or 0),
         "combined_chars": int(row.get("combined_chars", 0) or 0),
         "keyword_hits": 0,
-        "ranking_keyword_hits": 0,
         "prefilter_mode": prefilter_mode,
         "prefilter_decision": "not_applicable",
         "prefilter_audit_sample": bool(prefilter_audit_sample),
@@ -931,7 +1005,6 @@ def base_output_record(
         "score_status": "",
         "endpoint": endpoint,
         "job_id": "",
-        "retry_job_id": "",
         "snippet_sha256": "",
         "raw_json_sha256": "",
     }
@@ -949,6 +1022,77 @@ def iter_bedrock_prompts(
 
     for linked_obj, item in pending.items():
         yield linked_obj, str(item["prompt"])
+
+
+def prepare_record_prompt(
+    record: dict[str, Any],
+    *,
+    record_index: int,
+    full_text: str,
+    keyword_hits: int,
+    audit_sample: bool,
+    prefilter_mode: str,
+    max_prompt_chars: int,
+    sentence_window: int,
+    job_id: str,
+) -> Optional[dict[str, Any]]:
+    """Apply prefilter rules and return a prompt item when an LLM call is needed."""
+
+    if not full_text:
+        record.update(
+            ai_score=1,
+            ai_score_label=AI_SCORE_LABELS[1],
+            score_explanation="No text was available after combining Item 1 and Item 7.",
+            score_status="empty_text_zero",
+            prefilter_decision="empty_text",
+        )
+        return None
+
+    should_prefilter = (
+        keyword_hits == 0
+        and prefilter_mode in {"hard_zero", "audit"}
+        and not audit_sample
+    )
+    if should_prefilter:
+        record.update(
+            ai_score=1,
+            ai_score_label=AI_SCORE_LABELS[1],
+            score_explanation="No AI dictionary keywords were detected by the prefilter, so the filing was assigned score 1 without an LLM call.",
+            score_status="prefilter_zero_no_keyword",
+            prefilter_decision=f"{prefilter_mode}_zero_no_keyword",
+        )
+        return None
+
+    snippet = extract_relevant_snippets(full_text, max_prompt_chars, sentence_window)
+    if not snippet:
+        record.update(
+            parse_status="failed",
+            score_explanation="Snippet extraction returned empty text.",
+            score_status="snippet_extraction_failed",
+        )
+        return None
+
+    if audit_sample:
+        decision = "audit_call_no_keyword"
+    elif keyword_hits == 0:
+        decision = "llm_call_no_trigger_prefilter_off"
+    else:
+        decision = "keyword_hit_llm_call"
+
+    record.update(
+        prefilter_decision=decision,
+        snippet_chars=len(snippet),
+        llm_called=True,
+        endpoint_attempts=1,
+        job_id=job_id,
+        snippet_sha256=sha256_text(snippet),
+    )
+    return {
+        "record_index": record_index,
+        "prompt": build_ai_prompt(snippet),
+        "retry_prompt": build_ai_retry_prompt(snippet),
+        "snippet_text": snippet,
+    }
 
 
 def prepare_records_and_prompts(
@@ -987,14 +1131,17 @@ def prepare_records_and_prompts(
         accession = str(row.get("accession_number", "")).strip()
         full_text = normalize_whitespace(row.get("combined_text", ""))
         keyword_hits = count_ai_keywords(full_text)
-        ranking_keyword_hits = count_ranking_keywords(full_text)
 
         # Audit mode sends a stable sample of no-keyword filings to the LLM so
         # the false-zero risk of the prefilter can be measured.
         audit_sample = False
         if prefilter_mode == "audit" and keyword_hits == 0:
-            sampled = stable_unit_interval(f"{audit_seed}|{accession}") < prefilter_audit_rate
-            under_limit = prefilter_audit_limit <= 0 or audit_calls < prefilter_audit_limit
+            sampled = (
+                stable_unit_interval(f"{audit_seed}|{accession}") < prefilter_audit_rate
+            )
+            under_limit = (
+                prefilter_audit_limit <= 0 or audit_calls < prefilter_audit_limit
+            )
             audit_sample = sampled and under_limit
             if audit_sample:
                 audit_calls += 1
@@ -1016,55 +1163,21 @@ def prepare_records_and_prompts(
             prefilter_audit_sample=audit_sample,
         )
         record["keyword_hits"] = keyword_hits
-        record["ranking_keyword_hits"] = ranking_keyword_hits
 
-        # Empty filings get a transparent zero without an LLM call.
-        if not full_text:
-            record.update(
-                ai_score=1,
-                ai_score_label=AI_SCORE_LABELS[1],
-                score_explanation="No text was available after combining Item 1 and Item 7.",
-                score_status="empty_text_zero",
-                prefilter_decision="empty_text",
-            )
-        # No-keyword filings are skipped in hard_zero mode and mostly skipped
-        # in audit mode.
-        elif keyword_hits == 0 and prefilter_mode in {"hard_zero", "audit"} and not audit_sample:
-            record.update(
-                ai_score=1,
-                ai_score_label=AI_SCORE_LABELS[1],
-                score_explanation="No AI dictionary keywords were detected by the prefilter, so the filing was assigned score 1 without an LLM call.",
-                score_status="prefilter_zero_no_keyword",
-                prefilter_decision=f"{prefilter_mode}_zero_no_keyword",
-            )
-        # All remaining filings need snippets and LLM prompts.
-        else:
-            snippet = extract_relevant_snippets(full_text, max_prompt_chars, sentence_window)
-            if not snippet:
-                record.update(
-                    parse_status="failed",
-                    score_explanation="Snippet extraction returned empty text.",
-                    score_status="snippet_extraction_failed",
-                )
-            else:
-                job_id = f"{run_id}_{chunk_id}_{row_number:06d}"
-                record.update(
-                    prefilter_decision="audit_call_no_keyword"
-                    if audit_sample
-                    else ("llm_call_no_trigger_prefilter_off" if keyword_hits == 0 else "keyword_hit_llm_call"),
-                    snippet_chars=len(snippet),
-                    llm_called=True,
-                    endpoint_attempts=1,
-                    job_id=job_id,
-                    snippet_sha256=sha256_text(snippet),
-                )
-                # linked_obj is the bridge between the bulk result and this row.
-                linked_obj = str(len(records))
-                pending[linked_obj] = {
-                    "record_index": len(records),
-                    "prompt": build_ai_prompt(snippet),
-                    "retry_prompt": build_ai_retry_prompt(snippet),
-                }
+        record_index = len(records)
+        prompt_item = prepare_record_prompt(
+            record,
+            record_index=record_index,
+            full_text=full_text,
+            keyword_hits=keyword_hits,
+            audit_sample=audit_sample,
+            prefilter_mode=prefilter_mode,
+            max_prompt_chars=max_prompt_chars,
+            sentence_window=sentence_window,
+            job_id=f"{run_id}_{chunk_id}_{row_number:06d}",
+        )
+        if prompt_item is not None:
+            pending[str(record_index)] = prompt_item
 
         records.append(record)
 
@@ -1077,6 +1190,94 @@ def prepare_records_and_prompts(
 # This function takes the iterator returned by dwutils.bedrock.invoke_bulk,
 # matches each result back to the correct filing row, and fills in the score,
 # status, and raw-response hashes.
+def response_text(result_body: Any) -> str:
+    """Extract model text from one Bedrock bulk result."""
+
+    if not isinstance(result_body, dict):
+        return ""
+    direct_text = str(result_body.get("model_response_string", "")).strip()
+    if direct_text:
+        return direct_text
+    return extract_text_from_response(result_body.get("response_json", result_body))
+
+
+def apply_endpoint_error(
+    record: dict[str, Any],
+    error: Any,
+    *,
+    is_retry: bool,
+    save_raw_json: bool,
+) -> None:
+    """Record a failed Bedrock request."""
+
+    if save_raw_json:
+        record["raw_response"] = str(error)
+    if is_retry:
+        record.update(
+            parse_status="failed",
+            retry_score_status="endpoint_error",
+            score_explanation=f"Retry endpoint error: {str(error)[:500]}",
+            score_status="retry_endpoint_error",
+        )
+        return
+    record.update(
+        parse_status="failed",
+        ai_score=pd.NA,
+        ai_score_label=pd.NA,
+        score_explanation=f"Endpoint error: {str(error)[:500]}",
+        initial_score_status="endpoint_error",
+        score_status="endpoint_error",
+    )
+
+
+def apply_parsed_result(
+    record: dict[str, Any],
+    parsed: dict[str, Any],
+    raw_text: str,
+    *,
+    is_retry: bool,
+    save_raw_json: bool,
+) -> None:
+    """Apply one parsed score result to its filing record."""
+
+    status = str(parsed["status"])
+    raw_json = str(parsed["raw_json"])
+    if save_raw_json:
+        record["raw_response"] = raw_text
+        record["raw_json"] = raw_json
+    record["raw_json_sha256"] = sha256_text(raw_json) if raw_json else ""
+
+    if status == "ok":
+        audit_sample = bool(record.get("prefilter_audit_sample"))
+        if is_retry:
+            score_status = (
+                "prefilter_audit_ok_after_retry" if audit_sample else "ok_after_retry"
+            )
+        else:
+            score_status = "prefilter_audit_ok" if audit_sample else "ok"
+        record.update(
+            parse_status="retry_success" if is_retry else "success",
+            ai_score=parsed["ai_score"],
+            ai_score_label=parsed["ai_score_label"],
+            score_explanation=parsed["score_explanation"],
+            score_status=score_status,
+        )
+        if is_retry:
+            record["retry_score_status"] = status
+        else:
+            record["initial_score_status"] = score_status
+        return
+
+    record.update(
+        parse_status="failed",
+        ai_score=pd.NA,
+        ai_score_label=pd.NA,
+        score_explanation=parsed["score_explanation"],
+        score_status=f"retry_{status}" if is_retry else status,
+    )
+    record["retry_score_status" if is_retry else "initial_score_status"] = status
+
+
 def apply_bulk_results(
     records: list[dict[str, Any]],
     pending: dict[str, dict[str, Any]],
@@ -1092,83 +1293,27 @@ def apply_bulk_results(
         record = records[item["record_index"]]
         if is_retry:
             record["retry_attempted"] = True
-            record["endpoint_attempts"] = int(record.get("endpoint_attempts", 0) or 0) + 1
+            record["endpoint_attempts"] = (
+                int(record.get("endpoint_attempts", 0) or 0) + 1
+            )
 
         if isinstance(result_body, dict) and "error" in result_body:
-            error = result_body.get("error", "")
-            if save_raw_json:
-                record["raw_response"] = str(error)
-            status = "endpoint_error"
-            if is_retry:
-                record.update(
-                    parse_status="failed",
-                    retry_score_status=status,
-                    score_explanation=f"Retry endpoint error: {str(error)[:500]}",
-                    score_status="retry_endpoint_error",
-                )
-            else:
-                record.update(
-                    parse_status="failed",
-                    ai_score=pd.NA,
-                    ai_score_label=pd.NA,
-                    score_explanation=f"Endpoint error: {str(error)[:500]}",
-                    initial_score_status=status,
-                    score_status=status,
-                )
+            apply_endpoint_error(
+                record,
+                result_body.get("error", ""),
+                is_retry=is_retry,
+                save_raw_json=save_raw_json,
+            )
             continue
 
-        response_body = result_body.get("response_json", result_body) if isinstance(result_body, dict) else result_body
-        raw_text = (
-            str(result_body.get("model_response_string", "")).strip()
-            if isinstance(result_body, dict)
-            else ""
+        raw_text = response_text(result_body)
+        apply_parsed_result(
+            record,
+            parse_model_output_payload(raw_text),
+            raw_text,
+            is_retry=is_retry,
+            save_raw_json=save_raw_json,
         )
-        if not raw_text:
-            raw_text = extract_text_from_response(response_body)
-        result = parse_model_output_payload(raw_text)
-        status = result["status"]
-        raw_json = result["raw_json"]
-        if save_raw_json:
-            record["raw_response"] = raw_text
-            record["raw_json"] = raw_json
-        record["raw_json_sha256"] = sha256_text(raw_json) if raw_json else ""
-
-        if status == "ok":
-            success_updates = {
-                "parse_status": "retry_success" if is_retry else "success",
-                "ai_score": result["ai_score"],
-                "ai_score_label": result["ai_score_label"],
-                "score_explanation": result["score_explanation"],
-                "raw_json_sha256": sha256_text(raw_json) if raw_json else "",
-            }
-            if is_retry:
-                success_updates["retry_score_status"] = status
-                success_updates["score_status"] = (
-                    "prefilter_audit_ok_after_retry" if record.get("prefilter_audit_sample") else "ok_after_retry"
-                )
-            else:
-                initial_status = "prefilter_audit_ok" if record.get("prefilter_audit_sample") else "ok"
-                success_updates["initial_score_status"] = initial_status
-                success_updates["score_status"] = initial_status
-            record.update(success_updates)
-            continue
-
-        failure_updates = {
-            "parse_status": "failed",
-            "ai_score": pd.NA,
-            "ai_score_label": pd.NA,
-            "score_explanation": result["score_explanation"],
-            "raw_json_sha256": sha256_text(raw_json) if raw_json else "",
-        }
-        if is_retry:
-            failure_updates["retry_score_status"] = status
-            failure_updates["score_status"] = f"retry_{status}"
-            record.update(failure_updates)
-            continue
-
-        failure_updates["initial_score_status"] = status
-        failure_updates["score_status"] = status
-        record.update(failure_updates)
 
 
 # ---------------------------------------------------------------------------
@@ -1195,7 +1340,11 @@ def summarize_output(
 ) -> dict[str, Any]:
     """Build the per-chunk JSON summary."""
 
-    score_series = pd.to_numeric(out_df["ai_score"], errors="coerce") if not out_df.empty else pd.Series(dtype=float)
+    score_series = (
+        pd.to_numeric(out_df["ai_score"], errors="coerce")
+        if not out_df.empty
+        else pd.Series(dtype=float)
+    )
     n_scored = int(score_series.notna().sum()) if not out_df.empty else 0
     return {
         "run_id": run_id,
@@ -1222,14 +1371,38 @@ def summarize_output(
         "n_score_2": int((score_series == 2).sum()) if not out_df.empty else 0,
         "n_score_3": int((score_series == 3).sum()) if not out_df.empty else 0,
         "n_ok": int((out_df["score_status"] == "ok").sum()) if not out_df.empty else 0,
-        "n_ok_after_retry": int((out_df["score_status"] == "ok_after_retry").sum()) if not out_df.empty else 0,
-        "n_prefilter_audit_ok_after_retry": int((out_df["score_status"] == "prefilter_audit_ok_after_retry").sum()) if not out_df.empty else 0,
-        "n_prefilter_audit_ok": int((out_df["score_status"] == "prefilter_audit_ok").sum()) if not out_df.empty else 0,
-        "n_prefilter_zero": int((out_df["score_status"] == "prefilter_zero_no_keyword").sum()) if not out_df.empty else 0,
-        "n_retry_attempted": int(out_df["retry_attempted"].sum()) if not out_df.empty and "retry_attempted" in out_df.columns else 0,
+        "n_ok_after_retry": (
+            int((out_df["score_status"] == "ok_after_retry").sum())
+            if not out_df.empty
+            else 0
+        ),
+        "n_prefilter_audit_ok_after_retry": (
+            int((out_df["score_status"] == "prefilter_audit_ok_after_retry").sum())
+            if not out_df.empty
+            else 0
+        ),
+        "n_prefilter_audit_ok": (
+            int((out_df["score_status"] == "prefilter_audit_ok").sum())
+            if not out_df.empty
+            else 0
+        ),
+        "n_prefilter_zero": (
+            int((out_df["score_status"] == "prefilter_zero_no_keyword").sum())
+            if not out_df.empty
+            else 0
+        ),
+        "n_retry_attempted": (
+            int(out_df["retry_attempted"].sum())
+            if not out_df.empty and "retry_attempted" in out_df.columns
+            else 0
+        ),
         "n_missing_item1": int((~out_df["has_item1"]).sum()) if not out_df.empty else 0,
         "n_missing_item7": int((~out_df["has_item7"]).sum()) if not out_df.empty else 0,
-        "status_counts": out_df["score_status"].value_counts(dropna=False).to_dict() if not out_df.empty else {},
+        "status_counts": (
+            out_df["score_status"].value_counts(dropna=False).to_dict()
+            if not out_df.empty
+            else {}
+        ),
         "mean_ai_score": None if n_scored == 0 else float(score_series.mean()),
         "output_csv": output_csv,
     }

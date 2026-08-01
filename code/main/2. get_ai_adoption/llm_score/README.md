@@ -33,9 +33,9 @@ deployment, AI capability, AI spending, or productivity.
 The pipeline is now frozen as:
 
 ```text
-research_profile = llm_extraction_ai_1to3_v1
-script_version   = 2026-07-22-llm_extraction_v1
-prompt_version   = llm_extraction_claude_v1
+research_profile = llm_extraction_ai_1to3_v2
+script_version   = 2026-08-01-llm_extraction_v4
+prompt_version   = llm_extraction_claude_v2
 ```
 
 Recommended default settings:
@@ -99,7 +99,7 @@ The pipeline now uses one shared published dictionary:
 
 1. `AI_KEYWORD_PATTERNS`
    This single keyword list is used for both the hard-zero prefilter and
-   snippet ranking.
+   identifying candidate sentences for snippet ranking.
 
 This keeps the process simpler and easier to document. A filing is sent to the
 LLM only if this shared dictionary appears in the filing text, and the same
@@ -177,12 +177,27 @@ Per chunk:
 ```text
 extract_df_chunk_XXXXX_claude_scores.csv
 extract_df_chunk_XXXXX_claude_summary.json
+extract_df_chunk_XXXXX_claude_snippet_audit.csv
 ```
+
+The snippet-audit CSV contains one row for every filing in the chunk. Filings
+submitted to the LLM have `llm_processed = True` and retain the exact
+`snippet_text` sent to the model. Prefiltered filings remain visible with an
+empty snippet and `snippet_text_length = 0`. The table also records
+`max_prompt_chars` and `snippet_at_limit` so truncation can be audited directly.
 
 Per run:
 
 ```text
 run_manifest_<RUN_ID>.csv
+```
+
+Running `merge_outputs.py` over the chunk folder writes:
+
+```text
+llm_extraction_snippet_audit.csv
+llm_extraction_filing_master.csv
+llm_extraction_firm_year_panel.csv
 ```
 
 Important output fields:
@@ -199,7 +214,6 @@ max_prompt_chars
 sentence_window
 prefilter_mode
 keyword_hits
-ranking_keyword_hits
 llm_called
 parse_status
 score_status
@@ -214,14 +228,21 @@ score_explanation
 python3 get_ai_score_bulk.py \
   --team effect_of_ai \
   --lookup-csv ../lookup/cik_year.csv \
-  --model-label claude \
   --model-id eu.anthropic.claude-haiku-4-5-20251001-v1:0 \
   --prefilter-mode hard_zero \
   --max-prompt-chars 1800 \
   --sentence-window 1 \
-  --max-new-tokens 128 \
-  --temperature 0.0 \
   --out-dir output/final_llm_extraction
+```
+
+`temperature` and `max_new_tokens` are fixed by the frozen research profile.
+After scoring, aggregate the chunk outputs with:
+
+```bash
+python3 merge_outputs.py \
+  --primary-dir output/final_llm_extraction/RUN_ID \
+  --primary-label claude \
+  --out-dir output/final_merged
 ```
 
 ## Interpretation For Empirical Use

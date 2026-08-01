@@ -17,11 +17,14 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import pandas as pd
 
 import ai_adoption_utils as u
+
+MODEL_LABEL = "claude"
+AUDIT_SEED = "ai-adoption-prefilter-audit-v1"
 
 
 # ---------------------------------------------------------------------------
@@ -35,16 +38,38 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
 
     # Data Workspace S3 location. In normal use, the team folder is enough.
-    ap.add_argument("--team", default="effect_of_ai", help="Data Workspace team folder name, e.g. effect_of_ai.")
-    ap.add_argument("--chunk-prefix", default="", help="Optional path under the team folder containing chunk files.")
-    ap.add_argument("--s3-bucket", default=u.DEFAULT_BUCKET, help="S3 bucket. Usually leave as the Data Workspace default.")
-
+    ap.add_argument(
+        "--team",
+        default="effect_of_ai",
+        help="Data Workspace team folder name, e.g. effect_of_ai.",
+    )
+    ap.add_argument(
+        "--chunk-prefix",
+        default="",
+        help="Optional path under the team folder containing chunk files.",
+    )
     # Mutually exclusive chunk selection options. The user should choose one.
     selection = ap.add_mutually_exclusive_group(required=False)
-    selection.add_argument("--chunk-names", nargs="+", help="Chunk basenames, e.g. extract_df_chunk_00001.rds")
-    selection.add_argument("--chunk-ids", nargs="+", type=int, help="Chunk ids, e.g. 1 2 18 37")
-    selection.add_argument("--chunk-range", nargs=2, type=int, metavar=("START", "END"), help="Inclusive chunk id range.")
-    selection.add_argument("--all-chunks", action="store_true", help="Process every chunk under the team prefix. Use with care.")
+    selection.add_argument(
+        "--chunk-names",
+        nargs="+",
+        help="Chunk basenames, e.g. extract_df_chunk_00001.rds",
+    )
+    selection.add_argument(
+        "--chunk-ids", nargs="+", type=int, help="Chunk ids, e.g. 1 2 18 37"
+    )
+    selection.add_argument(
+        "--chunk-range",
+        nargs=2,
+        type=int,
+        metavar=("START", "END"),
+        help="Inclusive chunk id range.",
+    )
+    selection.add_argument(
+        "--all-chunks",
+        action="store_true",
+        help="Process every chunk under the team prefix. Use with care.",
+    )
     selection.add_argument(
         "--repair-failed-from-csv",
         nargs="+",
@@ -52,11 +77,28 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
 
     # QA and sample-filtering options.
-    ap.add_argument("--list-only", action="store_true", help="List available chunks and exit.")
-    ap.add_argument("--max-chunks", type=int, default=0, help="Cap selected chunks after selection.")
-    ap.add_argument("--max-filings-per-chunk", type=int, default=0, help="QA option: label only first N matched filings per chunk.")
-    ap.add_argument("--lookup-csv", default=None, help="CSV with cik and year columns. Only matching filings are labeled.")
-    ap.add_argument("--include-amended", action="store_true", help="Include 10-K/A rows. Default keeps only 10-K.")
+    ap.add_argument(
+        "--list-only", action="store_true", help="List available chunks and exit."
+    )
+    ap.add_argument(
+        "--max-chunks", type=int, default=0, help="Cap selected chunks after selection."
+    )
+    ap.add_argument(
+        "--max-filings-per-chunk",
+        type=int,
+        default=0,
+        help="QA option: label only first N matched filings per chunk.",
+    )
+    ap.add_argument(
+        "--lookup-csv",
+        default=None,
+        help="CSV with cik and year columns. Only matching filings are labeled.",
+    )
+    ap.add_argument(
+        "--include-amended",
+        action="store_true",
+        help="Include 10-K/A rows. Default keeps only 10-K.",
+    )
 
     # Prefilter options decide when no-keyword filings should skip the LLM.
     ap.add_argument(
@@ -66,45 +108,52 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="hard_zero skips no-keyword filings; audit samples no-keyword filings; off calls LLM on all non-empty filings.",
     )
     ap.add_argument("--prefilter-audit-rate", type=float, default=0.02)
-    ap.add_argument("--prefilter-audit-limit", type=int, default=0, help="Per-chunk audit call cap; 0 means no cap.")
-    ap.add_argument("--audit-seed", default="ai-adoption-prefilter-audit-v1")
-
+    ap.add_argument(
+        "--prefilter-audit-limit",
+        type=int,
+        default=0,
+        help="Per-chunk audit call cap; 0 means no cap.",
+    )
     # LLM and bulk invocation settings.
-    ap.add_argument("--model-label", choices=["claude"], default="claude", help="Short label used for default Bedrock model_id and output naming.")
-    ap.add_argument("--model-id", default=None, help="Bedrock model_id, e.g. eu.anthropic.claude-haiku-4-5-20251001-v1:0 or eu.anthropic.claude-sonnet-4-6.")
-    ap.add_argument("--endpoint", dest="model_id", default=None, help=argparse.SUPPRESS)
-    ap.add_argument("--llm-checkpoint", default=None, help="Model identifier to store in outputs. Defaults to --model-id.")
+    ap.add_argument(
+        "--model-id",
+        default=u.MODEL_NAME,
+        help="Bedrock model_id, e.g. eu.anthropic.claude-haiku-4-5-20251001-v1:0 or eu.anthropic.claude-sonnet-4-6.",
+    )
     ap.add_argument("--max-prompt-chars", type=int, default=u.DEFAULT_MAX_PROMPT_CHARS)
     ap.add_argument("--sentence-window", type=int, default=u.DEFAULT_SENTENCE_WINDOW)
-    ap.add_argument("--temperature", type=float, default=u.TEMPERATURE)
-    ap.add_argument("--max-new-tokens", type=int, default=u.DEFAULT_MAX_NEW_TOKENS)
-    ap.add_argument("--max-workers", type=int, default=5, help="Parallel Bedrock requests. Keep low to avoid 429 errors.")
-    ap.add_argument("--no-retry-pass", action="store_true", help="Disable the automatic second-pass retry for parser failures.")
     ap.add_argument(
-        "--repair-failed-after-chunk",
-        action="store_true",
-        help="After each chunk finishes, run one extra failed-row repair pass against that chunk's output CSV if any rows still have parse_status=failed.",
+        "--max-workers",
+        type=int,
+        default=5,
+        help="Parallel Bedrock requests. Keep low to avoid 429 errors.",
     )
-    ap.add_argument(
-        "--repair-failed-after-run",
-        action="store_true",
-        help="After all selected chunks finish, run one extra failed-row repair pass against each chunk output CSV that still contains parse_status=failed.",
-    )
-
     # Output and logging settings.
-    ap.add_argument("--save-raw-json", action="store_true", help="Store parsed JSON and raw model output in the output CSV.")
-    ap.add_argument("--skip-existing", action="store_true", help="Skip chunks whose output CSV and summary JSON already exist.")
-    ap.add_argument("--flat-output", action="store_true", help="Write directly to --out-dir instead of --out-dir/RUN_ID.")
-    ap.add_argument("--out-dir", default=os.path.join(os.getcwd(), "output", "llama_scores"))
-    ap.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    ap.add_argument(
+        "--save-raw-json",
+        action="store_true",
+        help="Store parsed JSON and raw model output in the output CSV.",
+    )
+    ap.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Skip chunks whose score, summary, and snippet-audit outputs already exist.",
+    )
+    ap.add_argument(
+        "--flat-output",
+        action="store_true",
+        help="Write directly to --out-dir instead of --out-dir/RUN_ID.",
+    )
+    ap.add_argument(
+        "--out-dir", default=os.path.join(os.getcwd(), "output", "llm_scores")
+    )
+    ap.add_argument(
+        "--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"]
+    )
 
     args = ap.parse_args(argv)
 
     # Fail early for invalid arguments so the run does not start half-configured.
-    if args.model_id is None:
-        args.model_id = u.DEFAULT_ENDPOINTS[args.model_label]
-    if args.llm_checkpoint is None:
-        args.llm_checkpoint = args.model_id
     if args.max_chunks < 0:
         ap.error("--max-chunks must be >= 0")
     if args.max_filings_per_chunk < 0:
@@ -113,8 +162,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         ap.error("--max-prompt-chars must be > 0")
     if args.sentence_window < 0:
         ap.error("--sentence-window must be >= 0")
-    if not 0.0 <= args.temperature <= 2.0:
-        ap.error("--temperature must be between 0 and 2")
     if not 0.0 <= args.prefilter_audit_rate <= 1.0:
         ap.error("--prefilter-audit-rate must be between 0 and 1")
     if args.prefilter_audit_limit < 0:
@@ -136,7 +183,9 @@ def output_dir_for_run(args: argparse.Namespace, run_id: str) -> str:
     return args.out_dir if args.flat_output else os.path.join(args.out_dir, run_id)
 
 
-def parse_team_and_path_from_source_label(source_label: str, fallback_team: str) -> tuple[str, str]:
+def parse_team_and_path_from_source_label(
+    source_label: str, fallback_team: str
+) -> tuple[str, str]:
     """Parse team and chunk path from a stored source label."""
 
     text = str(source_label).strip()
@@ -153,22 +202,266 @@ def summary_path_for_output_csv(output_csv: str, model_label: str) -> str:
     csv_path = Path(output_csv)
     suffix = f"_{model_label}_scores.csv"
     if csv_path.name.endswith(suffix):
-        return str(csv_path.with_name(csv_path.name[: -len(suffix)] + f"_{model_label}_summary.json"))
+        return str(
+            csv_path.with_name(
+                csv_path.name[: -len(suffix)] + f"_{model_label}_summary.json"
+            )
+        )
     return str(csv_path.with_suffix(".json"))
 
 
-def count_failed_rows_in_csv(csv_path: str) -> int:
-    """Count final failed parse rows in one existing score CSV."""
+def snippet_audit_path_for_output_csv(output_csv: str, model_label: str) -> str:
+    """Convert one chunk score CSV path to its companion snippet-audit CSV."""
 
-    if not os.path.exists(csv_path):
-        return 0
-    df = pd.read_csv(csv_path, usecols=lambda col: col in {"parse_status", "llm_called"})
-    if df.empty or "parse_status" not in df.columns:
-        return 0
-    failed = df["parse_status"].astype(str).str.strip().eq("failed")
-    if "llm_called" in df.columns:
-        failed &= df["llm_called"].fillna(False).astype(bool)
-    return int(failed.sum())
+    csv_path = Path(output_csv)
+    suffix = f"_{model_label}_scores.csv"
+    if csv_path.name.endswith(suffix):
+        return str(
+            csv_path.with_name(
+                csv_path.name[: -len(suffix)] + f"_{model_label}_snippet_audit.csv"
+            )
+        )
+    return str(csv_path.with_name(csv_path.stem + "_snippet_audit.csv"))
+
+
+def boolean_series(values: pd.Series) -> pd.Series:
+    """Normalize booleans read from CSV without treating the string 'False' as true."""
+
+    return values.map(u.coerce_bool).astype(bool)
+
+
+def rebuild_snippet_audit(
+    records: list[dict[str, object]],
+    wide_by_accession: dict[str, pd.Series],
+) -> pd.DataFrame:
+    """Rebuild the complete snippet audit from score rows and their source filing text."""
+
+    pending: dict[str, dict[str, object]] = {}
+    for record_index, record in enumerate(records):
+        if not boolean_series(pd.Series([record.get("llm_called", False)])).iloc[0]:
+            continue
+
+        accession = str(record.get("accession_number", "")).strip()
+        wide_row = wide_by_accession.get(accession)
+        if wide_row is None:
+            logging.warning(
+                "Could not rebuild audit snippet for missing accession %s", accession
+            )
+            continue
+
+        max_prompt_chars_value = pd.to_numeric(
+            record.get("max_prompt_chars"), errors="coerce"
+        )
+        sentence_window_value = pd.to_numeric(
+            record.get("sentence_window"), errors="coerce"
+        )
+        max_prompt_chars = (
+            u.DEFAULT_MAX_PROMPT_CHARS
+            if pd.isna(max_prompt_chars_value)
+            else int(max_prompt_chars_value)
+        )
+        sentence_window = (
+            u.DEFAULT_SENTENCE_WINDOW
+            if pd.isna(sentence_window_value)
+            else int(sentence_window_value)
+        )
+        snippet = u.extract_relevant_snippets(
+            u.normalize_whitespace(wide_row.get("combined_text", "")),
+            max_prompt_chars,
+            sentence_window,
+        )
+        pending[str(record_index)] = {
+            "record_index": record_index,
+            "snippet_text": snippet,
+        }
+
+    return u.build_snippet_audit_table(records, pending)
+
+
+MANIFEST_METRIC_FIELDS = [
+    "n_filings",
+    "n_llm_called",
+    "n_score_1",
+    "n_score_2",
+    "n_score_3",
+    "n_ok",
+    "n_ok_after_retry",
+    "n_retry_attempted",
+]
+
+
+def manifest_metrics(summary: dict[str, object]) -> dict[str, object]:
+    """Select the shared chunk metrics written to run and repair manifests."""
+
+    return {
+        field: summary[field] for field in MANIFEST_METRIC_FIELDS if field in summary
+    }
+
+
+def repair_status_row(
+    csv_path: str,
+    status: str,
+    *,
+    source_label: str = "",
+) -> dict[str, object]:
+    """Build a manifest row for a repair that did not submit model calls."""
+
+    return {
+        "chunk_name": Path(csv_path).name,
+        "source_label": source_label,
+        "status": status,
+        "output_csv": csv_path,
+        "output_summary": summary_path_for_output_csv(csv_path, MODEL_LABEL),
+        "n_repaired": 0,
+    }
+
+
+def failed_record_indices(score_df: pd.DataFrame) -> list[int]:
+    """Return score-row positions that were called but still failed parsing."""
+
+    llm_called = boolean_series(
+        score_df.get("llm_called", pd.Series(False, index=score_df.index))
+    )
+    parse_failed = (
+        score_df.get("parse_status", pd.Series("", index=score_df.index))
+        .astype(str)
+        .str.strip()
+        .eq("failed")
+    )
+    return [int(index) for index in score_df.index[llm_called & parse_failed]]
+
+
+def load_repair_source(
+    score_df: pd.DataFrame,
+    args: argparse.Namespace,
+) -> tuple[str, str, dict[str, pd.Series]]:
+    """Reload and reshape the source chunk referenced by an existing score CSV."""
+
+    source_label = str(score_df.get("source_label", pd.Series([""])).iloc[0])
+    team, chunk_path = parse_team_and_path_from_source_label(source_label, args.team)
+    include_amended = args.include_amended or (
+        "form_type" in score_df.columns
+        and score_df["form_type"].astype(str).str.upper().eq("10-K/A").any()
+    )
+    raw = u.read_rds_from_team_s3(chunk_path, team=team)
+    wide = u.long_to_wide(raw, include_amended=include_amended)
+    return (
+        source_label,
+        chunk_path,
+        {str(row["accession_number"]).strip(): row for _, row in wide.iterrows()},
+    )
+
+
+def prepare_repair_prompts(
+    records: list[dict[str, Any]],
+    failed_indices: list[int],
+    wide_by_accession: dict[str, pd.Series],
+    *,
+    args: argparse.Namespace,
+    run_id: str,
+    chunk_path: str,
+) -> dict[str, dict[str, Any]]:
+    """Rebuild snippets and retry prompts for failed score rows."""
+
+    pending: dict[str, dict[str, Any]] = {}
+    for index in failed_indices:
+        record = records[index]
+        accession = str(record.get("accession_number", "")).strip()
+        source_row = wide_by_accession.get(accession)
+        if source_row is None:
+            logging.warning("Accession %s is missing from %s", accession, chunk_path)
+            continue
+
+        snippet = u.extract_relevant_snippets(
+            u.normalize_whitespace(source_row.get("combined_text", "")),
+            args.max_prompt_chars,
+            args.sentence_window,
+        )
+        if not snippet:
+            logging.warning("Could not rebuild snippet for accession %s", accession)
+            continue
+
+        record.update(
+            run_id=run_id,
+            script_version=u.SCRIPT_VERSION,
+            prompt_version=u.PROMPT_VERSION,
+            research_profile=u.RESEARCH_PROFILE,
+            llm_model=args.model_id,
+            llm_checkpoint=args.model_id,
+            temperature=u.TEMPERATURE,
+            max_new_tokens=u.DEFAULT_MAX_NEW_TOKENS,
+            max_prompt_chars=args.max_prompt_chars,
+            sentence_window=args.sentence_window,
+            endpoint=args.model_id,
+            snippet_chars=len(snippet),
+            snippet_sha256=u.sha256_text(snippet),
+        )
+        pending[str(index)] = {
+            "record_index": index,
+            "prompt": u.build_ai_retry_prompt(snippet),
+            "snippet_text": snippet,
+        }
+    return pending
+
+
+def read_summary_json(path: str) -> dict[str, Any]:
+    """Read existing chunk metadata when available."""
+
+    if not os.path.exists(path):
+        return {}
+    try:
+        return json.loads(Path(path).read_text())
+    except Exception:
+        logging.warning("Could not read existing summary JSON: %s", path)
+        return {}
+
+
+def rebuild_repair_summary(
+    repaired_df: pd.DataFrame,
+    *,
+    csv_path: str,
+    chunk_path: str,
+    source_label: str,
+    run_id: str,
+    args: argparse.Namespace,
+) -> tuple[str, dict[str, Any]]:
+    """Rebuild the chunk summary while preserving original run settings."""
+
+    summary_path = summary_path_for_output_csv(csv_path, MODEL_LABEL)
+    previous = read_summary_json(summary_path)
+    summary = u.summarize_output(
+        repaired_df,
+        run_id=run_id,
+        chunk_name=str(previous.get("chunk_name", Path(chunk_path).name)),
+        source_label=str(previous.get("source_label", source_label)),
+        endpoint=str(previous.get("endpoint", args.model_id)),
+        prefilter_mode=str(
+            previous.get(
+                "prefilter_mode",
+                repaired_df.get(
+                    "prefilter_mode", pd.Series([args.prefilter_mode])
+                ).iloc[0],
+            )
+        ),
+        prefilter_audit_rate=float(
+            previous.get("prefilter_audit_rate", args.prefilter_audit_rate)
+        ),
+        prefilter_audit_limit=int(
+            previous.get("prefilter_audit_limit", args.prefilter_audit_limit)
+        ),
+        max_prompt_chars=int(previous.get("max_prompt_chars", args.max_prompt_chars)),
+        sentence_window=int(previous.get("sentence_window", args.sentence_window)),
+        lookup_csv=previous.get("lookup_csv", args.lookup_csv),
+        n_filings_before_lookup=int(
+            previous.get("n_filings_before_lookup", len(repaired_df))
+        ),
+        n_filings_after_lookup=int(
+            previous.get("n_filings_after_lookup", len(repaired_df))
+        ),
+        output_csv=csv_path,
+    )
+    u.write_json(summary_path, summary)
+    return summary_path, summary
 
 
 def repair_failed_rows_from_csv(
@@ -177,222 +470,140 @@ def repair_failed_rows_from_csv(
     args: argparse.Namespace,
     run_id: str,
 ) -> dict[str, object]:
-    """Repair only the rows that finished with parse_status=failed in an existing output CSV."""
+    """Retry only rows that still have a failed parser status."""
 
     csv_path = os.path.abspath(csv_path)
     if not os.path.exists(csv_path):
         raise FileNotFoundError(f"Repair CSV not found: {csv_path}")
 
-    out_df = pd.read_csv(csv_path)
-    if out_df.empty:
-        logging.info("Repair skipped for empty CSV: %s", csv_path)
-        return {
-            "chunk_name": Path(csv_path).name,
-            "source_label": "",
-            "status": "repair_skipped_empty_csv",
-            "output_csv": csv_path,
-            "output_summary": summary_path_for_output_csv(csv_path, args.model_label),
-        }
+    score_df = pd.read_csv(csv_path)
+    if score_df.empty:
+        return repair_status_row(csv_path, "repair_skipped_empty_csv")
 
-    llm_called = out_df.get("llm_called", pd.Series(False, index=out_df.index)).fillna(False).astype(bool)
-    parse_status = out_df.get("parse_status", pd.Series("", index=out_df.index)).astype(str).str.strip()
-    failed_mask = llm_called & parse_status.eq("failed")
-    failed_indices = out_df.index[failed_mask].tolist()
+    source_label = str(score_df.get("source_label", pd.Series([""])).iloc[0])
+    failed_indices = failed_record_indices(score_df)
     if not failed_indices:
-        logging.info("No failed rows to repair in %s", csv_path)
-        return {
-            "chunk_name": Path(csv_path).name,
-            "source_label": str(out_df["source_label"].iloc[0]) if "source_label" in out_df.columns else "",
-            "status": "repair_no_failed_rows",
-            "output_csv": csv_path,
-            "output_summary": summary_path_for_output_csv(csv_path, args.model_label),
-            "n_repaired": 0,
-        }
-
-    source_label = str(out_df["source_label"].iloc[0]) if "source_label" in out_df.columns else ""
-    team, chunk_path = parse_team_and_path_from_source_label(source_label, args.team)
-    logging.info("Repairing %d failed rows from %s using team=%s path=%s", len(failed_indices), csv_path, team, chunk_path)
-
-    raw = u.read_rds_from_team_s3(chunk_path, team=team)
-    include_amended = bool(args.include_amended) or (
-        "form_type" in out_df.columns and out_df["form_type"].astype(str).str.upper().eq("10-K/A").any()
-    )
-    wide = u.long_to_wide(raw, include_amended=include_amended)
-    wide = wide.assign(accession_number=wide["accession_number"].astype(str).str.strip())
-    wide_by_accession = {str(row["accession_number"]).strip(): row for _, row in wide.iterrows()}
-
-    records = out_df.to_dict(orient="records")
-    pending: dict[str, dict[str, object]] = {}
-    save_raw_json = bool(args.save_raw_json) or "raw_response" in out_df.columns or "raw_json" in out_df.columns
-
-    for idx in failed_indices:
-        record = records[idx]
-        accession = str(record.get("accession_number", "")).strip()
-        wide_row = wide_by_accession.get(accession)
-        if wide_row is None:
-            logging.warning("Repair could not find accession %s in original chunk %s", accession, chunk_path)
-            continue
-
-        snippet = u.extract_relevant_snippets(
-            u.normalize_whitespace(wide_row.get("combined_text", "")),
-            args.max_prompt_chars,
-            args.sentence_window,
+        return repair_status_row(
+            csv_path, "repair_no_failed_rows", source_label=source_label
         )
-        if not snippet:
-            logging.warning("Repair snippet extraction failed for accession %s in %s", accession, csv_path)
-            continue
 
-        record["run_id"] = run_id
-        record["script_version"] = u.SCRIPT_VERSION
-        record["prompt_version"] = u.PROMPT_VERSION
-        record["research_profile"] = u.RESEARCH_PROFILE
-        record["llm_model"] = args.llm_checkpoint
-        record["llm_checkpoint"] = args.llm_checkpoint
-        record["temperature"] = float(args.temperature)
-        record["max_new_tokens"] = int(args.max_new_tokens)
-        record["max_prompt_chars"] = int(args.max_prompt_chars)
-        record["sentence_window"] = int(args.sentence_window)
-        record["endpoint"] = args.model_id
-        record["snippet_chars"] = len(snippet)
-        record["snippet_sha256"] = u.sha256_text(snippet)
-        pending[str(idx)] = {
-            "record_index": idx,
-            "prompt": u.build_ai_retry_prompt(snippet),
-        }
-
-    if not pending:
-        logging.info("Repair found no re-runnable failed rows in %s", csv_path)
-        return {
-            "chunk_name": Path(csv_path).name,
-            "source_label": source_label,
-            "status": "repair_no_rerunnable_rows",
-            "output_csv": csv_path,
-            "output_summary": summary_path_for_output_csv(csv_path, args.model_label),
-            "n_repaired": 0,
-        }
-
-    from dwutils import bedrock
-
-    bedrock_prompts = u.iter_bedrock_prompts(pending)
-    results = bedrock.invoke_bulk(
-        bedrock_prompts,
-        model_id=args.model_id,
-        max_workers=args.max_workers,
+    source_label, chunk_path, wide_by_accession = load_repair_source(score_df, args)
+    records = score_df.to_dict(orient="records")
+    pending = prepare_repair_prompts(
+        records,
+        failed_indices,
+        wide_by_accession,
+        args=args,
+        run_id=run_id,
+        chunk_path=chunk_path,
     )
-    u.apply_bulk_results(records, pending, results, save_raw_json=save_raw_json, is_retry=True)
+    if not pending:
+        return repair_status_row(
+            csv_path, "repair_no_rerunnable_rows", source_label=source_label
+        )
+
+    save_raw_json = args.save_raw_json or bool(
+        {"raw_response", "raw_json"}.intersection(score_df.columns)
+    )
+    results = invoke_bedrock(
+        pending, model_id=args.model_id, max_workers=args.max_workers
+    )
+    u.apply_bulk_results(
+        records, pending, results, save_raw_json=save_raw_json, is_retry=True
+    )
 
     repaired_df = u.order_columns(pd.DataFrame(records), save_raw_json)
     repaired_df.to_csv(csv_path, index=False)
-
-    summary_path = summary_path_for_output_csv(csv_path, args.model_label)
-    summary_kwargs = {
-        "run_id": run_id,
-        "chunk_name": Path(chunk_path).name,
-        "source_label": source_label,
-        "endpoint": args.model_id,
-        "prefilter_mode": str(repaired_df.get("prefilter_mode", pd.Series([args.prefilter_mode])).iloc[0]),
-        "prefilter_audit_rate": float(repaired_df.get("prefilter_audit_rate", pd.Series([args.prefilter_audit_rate])).iloc[0]) if "prefilter_audit_rate" in repaired_df.columns else args.prefilter_audit_rate,
-        "prefilter_audit_limit": int(repaired_df.get("prefilter_audit_limit", pd.Series([args.prefilter_audit_limit])).iloc[0]) if "prefilter_audit_limit" in repaired_df.columns else args.prefilter_audit_limit,
-        "max_prompt_chars": int(repaired_df.get("max_prompt_chars", pd.Series([args.max_prompt_chars])).iloc[0]) if "max_prompt_chars" in repaired_df.columns else args.max_prompt_chars,
-        "sentence_window": int(repaired_df.get("sentence_window", pd.Series([args.sentence_window])).iloc[0]) if "sentence_window" in repaired_df.columns else args.sentence_window,
-        "lookup_csv": args.lookup_csv,
-        "n_filings_before_lookup": int(len(repaired_df)),
-        "n_filings_after_lookup": int(len(repaired_df)),
-        "output_csv": csv_path,
-    }
-    if os.path.exists(summary_path):
-        try:
-            old_summary = json.loads(Path(summary_path).read_text())
-            summary_kwargs.update(
-                {
-                    "chunk_name": old_summary.get("chunk_name", summary_kwargs["chunk_name"]),
-                    "source_label": old_summary.get("source_label", summary_kwargs["source_label"]),
-                    "endpoint": old_summary.get("endpoint", summary_kwargs["endpoint"]),
-                    "prefilter_mode": old_summary.get("prefilter_mode", summary_kwargs["prefilter_mode"]),
-                    "prefilter_audit_rate": old_summary.get("prefilter_audit_rate", summary_kwargs["prefilter_audit_rate"]),
-                    "prefilter_audit_limit": old_summary.get("prefilter_audit_limit", summary_kwargs["prefilter_audit_limit"]),
-                    "max_prompt_chars": old_summary.get("max_prompt_chars", summary_kwargs["max_prompt_chars"]),
-                    "sentence_window": old_summary.get("sentence_window", summary_kwargs["sentence_window"]),
-                    "lookup_csv": old_summary.get("lookup_csv", summary_kwargs["lookup_csv"]),
-                    "n_filings_before_lookup": old_summary.get("n_filings_before_lookup", summary_kwargs["n_filings_before_lookup"]),
-                    "n_filings_after_lookup": old_summary.get("n_filings_after_lookup", summary_kwargs["n_filings_after_lookup"]),
-                }
-            )
-        except Exception:
-            logging.warning("Could not read existing summary JSON for %s; regenerating from CSV only", csv_path)
-
-    summary = u.summarize_output(repaired_df, **summary_kwargs)
-    u.write_json(summary_path, summary)
-    logging.info("Repaired %s and updated summary %s", csv_path, summary_path)
+    audit_path = snippet_audit_path_for_output_csv(csv_path, MODEL_LABEL)
+    rebuild_snippet_audit(records, wide_by_accession).to_csv(audit_path, index=False)
+    summary_path, summary = rebuild_repair_summary(
+        repaired_df,
+        csv_path=csv_path,
+        chunk_path=chunk_path,
+        source_label=source_label,
+        run_id=run_id,
+        args=args,
+    )
 
     return {
-        "chunk_name": summary_kwargs["chunk_name"],
+        "chunk_name": summary["chunk_name"],
         "source_label": source_label,
         "status": "repair_ok",
         "output_csv": csv_path,
         "output_summary": summary_path,
-        "n_repaired": int(len(pending)),
-        "n_failed_remaining": int((repaired_df.get("parse_status", pd.Series(dtype='string')).astype(str) == "failed").sum()),
-        "n_filings": int(len(repaired_df)),
-        "n_llm_called": int(repaired_df["llm_called"].sum()) if "llm_called" in repaired_df.columns else 0,
-        "n_score_1": int((pd.to_numeric(repaired_df["ai_score"], errors="coerce") == 1).sum()) if "ai_score" in repaired_df.columns else 0,
-        "n_score_2": int((pd.to_numeric(repaired_df["ai_score"], errors="coerce") == 2).sum()) if "ai_score" in repaired_df.columns else 0,
-        "n_score_3": int((pd.to_numeric(repaired_df["ai_score"], errors="coerce") == 3).sum()) if "ai_score" in repaired_df.columns else 0,
-        "n_ok": int((repaired_df["score_status"] == "ok").sum()) if "score_status" in repaired_df.columns else 0,
-        "n_ok_after_retry": int((repaired_df["score_status"] == "ok_after_retry").sum()) if "score_status" in repaired_df.columns else 0,
-        "n_retry_attempted": int(repaired_df["retry_attempted"].sum()) if "retry_attempted" in repaired_df.columns else 0,
+        "snippet_audit_csv": audit_path,
+        "n_repaired": len(pending),
+        "n_failed_remaining": len(failed_record_indices(repaired_df)),
+        **manifest_metrics(summary),
     }
-
-
-def maybe_repair_output_csv(
-    row: dict[str, object],
-    *,
-    args: argparse.Namespace,
-    run_id: str,
-    phase_label: str,
-) -> dict[str, object]:
-    """Run one extra failed-row repair pass for a finished chunk output when needed."""
-
-    output_csv = str(row.get("output_csv", "") or "").strip()
-    if not output_csv or not os.path.exists(output_csv):
-        return row
-
-    n_failed = count_failed_rows_in_csv(output_csv)
-    if n_failed <= 0:
-        return row
-
-    logging.info(
-        "Starting %s repair pass for %s with %d failed row(s)",
-        phase_label,
-        output_csv,
-        n_failed,
-    )
-    repair_row = repair_failed_rows_from_csv(output_csv, args=args, run_id=run_id)
-    merged = dict(row)
-    merged["repair_phase"] = phase_label
-    merged["repair_status"] = repair_row.get("status", "")
-    merged["repair_n_repaired"] = repair_row.get("n_repaired", 0)
-    merged["repair_n_failed_remaining"] = repair_row.get("n_failed_remaining", n_failed)
-    merged["output_summary"] = repair_row.get("output_summary", row.get("output_summary", ""))
-    merged["output_csv"] = repair_row.get("output_csv", output_csv)
-    for key in [
-        "n_filings",
-        "n_llm_called",
-        "n_score_1",
-        "n_score_2",
-        "n_score_3",
-        "n_ok",
-        "n_ok_after_retry",
-        "n_retry_attempted",
-    ]:
-        if key in repair_row:
-            merged[key] = repair_row[key]
-    return merged
 
 
 # ---------------------------------------------------------------------------
 # Process one chunk
 # ---------------------------------------------------------------------------
+def invoke_bedrock(
+    pending: dict[str, dict[str, Any]],
+    *,
+    model_id: str,
+    max_workers: int,
+):
+    """Submit one dictionary of linked prompts through the Bedrock bulk API."""
+
+    from dwutils import bedrock
+
+    return bedrock.invoke_bulk(
+        u.iter_bedrock_prompts(pending),
+        model_id=model_id,
+        max_workers=max_workers,
+    )
+
+
+def score_pending_records(
+    records: list[dict[str, Any]],
+    pending: dict[str, dict[str, Any]],
+    *,
+    args: argparse.Namespace,
+    chunk_name: str,
+) -> None:
+    """Run the initial model call and one automatic parser-failure retry."""
+
+    if not pending:
+        logging.info("No LLM calls needed for %s", chunk_name)
+        return
+
+    logging.info("Submitting %d LLM calls for %s", len(pending), chunk_name)
+    results = invoke_bedrock(
+        pending, model_id=args.model_id, max_workers=args.max_workers
+    )
+    u.apply_bulk_results(records, pending, results, save_raw_json=args.save_raw_json)
+
+    retry_pending = {
+        linked_obj: {
+            "record_index": item["record_index"],
+            "prompt": item["retry_prompt"],
+        }
+        for linked_obj, item in pending.items()
+        if records[int(item["record_index"])].get("score_status")
+        in u.RETRYABLE_PARSE_STATUSES
+    }
+    if not retry_pending:
+        return
+
+    logging.info(
+        "Retrying %d parser-failure rows for %s", len(retry_pending), chunk_name
+    )
+    retry_results = invoke_bedrock(
+        retry_pending, model_id=args.model_id, max_workers=args.max_workers
+    )
+    u.apply_bulk_results(
+        records,
+        retry_pending,
+        retry_results,
+        save_raw_json=args.save_raw_json,
+        is_retry=True,
+    )
+
+
 # This is the core workflow for one extract_df_chunk_XXXXX.rds file:
 # read -> reshape -> lookup filter -> prefilter/prompt prep -> bulk LLM ->
 # parse results -> write CSV and JSON summary.
@@ -408,12 +619,18 @@ def process_chunk(
     run_out_dir = output_dir_for_run(args, run_id)
     os.makedirs(run_out_dir, exist_ok=True)
 
-    out_csv = os.path.join(run_out_dir, f"{chunk_id}_{args.model_label}_scores.csv")
-    out_json = os.path.join(run_out_dir, f"{chunk_id}_{args.model_label}_summary.json")
+    out_csv = os.path.join(run_out_dir, f"{chunk_id}_{MODEL_LABEL}_scores.csv")
+    out_json = summary_path_for_output_csv(out_csv, MODEL_LABEL)
+    out_snippet_audit_csv = snippet_audit_path_for_output_csv(out_csv, MODEL_LABEL)
     source_label = f"team={args.team}:{ref.path}"
 
     # Optional resume behaviour: skip this chunk if final outputs already exist.
-    if args.skip_existing and os.path.exists(out_csv) and os.path.exists(out_json):
+    if (
+        args.skip_existing
+        and os.path.exists(out_csv)
+        and os.path.exists(out_json)
+        and os.path.exists(out_snippet_audit_csv)
+    ):
         logging.info("Skipping existing output for %s", ref.name)
         return {
             "chunk_name": ref.name,
@@ -421,6 +638,7 @@ def process_chunk(
             "status": "skipped_existing",
             "output_csv": out_csv,
             "output_summary": out_json,
+            "snippet_audit_csv": out_snippet_audit_csv,
         }
 
     # Read the RDS chunk from Data Workspace S3 and reshape Item 1 / Item 7
@@ -434,7 +652,9 @@ def process_chunk(
     n_before_lookup = len(wide)
     wide = u.filter_to_lookup(wide, lookup)
     n_after_lookup = len(wide)
-    logging.info("Lookup filter kept %d/%d filing rows", n_after_lookup, n_before_lookup)
+    logging.info(
+        "Lookup filter kept %d/%d filing rows", n_after_lookup, n_before_lookup
+    )
 
     # For QA runs, optionally cap the number of filings processed in the chunk.
     if args.max_filings_per_chunk > 0:
@@ -447,59 +667,26 @@ def process_chunk(
         run_id=run_id,
         chunk_id=chunk_id,
         source_label=source_label,
-        llm_model=args.llm_checkpoint,
-        llm_checkpoint=args.llm_checkpoint,
-        temperature=args.temperature,
-        max_new_tokens=args.max_new_tokens,
+        llm_model=args.model_id,
+        llm_checkpoint=args.model_id,
+        temperature=u.TEMPERATURE,
+        max_new_tokens=u.DEFAULT_MAX_NEW_TOKENS,
         endpoint=args.model_id,
         prefilter_mode=args.prefilter_mode,
-        audit_seed=args.audit_seed,
+        audit_seed=AUDIT_SEED,
         prefilter_audit_rate=args.prefilter_audit_rate,
         prefilter_audit_limit=args.prefilter_audit_limit,
         max_prompt_chars=args.max_prompt_chars,
         sentence_window=args.sentence_window,
     )
 
-    # Submit all required LLM calls in bulk. Rows skipped by the prefilter are
-    # already complete and do not appear in pending.
-    if pending:
-        from dwutils import bedrock
+    score_pending_records(records, pending, args=args, chunk_name=ref.name)
 
-        logging.info("Submitting %d LLM calls for %s using Bedrock bulk invocation", len(pending), ref.name)
-        bedrock_prompts = u.iter_bedrock_prompts(pending)
-        results = bedrock.invoke_bulk(
-            bedrock_prompts,
-            model_id=args.model_id,
-            max_workers=args.max_workers,
-        )
-        u.apply_bulk_results(records, pending, results, save_raw_json=args.save_raw_json)
-
-        if not args.no_retry_pass:
-            retry_pending = {
-                linked_obj: {
-                    "record_index": item["record_index"],
-                    "prompt": item["retry_prompt"],
-                }
-                for linked_obj, item in pending.items()
-                if records[item["record_index"]].get("score_status") in u.RETRYABLE_PARSE_STATUSES
-            }
-            if retry_pending:
-                logging.info("Retrying %d parser-failure rows for %s with stricter score-only retry prompt", len(retry_pending), ref.name)
-                retry_prompts = u.iter_bedrock_prompts(retry_pending)
-                retry_results = bedrock.invoke_bulk(
-                    retry_prompts,
-                    model_id=args.model_id,
-                    max_workers=args.max_workers,
-                )
-                u.apply_bulk_results(
-                    records,
-                    retry_pending,
-                    retry_results,
-                    save_raw_json=args.save_raw_json,
-                    is_retry=True,
-                )
-    else:
-        logging.info("No LLM calls needed for %s", ref.name)
+    snippet_audit_df = u.build_snippet_audit_table(records, pending)
+    snippet_audit_df.to_csv(out_snippet_audit_csv, index=False)
+    logging.info(
+        "Wrote snippet audit %s (%d rows)", out_snippet_audit_csv, len(snippet_audit_df)
+    )
 
     # Write the filing-level output CSV.
     out_df = u.order_columns(pd.DataFrame(records), args.save_raw_json)
@@ -532,71 +719,76 @@ def process_chunk(
         "status": "ok",
         "output_csv": out_csv,
         "output_summary": out_json,
+        "snippet_audit_csv": out_snippet_audit_csv,
         "n_filings_before_lookup": n_before_lookup,
         "n_filings_after_lookup": n_after_lookup,
-        "n_filings": int(len(out_df)),
-        "n_llm_called": int(out_df["llm_called"].sum()) if not out_df.empty else 0,
-        "n_score_1": int((pd.to_numeric(out_df["ai_score"], errors="coerce") == 1).sum()) if not out_df.empty else 0,
-        "n_score_2": int((pd.to_numeric(out_df["ai_score"], errors="coerce") == 2).sum()) if not out_df.empty else 0,
-        "n_score_3": int((pd.to_numeric(out_df["ai_score"], errors="coerce") == 3).sum()) if not out_df.empty else 0,
-        "n_ok": int((out_df["score_status"] == "ok").sum()) if not out_df.empty else 0,
-        "n_ok_after_retry": int((out_df["score_status"] == "ok_after_retry").sum()) if not out_df.empty else 0,
-        "n_retry_attempted": int(out_df["retry_attempted"].sum()) if not out_df.empty and "retry_attempted" in out_df.columns else 0,
+        **manifest_metrics(summary),
     }
 
 
 # ---------------------------------------------------------------------------
 # Main process
 # ---------------------------------------------------------------------------
-# This controls the whole run: parse arguments, list/select chunks, load the
-# lookup once, process each chunk, and write the run manifest.
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    # Parse command-line options and configure logs.
-    args = parse_args(argv)
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format="%(asctime)s | %(levelname)s | %(message)s",
+def write_manifest(
+    rows: list[dict[str, object]],
+    *,
+    out_dir: str,
+    filename: str,
+) -> None:
+    """Write one run or repair manifest."""
+
+    path = os.path.join(out_dir, filename)
+    pd.DataFrame(rows).to_csv(path, index=False)
+    logging.info("Wrote manifest: %s", path)
+
+
+def run_repairs(args: argparse.Namespace) -> int:
+    """Run explicit failed-row repairs and write their manifest."""
+
+    run_id = u.utc_now()
+    run_out_dir = output_dir_for_run(args, run_id)
+    os.makedirs(run_out_dir, exist_ok=True)
+    rows = []
+    for csv_path in args.repair_failed_from_csv:
+        try:
+            rows.append(repair_failed_rows_from_csv(csv_path, args=args, run_id=run_id))
+        except Exception as exc:
+            logging.exception("Failed repairing %s", csv_path)
+            absolute_path = os.path.abspath(csv_path)
+            rows.append(
+                {
+                    "chunk_name": Path(csv_path).name,
+                    "source_label": "",
+                    "status": "repair_failed",
+                    "output_csv": absolute_path,
+                    "output_summary": summary_path_for_output_csv(
+                        absolute_path, MODEL_LABEL
+                    ),
+                    "error": str(exc)[:1000],
+                }
+            )
+    write_manifest(
+        rows,
+        out_dir=run_out_dir,
+        filename=f"repair_manifest_{run_id}.csv",
     )
+    return 0
 
-    if args.repair_failed_from_csv:
-        run_id = u.utc_now()
-        run_out_dir = output_dir_for_run(args, run_id)
-        os.makedirs(run_out_dir, exist_ok=True)
 
-        manifest_rows = []
-        for csv_path in args.repair_failed_from_csv:
-            try:
-                manifest_rows.append(repair_failed_rows_from_csv(csv_path, args=args, run_id=run_id))
-            except Exception as exc:
-                logging.exception("Failed repairing %s", csv_path)
-                manifest_rows.append(
-                    {
-                        "chunk_name": Path(csv_path).name,
-                        "source_label": "",
-                        "status": "repair_failed",
-                        "output_csv": os.path.abspath(csv_path),
-                        "output_summary": summary_path_for_output_csv(os.path.abspath(csv_path), args.model_label),
-                        "error": str(exc)[:1000],
-                    }
-                )
+def run_chunks(args: argparse.Namespace) -> int:
+    """Select, score, and record all requested chunks."""
 
-        manifest = pd.DataFrame(manifest_rows)
-        manifest_path = os.path.join(run_out_dir, f"repair_manifest_{run_id}.csv")
-        manifest.to_csv(manifest_path, index=False)
-        logging.info("Wrote repair manifest: %s", manifest_path)
-        return 0
-
-    # Find available chunks in the Data Workspace team folder.
-    available = u.list_chunks(args.team, args.chunk_prefix, bucket=args.s3_bucket)
+    available = u.list_chunks(args.team, args.chunk_prefix)
     if args.list_only:
         if not available:
-            print(f"No chunk files found for team={args.team}, chunk_prefix={args.chunk_prefix!r}")
+            print(
+                f"No chunk files found for team={args.team}, chunk_prefix={args.chunk_prefix!r}"
+            )
             return 0
         for name in available:
             print(name)
         return 0
 
-    # Resolve the user's chunk selection into actual chunk references.
     max_chunks = args.max_chunks if args.max_chunks > 0 else None
     selected = u.select_chunks(
         available,
@@ -607,31 +799,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         max_chunks=max_chunks,
     )
 
-    # Create one run id and output folder shared by all chunks in this run.
     run_id = u.utc_now()
     run_out_dir = output_dir_for_run(args, run_id)
     os.makedirs(run_out_dir, exist_ok=True)
 
-    # Load the research lookup once, then reuse it for every chunk.
     lookup = u.load_cik_year_lookup(args.lookup_csv)
-
-    # Process chunks one by one. A failed chunk is recorded in the manifest
-    # instead of stopping the whole run.
-    manifest_rows = []
+    rows = []
     for ref in selected:
         try:
-            row = process_chunk(ref, args=args, run_id=run_id, lookup=lookup)
-            if args.repair_failed_after_chunk and row.get("status") == "ok":
-                row = maybe_repair_output_csv(
-                    row,
-                    args=args,
-                    run_id=run_id,
-                    phase_label="after_chunk",
-                )
-            manifest_rows.append(row)
+            rows.append(process_chunk(ref, args=args, run_id=run_id, lookup=lookup))
         except Exception as exc:
             logging.exception("Failed processing %s", ref.name)
-            manifest_rows.append(
+            rows.append(
                 {
                     "chunk_name": ref.name,
                     "source_label": f"team={args.team}:{ref.path}",
@@ -641,33 +820,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     "error": str(exc)[:1000],
                 }
             )
-
-    if args.repair_failed_after_run:
-        repaired_manifest_rows = []
-        for row in manifest_rows:
-            if row.get("status") == "ok":
-                try:
-                    row = maybe_repair_output_csv(
-                        row,
-                        args=args,
-                        run_id=run_id,
-                        phase_label="after_run",
-                    )
-                except Exception as exc:
-                    logging.exception("Failed after-run repair for %s", row.get("output_csv", ""))
-                    row = dict(row)
-                    row["repair_phase"] = "after_run"
-                    row["repair_status"] = "repair_failed"
-                    row["repair_error"] = str(exc)[:1000]
-            repaired_manifest_rows.append(row)
-        manifest_rows = repaired_manifest_rows
-
-    # Write a run-level manifest summarising all chunk outcomes.
-    manifest = pd.DataFrame(manifest_rows)
-    manifest_path = os.path.join(run_out_dir, f"run_manifest_{run_id}.csv")
-    manifest.to_csv(manifest_path, index=False)
-    logging.info("Wrote run manifest: %s", manifest_path)
+    write_manifest(
+        rows,
+        out_dir=run_out_dir,
+        filename=f"run_manifest_{run_id}.csv",
+    )
     return 0
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Parse configuration and dispatch either scoring or explicit repair."""
+
+    args = parse_args(argv)
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s | %(levelname)s | %(message)s",
+    )
+    return run_repairs(args) if args.repair_failed_from_csv else run_chunks(args)
 
 
 # Standard Python entry point. This lets the file be run as a script.
