@@ -266,7 +266,7 @@ def rebuild_snippet_audit(
             else int(sentence_window_value)
         )
         snippet = u.extract_relevant_snippets(
-            u.normalize_whitespace(wide_row.get("combined_text", "")),
+            u.normalize_structured_text(wide_row.get("combined_text", "")),
             max_prompt_chars,
             sentence_window,
         )
@@ -373,7 +373,7 @@ def prepare_repair_prompts(
             continue
 
         snippet = u.extract_relevant_snippets(
-            u.normalize_whitespace(source_row.get("combined_text", "")),
+            u.normalize_structured_text(source_row.get("combined_text", "")),
             args.max_prompt_chars,
             args.sentence_window,
         )

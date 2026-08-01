@@ -11,7 +11,8 @@ import json
 import logging
 import re
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from difflib import SequenceMatcher
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
@@ -24,7 +25,7 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
-SCRIPT_VERSION = "2026-08-01-llm_extraction_v4"
+SCRIPT_VERSION = "2026-08-01-llm_extraction_v5"
 PROMPT_VERSION = "llm_extraction_claude_v2"
 RESEARCH_PROFILE = "llm_extraction_ai_1to3_v2"
 MODEL_NAME = "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
@@ -39,98 +40,586 @@ DEFAULT_BUCKET = "jupyter.notebook.uktrade.io"
 # Chunk files must follow this exact naming pattern to be picked up.
 CHUNK_RE = re.compile(r"^extract_df_chunk_(\d{5})\.rds$")
 
-# Generic text cleanup and rough sentence splitting patterns.
+# Generic text cleanup and structural segmentation patterns.
 WHITESPACE_RE = re.compile(r"\s+")
-SENTENCE_SPLIT_RE = re.compile(r"(?<=[\.\!\?\;])\s+|\n+")
+HORIZONTAL_WHITESPACE_RE = re.compile(r"[^\S\r\n]+")
+EXCESS_NEWLINES_RE = re.compile(r"\n{3,}")
+SENTENCE_SPLIT_RE = re.compile(r"(?<=[\.\!\?\;])\s+")
+SECTION_HEADING_RE = re.compile(
+    r"(?i)^ITEM\s+(?P<item>\d{1,2}[A-Z]?)\s*[\.\-–—:]?\s*"
+    r"(?:(?:BUSINESS|MD&A|MANAGEMENT['’]S DISCUSSION(?:\s+AND\s+ANALYSIS)?"
+    r"(?:\s+OF\s+FINANCIAL\s+CONDITION\s+AND\s+RESULTS\s+OF\s+OPERATIONS)?)"
+    r"\s*[\.\-–—:]?\s*)?"
+)
+BULLET_RE = re.compile(r"[\u2022\u2023\u25e6\u2043\u2219\u25aa\u25cf]")
+INLINE_LIST_ITEM_RE = re.compile(r"\s+(?=(?:\d{1,2}|[A-Za-z])\)\s+[A-Z])")
+TABLE_SEPARATOR_RE = re.compile(r"\s+\|\s+")
+MAX_TEXT_SEGMENT_CHARS = 900
+MAX_CONTEXT_SEGMENT_CHARS = 360
+MIN_TRUNCATED_CONTEXT_CHARS = 40
+MIN_ROUTING_WEIGHT = 2
 
-# The research workflow now uses one shared AI keyword dictionary for both the
-# hard-zero prefilter and snippet ranking. This keeps the process simpler and
-# makes the prefilter directly traceable to one published term list.
-AI_KEYWORD_PATTERNS = [
-    r"(?<!\w)A\.I\.(?!\w)",
-    r"\bAI\b",
-    r"\bAI chatbot\b",
-    r"\bLibsvm\b",
-    r"\bMahout\b",
-    # Keep standalone ML, but avoid obvious false positives like mg/ml and
-    # company abbreviations written as "(ML)".
-    r"(?<!\()(?<![A-Za-z0-9/])ML(?![A-Za-z0-9/])",
-    r"\bOpenCV\b",
-    r"\bWord2vec\b",
-    r"\bXGBoost\b",
-    r"\badversarial networks?\b",
-    r"\bartificial intelligence\b",
-    r"\bcomputer vision\b",
-    r"\bdecision trees?\b",
-    r"\bdeep[- ]learning\b",
-    r"\bfeature extraction\b",
-    r"\bgenetic algorithms?\b",
-    r"\bgradient boosting\b",
-    r"\bimage processing\b",
-    r"\bimage recognition\b",
-    r"\bimage segmentation\b",
-    r"\bkernel methods?\b",
-    r"\bkeras\b",
-    r"\blatent Dirichlet allocation\b",
-    r"\blatent semantic analysis\b",
-    r"\blearning models?\b",
-    r"\bmachine learning\b",
-    r"\bmachine translation\b",
-    r"\bmachine vision\b",
-    r"\bnatural language processing\b",
-    r"\bneural networks?\b",
-    r"\bobject detection\b",
-    r"\bobject recognition\b",
-    r"\bopinion mining\b",
-    r"\bpattern recognition\b",
-    r"\bpredictive models?\b",
-    r"\bprincipal component analysis\b",
-    r"\brandom forests?\b",
-    r"\brecognition systems?\b",
-    r"\brecommender systems?\b",
-    r"\breinforcement learning\b",
-    r"\bsentiment analysis\b",
-    r"\bsentiment classification\b",
-    r"\bspeech recognition\b",
-    r"\bsupervised learning\b",
-    r"\bsupport vector machines?\b",
-    r"\btext mining\b",
-    r"\btransformers?\b",
-    r"\bunsupervised learning\b",
-    r"\bvirtual agents?\b",
-    r"\bword embeddings?\b",
-    r"\bLLMs?\b",
-    r"\blarge[- ]language models?\b",
-    r"\bfoundation models?\b",
-    r"\bgenerative AI\b",
-    r"\bGenAI\b",
-    r"\bgenerative artificial intelligence\b",
-    r"\bmultimodal models?\b",
-    r"\bGPT(?:-\d+(?:\.\d+)?)?\b",
-    r"\bChatGPT\b",
-    r"\bClaude\b",
-    r"\bGemini\b",
-    r"\bCopilots?\b",
-]
+# One metadata-rich dictionary is the unique source of truth for routing and
+# ranking. Each rule is compiled independently so abbreviations can remain
+# case-sensitive while ordinary phrases are matched case-insensitively.
+AI_KEYWORDS: dict[str, dict[str, Any]] = {
+    "generative_artificial_intelligence": {
+        "pattern": r"\bgenerative artificial intelligence\b",
+        "category": "explicit_ai",
+        "routing_weight": 10,
+        "ranking_weight": 10,
+        "case_sensitive": False,
+    },
+    "artificial_intelligence": {
+        "pattern": r"\bartificial intelligence\b",
+        "category": "explicit_ai",
+        "routing_weight": 10,
+        "ranking_weight": 10,
+        "case_sensitive": False,
+    },
+    "generative_ai": {
+        "pattern": r"\bgenerative AI\b",
+        "category": "explicit_ai",
+        "routing_weight": 10,
+        "ranking_weight": 10,
+        "case_sensitive": False,
+    },
+    "genai": {
+        "pattern": r"\bGenAI\b",
+        "category": "explicit_ai",
+        "routing_weight": 10,
+        "ranking_weight": 10,
+        "case_sensitive": False,
+    },
+    "machine_learning": {
+        "pattern": r"\bmachine learning\b",
+        "category": "explicit_ai",
+        "routing_weight": 9,
+        "ranking_weight": 9,
+        "case_sensitive": False,
+    },
+    "deep_learning": {
+        "pattern": r"\bdeep[- ]learning\b",
+        "category": "explicit_ai",
+        "routing_weight": 9,
+        "ranking_weight": 9,
+        "case_sensitive": False,
+    },
+    "large_language_model": {
+        "pattern": r"\blarge[- ]language models?\b",
+        "category": "explicit_ai",
+        "routing_weight": 9,
+        "ranking_weight": 9,
+        "case_sensitive": False,
+    },
+    "foundation_model": {
+        "pattern": r"\bfoundation models?\b",
+        "category": "explicit_ai",
+        "routing_weight": 9,
+        "ranking_weight": 9,
+        "case_sensitive": False,
+    },
+    "multimodal_model": {
+        "pattern": r"\bmultimodal models?\b",
+        "category": "explicit_ai",
+        "routing_weight": 9,
+        "ranking_weight": 9,
+        "case_sensitive": False,
+    },
+    "natural_language_processing": {
+        "pattern": r"\bnatural language processing\b",
+        "category": "explicit_ai",
+        "routing_weight": 9,
+        "ranking_weight": 9,
+        "case_sensitive": False,
+    },
+    "reinforcement_learning": {
+        "pattern": r"\breinforcement learning\b",
+        "category": "explicit_ai",
+        "routing_weight": 9,
+        "ranking_weight": 9,
+        "case_sensitive": False,
+    },
+    "supervised_learning": {
+        "pattern": r"\bsupervised learning\b",
+        "category": "explicit_ai",
+        "routing_weight": 9,
+        "ranking_weight": 9,
+        "case_sensitive": False,
+    },
+    "unsupervised_learning": {
+        "pattern": r"\bunsupervised learning\b",
+        "category": "explicit_ai",
+        "routing_weight": 9,
+        "ranking_weight": 9,
+        "case_sensitive": False,
+    },
+    "neural_network": {
+        "pattern": r"\bneural networks?\b",
+        "category": "explicit_ai",
+        "routing_weight": 9,
+        "ranking_weight": 9,
+        "case_sensitive": False,
+    },
+    "adversarial_network": {
+        "pattern": r"\badversarial networks?\b",
+        "category": "explicit_ai",
+        "routing_weight": 8,
+        "ranking_weight": 8,
+        "case_sensitive": False,
+    },
+    "computer_vision": {
+        "pattern": r"\bcomputer vision\b",
+        "category": "ai_method",
+        "routing_weight": 8,
+        "ranking_weight": 8,
+        "case_sensitive": False,
+    },
+    "machine_vision": {
+        "pattern": r"\bmachine vision\b",
+        "category": "ai_method",
+        "routing_weight": 8,
+        "ranking_weight": 8,
+        "case_sensitive": False,
+    },
+    "machine_translation": {
+        "pattern": r"\bmachine translation\b",
+        "category": "ai_method",
+        "routing_weight": 8,
+        "ranking_weight": 8,
+        "case_sensitive": False,
+    },
+    "object_detection": {
+        "pattern": r"\bobject detection\b",
+        "category": "ai_method",
+        "routing_weight": 8,
+        "ranking_weight": 8,
+        "case_sensitive": False,
+    },
+    "object_recognition": {
+        "pattern": r"\bobject recognition\b",
+        "category": "ai_method",
+        "routing_weight": 8,
+        "ranking_weight": 8,
+        "case_sensitive": False,
+    },
+    "speech_recognition": {
+        "pattern": r"\bspeech recognition\b",
+        "category": "ai_method",
+        "routing_weight": 8,
+        "ranking_weight": 8,
+        "case_sensitive": False,
+    },
+    "recommender_system": {
+        "pattern": r"\brecommender systems?\b",
+        "category": "ai_method",
+        "routing_weight": 8,
+        "ranking_weight": 8,
+        "case_sensitive": False,
+    },
+    "ai_chatbot": {
+        "pattern": r"\bAI chatbot\b",
+        "category": "explicit_ai",
+        "routing_weight": 9,
+        "ranking_weight": 9,
+        "case_sensitive": False,
+    },
+    "a_i": {
+        "pattern": r"(?<!\w)A\.I\.(?!\w)",
+        "category": "abbreviation",
+        "routing_weight": 8,
+        "ranking_weight": 8,
+        "case_sensitive": False,
+    },
+    "ai": {
+        "pattern": r"(?<![A-Za-z0-9])AI(?![A-Za-z0-9])",
+        "category": "abbreviation",
+        "routing_weight": 7,
+        "ranking_weight": 7,
+        "case_sensitive": True,
+        "disambiguator": "ai",
+    },
+    "ml": {
+        "pattern": r"(?<!\()(?<![A-Za-z0-9/])ML(?![A-Za-z0-9/])",
+        "category": "abbreviation",
+        "routing_weight": 6,
+        "ranking_weight": 6,
+        "case_sensitive": True,
+    },
+    "nlp": {
+        "pattern": r"(?<![A-Za-z0-9])NLP(?![A-Za-z0-9])",
+        "category": "abbreviation",
+        "routing_weight": 8,
+        "ranking_weight": 8,
+        "case_sensitive": True,
+    },
+    "llm": {
+        "pattern": r"(?<![A-Za-z0-9])LLMs?(?![A-Za-z0-9])",
+        "category": "abbreviation",
+        "routing_weight": 9,
+        "ranking_weight": 9,
+        "case_sensitive": True,
+    },
+    "gpt": {
+        "pattern": r"\bGPT(?:-\d+(?:\.\d+)?)?\b",
+        "category": "named_model",
+        "routing_weight": 9,
+        "ranking_weight": 9,
+        "case_sensitive": False,
+    },
+    "chatgpt": {
+        "pattern": r"\bChatGPT\b",
+        "category": "named_model",
+        "routing_weight": 9,
+        "ranking_weight": 9,
+        "case_sensitive": False,
+    },
+    "claude": {
+        "pattern": r"\bClaude\b",
+        "category": "named_model",
+        "routing_weight": 5,
+        "ranking_weight": 5,
+        "case_sensitive": False,
+        "disambiguator": "claude",
+    },
+    "gemini": {
+        "pattern": r"\bGemini\b",
+        "category": "named_model",
+        "routing_weight": 5,
+        "ranking_weight": 5,
+        "case_sensitive": False,
+        "disambiguator": "gemini",
+    },
+    "copilot": {
+        "pattern": r"\bCopilots?\b",
+        "category": "named_model",
+        "routing_weight": 6,
+        "ranking_weight": 6,
+        "case_sensitive": False,
+        "disambiguator": "copilot",
+    },
+    "decision_tree": {
+        "pattern": r"\bdecision trees?\b",
+        "category": "statistical_method",
+        "routing_weight": 6,
+        "ranking_weight": 5,
+        "case_sensitive": False,
+    },
+    "random_forest": {
+        "pattern": r"\brandom forests?\b",
+        "category": "statistical_method",
+        "routing_weight": 7,
+        "ranking_weight": 6,
+        "case_sensitive": False,
+    },
+    "gradient_boosting": {
+        "pattern": r"\bgradient boosting\b",
+        "category": "statistical_method",
+        "routing_weight": 7,
+        "ranking_weight": 6,
+        "case_sensitive": False,
+    },
+    "support_vector_machine": {
+        "pattern": r"\bsupport vector machines?\b",
+        "category": "statistical_method",
+        "routing_weight": 7,
+        "ranking_weight": 6,
+        "case_sensitive": False,
+    },
+    "kernel_method": {
+        "pattern": r"\bkernel methods?\b",
+        "category": "statistical_method",
+        "routing_weight": 6,
+        "ranking_weight": 5,
+        "case_sensitive": False,
+    },
+    "principal_component_analysis": {
+        "pattern": r"\bprincipal component analysis\b",
+        "category": "statistical_method",
+        "routing_weight": 5,
+        "ranking_weight": 4,
+        "case_sensitive": False,
+    },
+    "latent_dirichlet_allocation": {
+        "pattern": r"\blatent Dirichlet allocation\b",
+        "category": "statistical_method",
+        "routing_weight": 7,
+        "ranking_weight": 6,
+        "case_sensitive": False,
+    },
+    "latent_semantic_analysis": {
+        "pattern": r"\blatent semantic analysis\b",
+        "category": "statistical_method",
+        "routing_weight": 7,
+        "ranking_weight": 6,
+        "case_sensitive": False,
+    },
+    "predictive_model": {
+        "pattern": r"\bpredictive models?\b",
+        "category": "ambiguous",
+        "routing_weight": 4,
+        "ranking_weight": 3,
+        "case_sensitive": False,
+    },
+    "learning_model": {
+        "pattern": r"\blearning models?\b",
+        "category": "ambiguous",
+        "routing_weight": 1,
+        "ranking_weight": 0,
+        "case_sensitive": False,
+        "disambiguator": "learning_model",
+    },
+    "transformer": {
+        "pattern": r"\btransformers?\b",
+        "category": "ambiguous",
+        "routing_weight": 2,
+        "ranking_weight": 1,
+        "case_sensitive": False,
+        "disambiguator": "transformer",
+    },
+    "feature_extraction": {
+        "pattern": r"\bfeature extraction\b",
+        "category": "ambiguous",
+        "routing_weight": 5,
+        "ranking_weight": 4,
+        "case_sensitive": False,
+    },
+    "image_processing": {
+        "pattern": r"\bimage processing\b",
+        "category": "ambiguous",
+        "routing_weight": 5,
+        "ranking_weight": 4,
+        "case_sensitive": False,
+    },
+    "image_recognition": {
+        "pattern": r"\bimage recognition\b",
+        "category": "ai_method",
+        "routing_weight": 7,
+        "ranking_weight": 6,
+        "case_sensitive": False,
+    },
+    "image_segmentation": {
+        "pattern": r"\bimage segmentation\b",
+        "category": "ai_method",
+        "routing_weight": 7,
+        "ranking_weight": 6,
+        "case_sensitive": False,
+    },
+    "pattern_recognition": {
+        "pattern": r"\bpattern recognition\b",
+        "category": "ai_method",
+        "routing_weight": 7,
+        "ranking_weight": 6,
+        "case_sensitive": False,
+    },
+    "recognition_system": {
+        "pattern": r"\brecognition systems?\b",
+        "category": "ambiguous",
+        "routing_weight": 4,
+        "ranking_weight": 3,
+        "case_sensitive": False,
+    },
+    "genetic_algorithm": {
+        "pattern": r"\bgenetic algorithms?\b",
+        "category": "ai_method",
+        "routing_weight": 7,
+        "ranking_weight": 6,
+        "case_sensitive": False,
+    },
+    "opinion_mining": {
+        "pattern": r"\bopinion mining\b",
+        "category": "ai_method",
+        "routing_weight": 7,
+        "ranking_weight": 6,
+        "case_sensitive": False,
+    },
+    "sentiment_analysis": {
+        "pattern": r"\bsentiment analysis\b",
+        "category": "ai_method",
+        "routing_weight": 7,
+        "ranking_weight": 6,
+        "case_sensitive": False,
+    },
+    "sentiment_classification": {
+        "pattern": r"\bsentiment classification\b",
+        "category": "ai_method",
+        "routing_weight": 7,
+        "ranking_weight": 6,
+        "case_sensitive": False,
+    },
+    "text_mining": {
+        "pattern": r"\btext mining\b",
+        "category": "ai_method",
+        "routing_weight": 7,
+        "ranking_weight": 6,
+        "case_sensitive": False,
+    },
+    "word_embedding": {
+        "pattern": r"\bword embeddings?\b",
+        "category": "ai_method",
+        "routing_weight": 8,
+        "ranking_weight": 7,
+        "case_sensitive": False,
+    },
+    "virtual_agent": {
+        "pattern": r"\bvirtual agents?\b",
+        "category": "ambiguous",
+        "routing_weight": 5,
+        "ranking_weight": 4,
+        "case_sensitive": False,
+    },
+    "libsvm": {
+        "pattern": r"\bLibsvm\b",
+        "category": "named_technology",
+        "routing_weight": 8,
+        "ranking_weight": 7,
+        "case_sensitive": False,
+    },
+    "mahout": {
+        "pattern": r"\bMahout\b",
+        "category": "named_technology",
+        "routing_weight": 8,
+        "ranking_weight": 7,
+        "case_sensitive": True,
+    },
+    "opencv": {
+        "pattern": r"\bOpenCV\b",
+        "category": "named_technology",
+        "routing_weight": 8,
+        "ranking_weight": 7,
+        "case_sensitive": True,
+    },
+    "word2vec": {
+        "pattern": r"\bWord2vec\b",
+        "category": "named_technology",
+        "routing_weight": 8,
+        "ranking_weight": 7,
+        "case_sensitive": False,
+    },
+    "xgboost": {
+        "pattern": r"\bXGBoost\b",
+        "category": "named_technology",
+        "routing_weight": 8,
+        "ranking_weight": 7,
+        "case_sensitive": False,
+    },
+    "keras": {
+        "pattern": r"\bkeras\b",
+        "category": "named_technology",
+        "routing_weight": 8,
+        "ranking_weight": 7,
+        "case_sensitive": False,
+    },
+}
+
+# Compatibility alias for callers that only need the published regex strings.
+AI_KEYWORD_PATTERNS = [str(spec["pattern"]) for spec in AI_KEYWORDS.values()]
 
 
-def compile_keyword_patterns(patterns: Sequence[str]) -> re.Pattern[str]:
-    """Compile a case-insensitive union of keyword patterns."""
+@dataclass(frozen=True)
+class KeywordMatch:
+    """One validated dictionary match with routing and ranking metadata."""
 
-    return re.compile(r"(?i:" + "|".join(patterns) + r")")
+    keyword: str
+    category: str
+    routing_weight: int
+    ranking_weight: int
+    start: int
+    end: int
+    text: str
 
 
-AI_KEYWORDS = compile_keyword_patterns(AI_KEYWORD_PATTERNS)
+@dataclass(frozen=True)
+class TextSegment:
+    """One structurally delimited filing segment."""
+
+    text: str
+    section: str
+    position: int
+
+
+@dataclass(frozen=True)
+class AnchorCandidate:
+    """An AI anchor and the internal signals used to rank it."""
+
+    anchor_text: str
+    previous_text: str
+    next_text: str
+    matched_keyword: str
+    keyword_category: str
+    keyword_weight: int
+    routing_weight: int
+    operational_score: int
+    current_use_score: int
+    negation_or_future_score: int
+    section: str
+    position: int
+    match_start: int
+    match_end: int
+    total_score: int
+    quality_band: int
+
+
+ORDERED_AI_KEYWORD_NAMES = sorted(
+    AI_KEYWORDS,
+    key=lambda name: (
+        -int(AI_KEYWORDS[name]["ranking_weight"]),
+        -len(str(AI_KEYWORDS[name]["pattern"])),
+        name,
+    ),
+)
+
+COMPILED_AI_KEYWORD_RULES = {
+    name: re.compile(
+        str(AI_KEYWORDS[name]["pattern"]),
+        0 if bool(AI_KEYWORDS[name].get("case_sensitive", False)) else re.IGNORECASE,
+    )
+    for name in ORDERED_AI_KEYWORD_NAMES
+}
+
+AI_KEYWORD_NAMES_BY_CASE = {
+    case_sensitive: [
+        name
+        for name in ORDERED_AI_KEYWORD_NAMES
+        if bool(AI_KEYWORDS[name].get("case_sensitive", False)) == case_sensitive
+    ]
+    for case_sensitive in (False, True)
+}
+
+
+def _compile_ai_keyword_unions() -> dict[bool, re.Pattern[str]]:
+    """Compile fast case-specific unions derived from the central dictionary."""
+
+    unions: dict[bool, re.Pattern[str]] = {}
+    for case_sensitive in (False, True):
+        patterns = [
+            str(AI_KEYWORDS[name]["pattern"])
+            for name in AI_KEYWORD_NAMES_BY_CASE[case_sensitive]
+        ]
+        unions[case_sensitive] = re.compile(
+            "|".join(patterns),
+            0 if case_sensitive else re.IGNORECASE,
+        )
+    return unions
+
+
+COMPILED_AI_KEYWORDS = _compile_ai_keyword_unions()
 
 # These words help rank snippets. They do not determine the final label.
 # They only make operational evidence more likely to be sent to the LLM.
 OPERATIONAL_CUES = re.compile(
-    r"(?i)\b("
-    r"use|uses|used|using|deploy|deploys|deployed|deployment|implemented|implements|"
-    r"integrated|integrates|embedded|operates|operational|automate|automates|automated|"
-    r"recommend|recommends|detect|detects|forecast|forecasts|predict|predicts|"
-    r"underwrite|underwrites|optimize|optimizes|personalize|personalizes"
-    r")\b"
+    r"(?i)(?:\b(?:"
+    r"use|uses|used|using|utilise|utilises|utilised|utilising|"
+    r"utilize|utilizes|utilized|utilizing|deploy|deploys|deployed|deploying|deployment|"
+    r"implement|implements|implemented|implementing|integrate|integrates|integrated|integrating|"
+    r"incorporate|incorporates|incorporated|incorporating|apply|applies|applied|applying|"
+    r"leverage|leverages|leveraged|leveraging|embed|embeds|embedded|operate|operates|operated|"
+    r"automate|automates|automated|automating|recommend|recommends|detect|detects|detected|"
+    r"forecast|forecasts|forecasting|predict|predicts|predicting|underwrite|underwrites|"
+    r"optimize|optimizes|optimized|optimizing|optimise|optimises|optimised|optimising|"
+    r"personalize|personalizes|personalized|personalizing|personalise|personalises|"
+    r"develop|develops|developed|developing|introduce|introduces|introduced|launch|launches|launched"
+    r")\b|\b(?:powered|enabled)\s+by\b|\bbuilt\s+with\b|\bin\s+production\b)"
 )
 
 # These words are common in risk factors, future plans, or generic discussion.
@@ -138,10 +627,43 @@ OPERATIONAL_CUES = re.compile(
 LOW_VALUE_CUES = re.compile(
     r"(?i)\b("
     r"risk|risks|could|may|might|intend|intends|plan|plans|future|potential|"
-    r"regulation|regulatory|competition|competitors|cybersecurity|pilot|pilots|"
-    r"proof of concept|experiment|experiments|research|trend|trends|market|markets|"
-    r"opportunity|opportunities|demand|partner|partners|partnership|partnerships"
+    r"regulation|regulatory|competition|competitors|cybersecurity|trend|trends|market|markets|"
+    r"opportunity|opportunities|demand"
     r")\b"
+)
+
+FUTURE_OR_HYPOTHETICAL_CUES = re.compile(
+    r"(?i)\b(?:plan(?:s|ned|ning)?\s+to|intend(?:s|ed|ing)?\s+to|expect(?:s|ed|ing)?\s+to|"
+    r"may\s+(?:use|deploy|implement|adopt|apply)|might\s+(?:use|deploy|implement|adopt|apply)|"
+    r"explor(?:e|es|ed|ing)|consider(?:s|ed|ing)?|potential(?:ly)?|in the future|looking forward)\b"
+)
+
+FIRM_CONTEXT_CUES = re.compile(
+    r"(?i)\b(?:we|our|us|the company|company's|company’s|platform|product|products|service|services|"
+    r"operations|employees|customers|clients|workflow|process|processes|system|systems)\b"
+)
+
+PRODUCTION_OR_STRATEGIC_CUES = re.compile(
+    r"(?i)\b(?:in production|production-level|commerciali[sz](?:e|es|ed|ing|ation)|ongoing|"
+    r"revenue|cost savings?|productivity|efficien(?:cy|cies)|strategy|strategic|at scale|enterprise-wide|"
+    r"across (?:the )?(?:business|company|operations)|mission-critical)\b"
+)
+
+INDUSTRY_OR_RISK_CUES = re.compile(
+    r"(?i)\b(?:industry|industries|competitor|competitors|competitive environment|third[- ]party|"
+    r"regulation|regulatory|law|laws|risk|risks|cyberattack|cyber attack|threat actor|market trend)\b"
+)
+
+NEGATION_CUES = re.compile(
+    r"(?i)\b(?:do not|does not|did not|not currently|no current|without)\s+"
+    r"(?:use|using|deploy|deploying|implement|implementing|adopt|adopting|apply|applying|"
+    r"integrate|integrating|incorporate|incorporating|leverage|leveraging)\b"
+)
+
+BACKUP_AUDIT_CUES = re.compile(
+    r"(?i)\b(?:technology|technologies|automation|automated|analytics|algorithm|algorithms|"
+    r"predictive analytics|predictive systems?|intelligent systems?|intelligent automation|"
+    r"data science|decision engine|recommendation engine|computer[- ]assisted|autonomous systems?)\b"
 )
 
 AI_SCORE_LABELS = {
@@ -215,9 +737,35 @@ def stable_unit_interval(value: str) -> float:
 def normalize_whitespace(text: Any) -> str:
     """Convert missing values to empty strings and collapse noisy whitespace."""
 
-    if text is None or (isinstance(text, float) and pd.isna(text)):
+    if text is None:
         return ""
+    try:
+        if bool(pd.isna(text)):
+            return ""
+    except (TypeError, ValueError):
+        pass
     return WHITESPACE_RE.sub(" ", str(text).replace("\x00", " ")).strip()
+
+
+def normalize_structured_text(text: Any) -> str:
+    """Clean filing text while preserving newlines as structural boundaries."""
+
+    if text is None:
+        return ""
+    try:
+        if bool(pd.isna(text)):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    cleaned = str(text).replace("\x00", " ").replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = BULLET_RE.sub("\n", cleaned)
+    cleaned = TABLE_SEPARATOR_RE.sub("\n", cleaned)
+    cleaned = INLINE_LIST_ITEM_RE.sub("\n", cleaned)
+    lines = [
+        HORIZONTAL_WHITESPACE_RE.sub(" ", line).strip() for line in cleaned.split("\n")
+    ]
+    cleaned = "\n".join(lines)
+    return EXCESS_NEWLINES_RE.sub("\n\n", cleaned).strip()
 
 
 def normalize_cik(value: Any) -> str:
@@ -241,9 +789,144 @@ def coerce_bool(value: Any) -> bool:
 
 
 def count_ai_keywords(text: str) -> int:
-    """Count broad AI prefilter keyword hits in filing text."""
+    """Count validated, routing-eligible AI dictionary matches."""
 
-    return sum(1 for _ in AI_KEYWORDS.finditer(text)) if text else 0
+    return len(find_keyword_matches(text))
+
+
+def _local_match_context(text: str, start: int, end: int, radius: int = 220) -> str:
+    """Return compact text around a match for ambiguity checks."""
+
+    return text[max(0, start - radius) : min(len(text), end + radius)]
+
+
+def _keyword_match_allowed(
+    keyword: str,
+    text: str,
+    start: int,
+    end: int,
+) -> bool:
+    """Apply narrow disambiguation rules to otherwise valid regex matches."""
+
+    spec = AI_KEYWORDS[keyword]
+    if int(spec.get("routing_weight", 0)) < MIN_ROUTING_WEIGHT:
+        return False
+    disambiguator = str(spec.get("disambiguator", ""))
+    if not disambiguator:
+        return int(spec.get("routing_weight", 0)) > 0
+
+    context = _local_match_context(text, start, end)
+    if disambiguator == "ai":
+        # SEC demographic tables commonly define AI as American Indian(s).
+        return not bool(
+            re.search(r"\bAI\s*=\s*American Indians?\b", context, re.IGNORECASE)
+        )
+    if disambiguator == "transformer":
+        return bool(
+            re.search(
+                r"(?i)\b(?:AI|ML|artificial intelligence|machine learning|deep learning|neural|"
+                r"attention|encoder|decoder|language model|vision transformer|transformer[- ]based|"
+                r"transformer (?:model|models|architecture|architectures|network|networks))\b",
+                context,
+            )
+        )
+    if disambiguator == "claude":
+        if re.search(r"(?i)\bClaude Bernard\b", context):
+            return False
+        return bool(
+            re.search(
+                r"(?i)\b(?:Anthropic|AI|artificial intelligence|LLM|language model|assistant|chatbot|"
+                r"Claude (?:API|model|models|Sonnet|Haiku|Opus|\d)|"
+                r"(?:use|uses|used|using|deploy|deploys|deployed|integrate|integrates|integrated|"
+                r"implement|implements|implemented|leverage|leverages|leveraged) Claude)\b",
+                context,
+            )
+        )
+    if disambiguator == "gemini":
+        if re.search(r"(?i)\bCap Gemini\b", context):
+            return False
+        return bool(
+            re.search(
+                r"(?i)\b(?:Google|AI|artificial intelligence|generative|LLM|language model|assistant|"
+                r"chatbot|Gemini (?:API|model|models|assistant|\d)|"
+                r"(?:use|uses|used|using|deploy|deploys|deployed|integrate|integrates|integrated|"
+                r"implement|implements|implemented|leverage|leverages|leveraged) Gemini)\b",
+                context,
+            )
+        )
+    if disambiguator == "copilot":
+        return bool(
+            re.search(
+                r"(?i)\b(?:(?:Microsoft|GitHub|AI|artificial intelligence|generative)\b[^.]{0,80}\bCopilots?|"
+                r"Copilots?\s+(?:assistant|software|application|applications|tool|tools)|"
+                r"(?:use|uses|used|using|deploy|deploys|deployed|integrate|integrates|integrated|"
+                r"implement|implements|implemented|leverage|leverages|leveraged) (?:a )?Copilots?)\b",
+                context,
+            )
+        )
+    if disambiguator == "learning_model":
+        # Bare educational/business "learning model" language is not an AI
+        # trigger. A nearby explicit term will route the filing independently.
+        return bool(
+            re.search(
+                r"(?i)\b(?:AI|artificial intelligence|machine learning|deep learning|neural network|"
+                r"language model|LLM)\b",
+                context,
+            )
+        ) and not bool(
+            re.search(
+                r"(?i)\b(?:remote|hybrid|educational|instructional|in-person|school|campus)\s+learning models?\b",
+                context,
+            )
+        )
+    return int(spec.get("routing_weight", 0)) > 0
+
+
+def find_keyword_matches(text: str) -> list[KeywordMatch]:
+    """Find deterministic, non-overlapping matches from the central dictionary."""
+
+    if not text:
+        return []
+
+    candidates: list[KeywordMatch] = []
+    for case_sensitive, union in COMPILED_AI_KEYWORDS.items():
+        rule_names = AI_KEYWORD_NAMES_BY_CASE[case_sensitive]
+        for match in union.finditer(text):
+            keyword = next(
+                name
+                for name in rule_names
+                if COMPILED_AI_KEYWORD_RULES[name].fullmatch(match.group(0))
+            )
+            spec = AI_KEYWORDS[keyword]
+            if not _keyword_match_allowed(keyword, text, match.start(), match.end()):
+                continue
+            candidates.append(
+                KeywordMatch(
+                    keyword=keyword,
+                    category=str(spec["category"]),
+                    routing_weight=int(spec["routing_weight"]),
+                    ranking_weight=int(spec["ranking_weight"]),
+                    start=match.start(),
+                    end=match.end(),
+                    text=match.group(0),
+                )
+            )
+
+    # Resolve overlaps between the case-sensitive and insensitive unions.
+    candidates.sort(
+        key=lambda item: (
+            item.start,
+            -item.ranking_weight,
+            -(item.end - item.start),
+            item.keyword,
+        )
+    )
+    selected: list[KeywordMatch] = []
+    for candidate in candidates:
+        if selected and candidate.start < selected[-1].end:
+            continue
+        selected.append(candidate)
+    return selected
 
 
 def chunk_name_from_id(chunk_id: int) -> str:
@@ -539,7 +1222,7 @@ def long_to_wide(df: pd.DataFrame, include_amended: bool) -> pd.DataFrame:
     work["form_type"] = work["form_type"].astype(str).str.upper().str.strip()
     work["accession_number"] = work["accession_number"].astype(str).str.strip()
     work["cik"] = work["cik"].astype(str).str.strip()
-    work["text"] = work["text"].apply(normalize_whitespace)
+    work["text"] = work["text"].apply(normalize_structured_text)
 
     # Keep annual filings and the two disclosure sections used in the label.
     keep_forms = {"10-K", "10-K/A"} if include_amended else {"10-K"}
@@ -566,7 +1249,7 @@ def long_to_wide(df: pd.DataFrame, include_amended: bool) -> pd.DataFrame:
     # Collapse duplicate section rows, then pivot item1/item7 into columns.
     collapsed = work.groupby(
         ["accession_number", "cik", "year", "form_type", "item"], as_index=False
-    ).agg(text=("text", lambda x: " ".join([t for t in pd.unique(x) if t])))
+    ).agg(text=("text", lambda x: "\n\n".join([t for t in pd.unique(x) if t])))
 
     wide = collapsed.pivot_table(
         index=["accession_number", "cik", "year", "form_type"],
@@ -623,89 +1306,545 @@ def filter_to_lookup(
 # ---------------------------------------------------------------------------
 # Snippet extraction
 # ---------------------------------------------------------------------------
-# Full filings are too long for practical prompting. These functions find
-# AI-related sentences, keep a small context window, and prioritise operational
-# evidence over boilerplate.
-def split_into_sentences(text: str) -> list[str]:
-    """Split text into rough sentences for keyword-window selection."""
+# Full filings are too long for practical prompting. The staged extractor below
+# selects and preserves individual keyword anchors first, then spends only the
+# remaining budget on nearby context. Window size therefore cannot evict an
+# anchor that was already selected.
+def _safe_long_segment_cut(text: str, limit: int) -> int:
+    """Choose a readable cut point without splitting a dictionary expression."""
 
-    text = normalize_whitespace(text)
-    if not text:
+    if len(text) <= limit:
+        return len(text)
+    lower_bound = max(1, int(limit * 0.55))
+    breakpoints = [
+        match.end()
+        for match in re.finditer(r"(?:[,|:]\s+|\s+)", text[: limit + 1])
+        if match.end() >= lower_bound
+    ]
+    cut = breakpoints[-1] if breakpoints else limit
+    for match in find_keyword_matches(text[: limit + 80]):
+        if match.start < cut < match.end:
+            before = text.rfind(" ", lower_bound, match.start)
+            cut = before + 1 if before >= lower_bound else min(match.end, limit)
+            break
+    return max(1, cut)
+
+
+def _split_long_text_unit(text: str) -> list[str]:
+    """Split unusually long SEC list/table units into prompt-safe segments."""
+
+    remaining = normalize_whitespace(text)
+    parts: list[str] = []
+    while len(remaining) > MAX_TEXT_SEGMENT_CHARS:
+        cut = _safe_long_segment_cut(remaining, MAX_TEXT_SEGMENT_CHARS)
+        part = remaining[:cut].strip(" ,|;:")
+        if part:
+            parts.append(part)
+        remaining = remaining[cut:].strip()
+    if remaining:
+        parts.append(remaining)
+    return parts
+
+
+def normalize_and_segment_text(text: str) -> list[TextSegment]:
+    """Preserve filing structure, then create bounded sentence-like segments."""
+
+    structured = normalize_structured_text(text)
+    if not structured:
         return []
-    return [
-        part.strip() for part in SENTENCE_SPLIT_RE.split(text) if part and part.strip()
-    ] or [text]
+
+    segments: list[TextSegment] = []
+    current_section = "unknown"
+    for raw_line in structured.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        heading = SECTION_HEADING_RE.match(line)
+        if heading:
+            item = heading.group("item").lower()
+            current_section = f"item{item}" if item in {"1", "7"} else "other"
+            line = line[heading.end() :].strip()
+            if not line:
+                continue
+        for raw_part in SENTENCE_SPLIT_RE.split(line):
+            part = raw_part.strip()
+            if not part:
+                continue
+            for bounded_part in _split_long_text_unit(part):
+                segments.append(
+                    TextSegment(
+                        text=bounded_part,
+                        section=current_section,
+                        position=len(segments),
+                    )
+                )
+    return segments
+
+
+def split_into_sentences(text: str) -> list[str]:
+    """Compatibility wrapper returning the new structural text segments."""
+
+    return [segment.text for segment in normalize_and_segment_text(text)]
+
+
+def _distance_between_spans(
+    left_start: int,
+    left_end: int,
+    right_start: int,
+    right_end: int,
+) -> int:
+    if left_end < right_start:
+        return right_start - left_end
+    if right_end < left_start:
+        return left_start - right_end
+    return 0
+
+
+def _linked_operational_score(text: str, matches: Sequence[KeywordMatch]) -> int:
+    """Reward operational language only when it is close to an AI match."""
+
+    best_distance: Optional[int] = None
+    for cue in OPERATIONAL_CUES.finditer(text):
+        for match in matches:
+            distance = _distance_between_spans(
+                cue.start(), cue.end(), match.start, match.end
+            )
+            best_distance = (
+                distance if best_distance is None else min(best_distance, distance)
+            )
+    if best_distance is None:
+        return 0
+    if best_distance <= 80:
+        return 6
+    if best_distance <= 180:
+        return 4
+    if best_distance <= 300:
+        return 2
+    return 0
+
+
+def create_anchor_candidates(segments: Sequence[TextSegment]) -> list[AnchorCandidate]:
+    """Create one metadata-rich anchor candidate per matched text segment."""
+
+    candidates: list[AnchorCandidate] = []
+    for index, segment in enumerate(segments):
+        matches = find_keyword_matches(segment.text)
+        if not matches:
+            continue
+        primary = sorted(
+            matches,
+            key=lambda item: (
+                -item.ranking_weight,
+                -item.routing_weight,
+                item.start,
+                item.keyword,
+            ),
+        )[0]
+        operational_score = _linked_operational_score(segment.text, matches)
+        future_or_hypothetical = bool(FUTURE_OR_HYPOTHETICAL_CUES.search(segment.text))
+        low_value = bool(LOW_VALUE_CUES.search(segment.text))
+        industry_or_risk = bool(INDUSTRY_OR_RISK_CUES.search(segment.text))
+        negated_use = bool(NEGATION_CUES.search(segment.text))
+        firm_context = bool(FIRM_CONTEXT_CUES.search(segment.text))
+        production_or_strategic = bool(
+            PRODUCTION_OR_STRATEGIC_CUES.search(segment.text)
+        )
+
+        current_use_score = 0
+        if operational_score and firm_context and not negated_use:
+            current_use_score += 3
+        if production_or_strategic:
+            current_use_score += 3
+        if re.search(
+            r"(?i)\b(?:currently|continue|continues|ongoing|have|has)\b", segment.text
+        ):
+            current_use_score += 1
+
+        negation_or_future_score = 0
+        if future_or_hypothetical:
+            negation_or_future_score -= 4
+        if low_value:
+            negation_or_future_score -= 1 if operational_score else 2
+        if industry_or_risk:
+            negation_or_future_score -= 2 if operational_score else 3
+        if negated_use:
+            negation_or_future_score -= 6
+
+        section_score = 1 if segment.section in {"item1", "item7"} else 0
+        total_score = (
+            primary.ranking_weight * 10
+            + operational_score
+            + current_use_score
+            + negation_or_future_score
+            + section_score
+        )
+        current_link = (
+            operational_score > 0 and not future_or_hypothetical and not negated_use
+        )
+        if current_link and primary.ranking_weight >= 8:
+            quality_band = 4
+        elif current_link:
+            quality_band = 3
+        elif primary.ranking_weight >= 7:
+            quality_band = 2
+        elif negation_or_future_score < 0:
+            quality_band = 1
+        else:
+            quality_band = 0
+
+        candidates.append(
+            AnchorCandidate(
+                anchor_text=segment.text,
+                previous_text=(
+                    segments[index - 1].text
+                    if index > 0 and segments[index - 1].section == segment.section
+                    else ""
+                ),
+                next_text=(
+                    segments[index + 1].text
+                    if index + 1 < len(segments)
+                    and segments[index + 1].section == segment.section
+                    else ""
+                ),
+                matched_keyword=primary.keyword,
+                keyword_category=primary.category,
+                keyword_weight=primary.ranking_weight,
+                routing_weight=primary.routing_weight,
+                operational_score=operational_score,
+                current_use_score=current_use_score,
+                negation_or_future_score=negation_or_future_score,
+                section=segment.section,
+                position=segment.position,
+                match_start=primary.start,
+                match_end=primary.end,
+                total_score=total_score,
+                quality_band=quality_band,
+            )
+        )
+    return candidates
+
+
+def score_anchor_candidates(
+    candidates: Sequence[AnchorCandidate],
+) -> list[AnchorCandidate]:
+    """Return candidates in deterministic evidence-priority order."""
+
+    return sorted(
+        candidates,
+        key=lambda candidate: (
+            -candidate.quality_band,
+            -candidate.total_score,
+            -candidate.keyword_weight,
+            -candidate.routing_weight,
+            -len(candidate.anchor_text),
+            candidate.position,
+        ),
+    )
+
+
+def _dedupe_tokens(text: str) -> list[str]:
+    """Normalize common filing noise for exact and near-duplicate checks."""
+
+    cleaned = re.sub(
+        r"(?i)\b(?:table of contents|index to form 10-k|index to fs)\b", " ", text
+    )
+    tokens = re.findall(r"[a-z]+", normalize_whitespace(cleaned).lower())
+    ignored = {"the", "we", "our", "company"}
+    canonical = {
+        "uses": "use",
+        "used": "use",
+        "using": "use",
+        "utilises": "utilise",
+        "utilised": "utilise",
+        "utilising": "utilise",
+        "utilizes": "utilize",
+        "utilized": "utilize",
+        "utilizing": "utilize",
+    }
+    return [canonical.get(token, token) for token in tokens if token not in ignored]
+
+
+def _near_duplicate_text(left: str, right: str) -> bool:
+    """Detect lightweight sentence-level near duplicates without dependencies."""
+
+    left_tokens = _dedupe_tokens(left)
+    right_tokens = _dedupe_tokens(right)
+    if left_tokens == right_tokens:
+        return True
+    if min(len(left_tokens), len(right_tokens)) < 8:
+        return False
+    length_ratio = min(len(left_tokens), len(right_tokens)) / max(
+        len(left_tokens), len(right_tokens)
+    )
+    if length_ratio < 0.65:
+        return False
+    left_set, right_set = set(left_tokens), set(right_tokens)
+    jaccard = len(left_set & right_set) / max(1, len(left_set | right_set))
+    shared_prefix = left_tokens[:12] == right_tokens[:12]
+    sequence_ratio = SequenceMatcher(None, left_tokens, right_tokens).ratio()
+    return (
+        jaccard >= 0.82
+        or sequence_ratio >= 0.84
+        or (shared_prefix and length_ratio >= 0.75)
+    )
+
+
+def deduplicate_candidates(
+    candidates: Sequence[AnchorCandidate],
+) -> list[AnchorCandidate]:
+    """Keep the strongest/most complete representative of repeated disclosure."""
+
+    kept: list[AnchorCandidate] = []
+    for candidate in score_anchor_candidates(candidates):
+        if any(
+            _near_duplicate_text(candidate.anchor_text, existing.anchor_text)
+            for existing in kept
+        ):
+            continue
+        kept.append(candidate)
+    return kept
+
+
+def _crop_text_around_span(text: str, start: int, end: int, limit: int) -> str:
+    """Crop an oversized anchor around its keyword without cutting the anchor."""
+
+    if len(text) <= limit:
+        return text
+    if limit <= 0:
+        return ""
+    match_mid = (start + end) // 2
+    crop_start = max(0, match_mid - limit // 2)
+    crop_end = min(len(text), crop_start + limit)
+    crop_start = max(0, crop_end - limit)
+    if crop_start:
+        next_space = text.find(" ", crop_start, min(len(text), crop_start + 60))
+        if next_space != -1 and next_space < start:
+            crop_start = next_space + 1
+    if crop_end < len(text):
+        previous_space = text.rfind(" ", max(crop_start, crop_end - 60), crop_end)
+        if previous_space > end:
+            crop_end = previous_space
+    prefix = "... " if crop_start else ""
+    suffix = " ..." if crop_end < len(text) else ""
+    available = max(0, limit - len(prefix) - len(suffix))
+    return (prefix + text[crop_start : crop_start + available].strip() + suffix)[:limit]
+
+
+def select_anchor_sentences(
+    candidates: Sequence[AnchorCandidate], max_chars: int
+) -> list[AnchorCandidate]:
+    """Select anchors first, independently of the requested context window."""
+
+    if max_chars <= 0:
+        return []
+    selected: list[AnchorCandidate] = []
+    used = 0
+    for candidate in score_anchor_candidates(candidates):
+        separator_chars = 2 if selected else 0
+        available = max_chars - used - separator_chars
+        if available <= 0:
+            break
+        anchor_text = candidate.anchor_text
+        if len(anchor_text) > available:
+            if selected:
+                continue
+            anchor_text = _crop_text_around_span(
+                anchor_text,
+                candidate.match_start,
+                candidate.match_end,
+                available,
+            )
+        selected.append(replace(candidate, anchor_text=anchor_text))
+        used += separator_chars + len(anchor_text)
+    return selected
+
+
+def _context_excerpt(text: str, limit: int, *, take_tail: bool) -> str:
+    """Trim context at word boundaries while keeping the side nearest the anchor."""
+
+    if len(text) <= limit:
+        return text
+    if take_tail:
+        start = max(0, len(text) - limit)
+        boundary = text.find(" ", start, min(len(text), start + 60))
+        start = boundary + 1 if boundary != -1 else start
+        return ("... " + text[start:].strip())[:limit]
+    end = min(len(text), limit)
+    boundary = text.rfind(" ", max(0, end - 60), end)
+    end = boundary if boundary > 0 else end
+    return (text[:end].strip() + " ...")[:limit]
+
+
+def add_context_within_budget(
+    selected: Sequence[AnchorCandidate],
+    segments: Sequence[TextSegment],
+    max_chars: int,
+    sentence_window: int,
+) -> list[str]:
+    """Add useful neighbouring segments without changing the selected anchors."""
+
+    if not selected:
+        return []
+    pieces: list[tuple[int, int, str]] = [
+        (candidate.position, 1, candidate.anchor_text) for candidate in selected
+    ]
+    used = sum(len(text) for _, _, text in pieces) + 2 * (len(pieces) - 1)
+    if sentence_window <= 0 or used >= max_chars:
+        return [text for _, _, text in sorted(pieces)]
+
+    selected_positions = {candidate.position for candidate in selected}
+    seen_texts = [candidate.anchor_text for candidate in selected]
+    ranked_selected = score_anchor_candidates(selected)
+    for candidate in ranked_selected:
+        for distance in range(1, sentence_window + 1):
+            for direction in (-1, 1):  # previous before next, as documented
+                position = candidate.position + direction * distance
+                if position < 0 or position >= len(segments):
+                    continue
+                if position in selected_positions:
+                    continue
+                context_segment = segments[position]
+                if context_segment.section != candidate.section:
+                    continue
+                context_text = context_segment.text
+                if any(_near_duplicate_text(context_text, seen) for seen in seen_texts):
+                    continue
+                remaining = max_chars - used - 2
+                if remaining <= 0:
+                    return [text for _, _, text in sorted(pieces)]
+                if (
+                    len(context_text) > remaining
+                    and remaining < MIN_TRUNCATED_CONTEXT_CHARS
+                ):
+                    continue
+                context_text = _context_excerpt(
+                    context_text,
+                    min(MAX_CONTEXT_SEGMENT_CHARS, remaining),
+                    take_tail=direction < 0,
+                )
+                pieces.append((position, 0 if direction < 0 else 2, context_text))
+                seen_texts.append(context_text)
+                used += 2 + len(context_text)
+    return [text for _, _, text in sorted(pieces)]
+
+
+def build_final_extraction(parts: Sequence[str], max_chars: int) -> str:
+    """Join already-budgeted extraction parts deterministically."""
+
+    return "\n\n".join(part.strip() for part in parts if part.strip())[
+        :max_chars
+    ].strip()
+
+
+def _positional_excerpt(text: str, limit: int, position: str) -> str:
+    """Take a beginning, middle, or ending excerpt from one structural segment."""
+
+    if len(text) <= limit:
+        return text
+    if position == "end":
+        return _context_excerpt(text, limit, take_tail=True)
+    if position == "middle":
+        start = max(0, (len(text) - limit) // 2)
+        return normalize_whitespace(text[start : start + limit])
+    return _context_excerpt(text, limit, take_tail=False)
+
+
+def run_no_keyword_audit_if_needed(
+    segments: Sequence[TextSegment], max_chars: int
+) -> str:
+    """Build a distributed audit excerpt when the primary dictionary has no hit."""
+
+    if not segments or max_chars <= 0:
+        return ""
+
+    proxy_candidates: list[tuple[int, int, str, int, int]] = []
+    for segment in segments:
+        proxy_matches = list(BACKUP_AUDIT_CUES.finditer(segment.text))
+        if not proxy_matches:
+            continue
+        operational = 2 if OPERATIONAL_CUES.search(segment.text) else 0
+        firm_context = 2 if FIRM_CONTEXT_CUES.search(segment.text) else 0
+        section_score = 1 if segment.section in {"item1", "item7"} else 0
+        score = (
+            min(12, len(proxy_matches) * 3) + operational + firm_context + section_score
+        )
+        first = proxy_matches[0]
+        proxy_candidates.append(
+            (score, segment.position, segment.text, first.start(), first.end())
+        )
+
+    pieces: list[tuple[int, str]] = []
+    seen: list[str] = []
+    used = 0
+    proxy_budget = int(max_chars * 0.6)
+    for _, position, text, start, end in sorted(
+        proxy_candidates, key=lambda item: (-item[0], item[1])
+    ):
+        excerpt = _crop_text_around_span(
+            text, start, end, min(MAX_TEXT_SEGMENT_CHARS, proxy_budget)
+        )
+        if any(_near_duplicate_text(excerpt, existing) for existing in seen):
+            continue
+        separator_chars = 2 if pieces else 0
+        if used + separator_chars + len(excerpt) > proxy_budget:
+            continue
+        pieces.append((position, excerpt))
+        seen.append(excerpt)
+        used += separator_chars + len(excerpt)
+
+    # Always sample structurally distinct beginning, middle, and end positions.
+    coverage_positions = [
+        (0, "beginning"),
+        (len(segments) // 2, "middle"),
+        (len(segments) - 1, "end"),
+    ]
+    unique_coverage: list[tuple[int, str]] = []
+    seen_positions: set[int] = set()
+    for position, label in coverage_positions:
+        if position not in seen_positions:
+            unique_coverage.append((position, label))
+            seen_positions.add(position)
+
+    for offset, (position, label) in enumerate(unique_coverage):
+        remaining_slots = len(unique_coverage) - offset
+        remaining = max_chars - used - (2 if pieces else 0)
+        if remaining <= 0:
+            break
+        allocation = max(1, remaining // remaining_slots)
+        excerpt = _positional_excerpt(
+            segments[position].text,
+            min(MAX_TEXT_SEGMENT_CHARS, allocation),
+            "end" if label == "end" else label,
+        )
+        if any(_near_duplicate_text(excerpt, existing) for existing in seen):
+            continue
+        pieces.append((position, excerpt))
+        seen.append(excerpt)
+        used += (2 if len(pieces) > 1 else 0) + len(excerpt)
+
+    return build_final_extraction([text for _, text in sorted(pieces)], max_chars)
 
 
 def extract_relevant_snippets(
     full_text: str, max_chars: int, sentence_window: int
 ) -> str:
-    """Extract a prompt-sized excerpt from the filing text."""
+    """Extract anchor-first AI evidence and then add budgeted context."""
 
-    full_text = normalize_whitespace(full_text)
-    if not full_text:
+    segments = normalize_and_segment_text(full_text)
+    if not segments:
         return ""
-
-    sentences = split_into_sentences(full_text)
-    hit_idx = [
-        i for i, sentence in enumerate(sentences) if AI_KEYWORDS.search(sentence)
-    ]
-    if not hit_idx:
-        return full_text[:max_chars]
-
-    # Build context windows around every AI keyword hit.
-    windows = []
-    for idx in hit_idx:
-        lo = max(0, idx - sentence_window)
-        hi = min(len(sentences), idx + sentence_window + 1)
-        indices = list(range(lo, hi))
-        window_text = " ".join(sentences[i] for i in indices)
-        # Rank windows with operational cues above risk/future-looking text.
-        score = 0
-        if OPERATIONAL_CUES.search(window_text):
-            score += 4
-        if OPERATIONAL_CUES.search(sentences[idx]):
-            score += 2
-        if LOW_VALUE_CUES.search(sentences[idx]):
-            score -= 2
-        if LOW_VALUE_CUES.search(window_text):
-            score -= 1
-        windows.append((score, idx, indices))
-
-    windows.sort(key=lambda item: (-item[0], item[1]))
-
-    # Select best-ranked windows without repeating sentences.
-    selected = set()
-    approx_chars = 0
-    for _, _, indices in windows:
-        new_indices = [i for i in indices if i not in selected]
-        if not new_indices:
-            continue
-        new_chars = sum(len(sentences[i]) for i in new_indices) + 2 * len(new_indices)
-        if approx_chars and approx_chars + new_chars > max_chars:
-            continue
-        selected.update(new_indices)
-        approx_chars += new_chars
-        if approx_chars >= max_chars:
-            break
-
-    # Return selected sentences in original filing order for readability.
-    chunks: list[str] = []
-    used = 0
-    last_i = None
-    for i in sorted(selected):
-        prefix = " " if chunks and last_i is not None and i == last_i + 1 else "\n\n"
-        candidate = (prefix + sentences[i]) if chunks else sentences[i]
-        if used + len(candidate) > max_chars:
-            remaining = max_chars - used
-            if remaining > 150:
-                chunks.append(candidate[:remaining].rstrip())
-            break
-        chunks.append(candidate)
-        used += len(candidate)
-        last_i = i
-
-    return "".join(chunks).strip() or full_text[:max_chars]
+    candidates = create_anchor_candidates(segments)
+    if not candidates:
+        return run_no_keyword_audit_if_needed(segments, max_chars)
+    deduplicated = deduplicate_candidates(candidates)
+    selected = select_anchor_sentences(deduplicated, max_chars)
+    parts = add_context_within_budget(
+        selected,
+        segments,
+        max_chars,
+        sentence_window,
+    )
+    return build_final_extraction(parts, max_chars)
 
 
 # ---------------------------------------------------------------------------
@@ -1129,7 +2268,7 @@ def prepare_records_and_prompts(
         # Work out whether this filing should be skipped, audited, or sent to
         # the LLM.
         accession = str(row.get("accession_number", "")).strip()
-        full_text = normalize_whitespace(row.get("combined_text", ""))
+        full_text = normalize_structured_text(row.get("combined_text", ""))
         keyword_hits = count_ai_keywords(full_text)
 
         # Audit mode sends a stable sample of no-keyword filings to the LLM so

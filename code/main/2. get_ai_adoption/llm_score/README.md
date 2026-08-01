@@ -34,7 +34,7 @@ The pipeline is now frozen as:
 
 ```text
 research_profile = llm_extraction_ai_1to3_v2
-script_version   = 2026-08-01-llm_extraction_v4
+script_version   = 2026-08-01-llm_extraction_v5
 prompt_version   = llm_extraction_claude_v2
 ```
 
@@ -95,24 +95,22 @@ By default it keeps only `10-K`. Use `--include-amended` to include `10-K/A`.
 
 ## Prefilter Design
 
-The pipeline now uses one shared published dictionary:
+`AI_KEYWORDS` is the single published source of truth for AI terminology. Each
+entry carries its category, routing weight, ranking weight, case policy, and an
+optional ambiguity check. Routing and ranking therefore use the same auditable
+dictionary without treating every term as equally precise.
 
-1. `AI_KEYWORD_PATTERNS`
-   This single keyword list is used for both the hard-zero prefilter and
-   identifying candidate sentences for snippet ranking.
+Explicit terms such as `artificial intelligence`, `machine learning`, and
+`large language model` receive high routing and ranking weights. Ambiguous terms
+such as `transformer`, `Claude`, and `Gemini` must pass local context checks and
+receive lower ranking priority. Bare `learning model` has a non-routing weight;
+it can appear only as context around a separately validated AI anchor.
 
-This keeps the process simpler and easier to document. A filing is sent to the
-LLM only if this shared dictionary appears in the filing text, and the same
-dictionary is used to find candidate sentences for excerpt construction. The
-list is based on explicit AI, ML, and model-method terminology such as
-`artificial intelligence`, `machine learning`, `computer vision`,
-`natural language processing`, `neural networks`, `transformer`,
-`reinforcement learning`, `OpenCV`, `XGBoost`, and `Word2vec`.
-
-The one place where the implementation is intentionally stricter than the raw
-term list is standalone `ML`: the code still counts `ML`, but it guards
-against obvious false positives such as `mg/ml` dosage units or company initials
-written as `(ML)`.
+Abbreviations are compiled independently. Standalone `AI`, `ML`, `NLP`, and
+`LLM` use case-sensitive token boundaries, so dosage units such as `5 mL` do
+not match `ML`. Known non-AI meanings such as `AI = American Indians`,
+electrical transformers, remote learning models, and `Claude Bernard` are
+excluded by deterministic disambiguation rules.
 
 Recommended production mode:
 
@@ -130,15 +128,24 @@ Recommended audit mode for validation:
 
 The model does not receive the full filing. The code:
 
-1. normalizes whitespace
-2. splits into sentence-like segments
-3. finds AI-ranked sentences
-4. adds nearby context with `sentence_window`
-5. scores windows using operational and low-value cues
-6. returns the best excerpt up to `max_prompt_chars`
+1. preserves newlines, bullets, section headings, and list separators
+2. creates bounded structural segments and protects against unusually long lists
+3. finds validated dictionary matches with keyword-specific metadata
+4. creates and scores individual anchor candidates
+5. detects operational language only when it is close to an AI term
+6. removes exact and near-duplicate disclosure
+7. selects distinct anchors first using the available character budget
+8. adds preceding and following context only with the remaining budget
+9. returns the final excerpt in deterministic filing order
 
-This keeps the prompt short enough for smaller instruct models while preserving
-the most relevant context.
+The selected anchors are independent of `sentence_window`: increasing the
+window can add context, but it cannot remove an anchor. Context is truncated or
+omitted before direct AI evidence is discarded.
+
+For sampled no-keyword audits, the extractor ranks broader technology,
+automation, analytics, algorithm, and intelligent-system proxy segments and
+also samples the beginning, middle, and end of the filing. It no longer audits
+only the first `max_prompt_chars` characters.
 
 ## Prompt Design
 
