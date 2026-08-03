@@ -207,6 +207,11 @@ llm_extraction_filing_master.csv
 llm_extraction_firm_year_panel.csv
 ```
 
+If an accession boundary from an older extraction run placed Item 1 and Item 7
+in adjacent chunks, the merger coalesces those complementary rows when their
+scores agree. True overlaps and conflicting fragment scores still stop the
+merge and are written to `filing_accession_duplicates.csv` for review.
+
 Important output fields:
 
 ```text
