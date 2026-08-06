@@ -8,7 +8,8 @@
 # 2. compare firm characteristics by adoption status;
 # 3. summarise pre-treatment balance; and
 # 4. trace AI-score evolution in key sectors; and
-# 5. compare pre-treatment characteristic distributions for adopters and non-adopters.
+# 5. compare pre-treatment characteristic distributions for adopters and non-adopters; and
+# 6. compare contemporaneous firm-characteristic distributions by AI-adoption status.
 # ------------------------------------------------------------------------------
 
 source("code/config/global_settings.R")
@@ -32,6 +33,10 @@ KEY_SECTOR_SCORE_PNG <- file.path(
   SUMMARY_STATS_OUTPUT_DIR,
   "ai_score_evolution_key_sectors.png"
 )
+ADOPTION_STATUS_DISTRIBUTION_PNG <- file.path(
+  SUMMARY_STATS_OUTPUT_DIR,
+  "firm_characteristic_distributions_by_ai_adoption.png"
+)
 
 SAVE_SUMMARY_BUNDLE <- TRUE
 SAVE_SUMMARY_FIGURES <- TRUE
@@ -52,6 +57,14 @@ KEY_DISTRIBUTION_LABELS <- c(
   roa = "ROA",
   cash_ratio = "Cash ratio",
   leverage = "Leverage"
+)
+
+ADOPTION_STATUS_DISTRIBUTION_LABELS <- c(
+  log_at = "Firm size (log assets)",
+  log_labor_productivity = "Labour productivity (log)",
+  log_emp = "Employment (log)",
+  log_avg_wage = "Average wage (log)",
+  rd_intensity_y_w = "R&D activity (winsorized intensity)"
 )
 
 
@@ -131,6 +144,58 @@ group_summary_table <- function(data, vars, labels) {
     round_numeric_cols()
 }
 
+firm_char_density_plot <- function(data, vars, labels) {
+  plot_data <- data |>
+    filter(ai_adopted %in% c(0L, 1L)) |>
+    mutate(
+      adoption_group = factor(
+        ai_adopted,
+        levels = c(0L, 1L),
+        labels = c("Non-adopter", "AI adopter")
+      )
+    ) |>
+    select(adoption_group, all_of(vars)) |>
+    pivot_longer(
+      cols = all_of(vars),
+      names_to = "characteristic",
+      values_to = "value"
+    ) |>
+    filter(!is.na(value)) |>
+    mutate(
+      characteristic = factor(
+        recode(characteristic, !!!labels),
+        levels = unname(labels[vars])
+      )
+    )
+
+  ggplot(
+    plot_data,
+    aes(x = value, fill = adoption_group, colour = adoption_group)
+  ) +
+    geom_density(alpha = 0.22, linewidth = 0.9, adjust = 1.05) +
+    facet_wrap(~ characteristic, scales = "free", ncol = 2) +
+    scale_colour_manual(
+      values = c("Non-adopter" = "#9E9E9E", "AI adopter" = "#2C7FB8"),
+      name = NULL
+    ) +
+    scale_fill_manual(
+      values = c("Non-adopter" = "#9E9E9E", "AI adopter" = "#2C7FB8"),
+      name = NULL
+    ) +
+    labs(
+      title = "Distribution of firm characteristics by AI adoption",
+      subtitle = "Firm-year observations classified by contemporaneous AI-adoption status",
+      x = NULL,
+      y = "Density"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "bottom",
+      panel.grid.minor = element_blank(),
+      panel.grid.major.y = element_blank()
+    )
+}
+
 balance_table <- function(data, vars, labels) {
   data |>
     mutate(balance_group = if_else(ever_treated == 1L, "treated", "control")) |>
@@ -183,6 +248,7 @@ if (!file.exists(ANALYSIS_PANEL_RDS)) {
 
 panel_summary <- readRDS(ANALYSIS_PANEL_RDS) |>
   mutate(
+    year = as.integer(year),
     repurchases = case_when(
       is.na(prstkc) ~ 0,
       prstkc < 0 ~ NA_real_,
@@ -200,6 +266,11 @@ panel_summary <- readRDS(ANALYSIS_PANEL_RDS) |>
       NA_real_
     ),
     ever_treated = as.integer(ai_adoption_year > 0L)
+  ) |>
+  filter(
+    !is.na(year),
+    year >= ANALYSIS_START_YEAR,
+    year <= ANALYSIS_END_YEAR
   )
 
 
@@ -244,6 +315,12 @@ firm_char_summary_wide <- firm_char_summary |>
     names_glue = "ai_{ai_adopted}_{.value}"
   ) |>
   arrange(characteristic)
+
+p_firm_char_distributions_by_adoption <- firm_char_density_plot(
+  panel_summary,
+  names(ADOPTION_STATUS_DISTRIBUTION_LABELS),
+  ADOPTION_STATUS_DISTRIBUTION_LABELS
+)
 
 
 # ---- AI score mix by year ----------------------------------------------------
@@ -458,6 +535,7 @@ summary_stats_bundle <- list(
   pre_treatment_balance = pre_treatment_balance,
   key_distribution_data = key_distribution_data,
   p_ai_score_share_by_year = p_ai_score_share_by_year,
+  p_firm_char_distributions_by_adoption = p_firm_char_distributions_by_adoption,
   p_key_variable_distributions = p_key_variable_distributions
 )
 
@@ -482,6 +560,13 @@ if (SAVE_SUMMARY_FIGURES) {
     height = 8,
     dpi = 300
   )
+  ggsave(
+    filename = ADOPTION_STATUS_DISTRIBUTION_PNG,
+    plot = p_firm_char_distributions_by_adoption,
+    width = 11,
+    height = 8,
+    dpi = 300
+  )
 }
 
 
@@ -497,4 +582,5 @@ if (SAVE_SUMMARY_BUNDLE) {
 if (SAVE_SUMMARY_FIGURES) {
   cat("Saved key distribution figure to:", KEY_DISTRIBUTION_PNG, "\n")
   cat("Saved key sector score figure to:", KEY_SECTOR_SCORE_PNG, "\n")
+  cat("Saved adoption-status distribution figure to:", ADOPTION_STATUS_DISTRIBUTION_PNG, "\n")
 }

@@ -141,8 +141,17 @@ message("Chunk size: ", CHUNK_SIZE)
 # PROCESS IN CHUNKS
 # =========================================================
 
-chunk_ids <- ceiling(seq_len(nrow(files_dt)) / CHUNK_SIZE)
-n_chunks <- max(chunk_ids)
+# Assign whole accessions to chunks. Item 1 and Item 7 are separate rows in
+# files_dt, so cutting every CHUNK_SIZE rows can otherwise split one filing
+# across two adjacent chunk files.
+accession_chunks <- files_dt[, .N, by = accession_number]
+accession_chunks[, chunk_id := ceiling(cumsum(N) / CHUNK_SIZE)]
+files_dt[
+  accession_chunks,
+  chunk_id := i.chunk_id,
+  on = "accession_number"
+]
+n_chunks <- max(files_dt$chunk_id)
 
 chunk_files <- character(n_chunks)
 
@@ -151,11 +160,11 @@ t0 <- Sys.time()
 for (i in seq_len(n_chunks)) {
   message(sprintf("Processing chunk %d / %d", i, n_chunks))
   
-  chunk_dt <- files_dt[chunk_ids == i]
+  chunk_dt <- files_dt[chunk_id == i]
   
   chunk_dt <- read_chunk_parallel(chunk_dt, n_cores = N_CORES)
   
-  chunk_dt[, path := NULL]
+  chunk_dt[, c("path", "chunk_id") := NULL]
   
   chunk_file <- file.path(
     OUT_DIR,

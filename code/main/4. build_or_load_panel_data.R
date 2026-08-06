@@ -17,10 +17,10 @@
 #   source("code/main/4. build_or_load_panel_data.R")
 #
 # Refresh Compustat from WRDS while rebuilding the annual panel:
-#   BUILD_PANEL_DATA <- TRUE
-#   REBUILD_ANNUAL_PANEL <- TRUE
-#   REFRESH_FROM_WRDS <- TRUE
-#   source("code/main/4. build_or_load_panel_data.R")
+   BUILD_PANEL_DATA <- TRUE
+   REBUILD_ANNUAL_PANEL <- TRUE
+   REFRESH_FROM_WRDS <- TRUE
+   source("code/main/4. build_or_load_panel_data.R")
 # ------------------------------------------------------------------------------
 
 source("code/config/global_settings.R")
@@ -58,7 +58,7 @@ if (!exists("OUTPUT_MATCHED_PANEL_RDS", inherits = FALSE)) {
   OUTPUT_MATCHED_PANEL_RDS <- MATCHED_PANEL_RDS
 }
 if (!exists("AI_ADOPTION_FILE", inherits = FALSE)) {
-  AI_ADOPTION_FILE <- file.path(INPUT_DIR, "llm_score", "ai_adoption_firm_year_panel.csv")
+  AI_ADOPTION_FILE <- file.path(INPUT_DIR, "llm_score", "llm_extraction_firm_year_panel.csv")
 }
 
 

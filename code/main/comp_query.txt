@@ -20,6 +20,7 @@ SELECT
     c.loc,
     c.incorp,
     c.state,
+    first_obs.first_compustat_fyear,
 
 
     f.act,
@@ -47,6 +48,16 @@ FROM comp.funda AS f
 
 LEFT JOIN comp.company AS c
     ON f.gvkey = c.gvkey
+
+LEFT JOIN (
+    SELECT
+        gvkey,
+        MIN(fyear) AS first_compustat_fyear
+    FROM comp.funda
+    WHERE fyear IS NOT NULL
+    GROUP BY gvkey
+) AS first_obs
+    ON f.gvkey = first_obs.gvkey
 
 WHERE f.indfmt = 'INDL'
   AND f.datafmt = 'STD'

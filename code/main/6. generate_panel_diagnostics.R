@@ -128,7 +128,11 @@ panel_window <- panel_all |>
     ai_score = as.integer(ai_score),
     ai_adopted = as.integer(ai_adopted)
   ) |>
-  filter(!is.na(cik), cik != "", !is.na(year)) |>
+  filter(
+    !is.na(cik), cik != "", !is.na(year),
+    year >= ANALYSIS_START_YEAR,
+    year <= ANALYSIS_END_YEAR
+  ) |>
   arrange(cik, year)
 
 panel_diag <- panel_analysis |>
@@ -140,7 +144,11 @@ panel_diag <- panel_analysis |>
     ai_adopted = as.integer(ai_adopted),
     ai_adoption_year = as.integer(ai_adoption_year)
   ) |>
-  filter(!is.na(cik), cik != "", !is.na(year), !is.na(ai_adopted)) |>
+  filter(
+    !is.na(cik), cik != "", !is.na(year), !is.na(ai_adopted),
+    year >= ANALYSIS_START_YEAR,
+    year <= ANALYSIS_END_YEAR
+  ) |>
   arrange(cik, year)
 
 panel_filtered_compustat <- build_final_analysis_panel(panel_window) |>
@@ -149,7 +157,11 @@ panel_filtered_compustat <- build_final_analysis_panel(panel_window) |>
     year = as.integer(year),
     ai_score = as.integer(ai_score)
   ) |>
-  filter(!is.na(cik), cik != "", !is.na(year)) |>
+  filter(
+    !is.na(cik), cik != "", !is.na(year),
+    year >= ANALYSIS_START_YEAR,
+    year <= ANALYSIS_END_YEAR
+  ) |>
   arrange(cik, year)
 
 if (!file.exists(EDGAR_PANEL_CSV)) {
