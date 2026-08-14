@@ -2,8 +2,8 @@
 """Bulk LLM scoring for filing-level AI adoption.
 
 The process scores firm-level AI adoption from SEC Form 10-K disclosures.
-It reads EDGAR extract chunks from the Data Workspace team S3 folder, 
-converts Item 1 and Item 7 text into one row per filing,
+It reads EDGAR whole-filing keyword-window chunks from the Data Workspace team
+S3 folder and combines them into one row per filing,
 optionally filters to a research lookup of `cik` and `year`, 
 and sends relevant filing text sections to AWS Bedrock via the Data Workspace
 bedrock proxy.
@@ -95,11 +95,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="CSV with cik and year columns. Only matching filings are labeled.",
     )
     ap.add_argument(
-        "--include-amended",
-        action="store_true",
-        help="Include 10-K/A rows. Default keeps only 10-K.",
+        "--max-analysis-year",
+        type=int,
+        default=u.DEFAULT_MAX_ANALYSIS_YEAR,
+        help="Exclude later filing years before scoring; 0 disables the limit.",
     )
-
     # Prefilter options decide when no-keyword filings should skip the LLM.
     ap.add_argument(
         "--prefilter-mode",
@@ -120,7 +120,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=u.MODEL_NAME,
         help="Bedrock model_id, e.g. eu.anthropic.claude-haiku-4-5-20251001-v1:0 or eu.anthropic.claude-sonnet-4-6.",
     )
-    ap.add_argument("--max-prompt-chars", type=int, default=u.DEFAULT_MAX_PROMPT_CHARS)
+    ap.add_argument(
+        "--max-prompt-chars",
+        type=int,
+        default=u.DEFAULT_MAX_PROMPT_CHARS,
+        help=(
+            "Maximum filing-evidence characters sent per request; "
+            "0 sends all extracted keyword windows for the filing."
+        ),
+    )
     ap.add_argument("--sentence-window", type=int, default=u.DEFAULT_SENTENCE_WINDOW)
     ap.add_argument(
         "--max-workers",
@@ -158,8 +166,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         ap.error("--max-chunks must be >= 0")
     if args.max_filings_per_chunk < 0:
         ap.error("--max-filings-per-chunk must be >= 0")
-    if args.max_prompt_chars <= 0:
-        ap.error("--max-prompt-chars must be > 0")
+    if args.max_analysis_year < 0:
+        ap.error("--max-analysis-year must be >= 0")
+    if args.max_prompt_chars < 0:
+        ap.error("--max-prompt-chars must be >= 0")
     if args.sentence_window < 0:
         ap.error("--sentence-window must be >= 0")
     if not 0.0 <= args.prefilter_audit_rate <= 1.0:
@@ -281,6 +291,8 @@ def rebuild_snippet_audit(
 MANIFEST_METRIC_FIELDS = [
     "n_filings",
     "n_llm_called",
+    "n_scored",
+    "n_unscored",
     "n_score_1",
     "n_score_2",
     "n_score_3",
@@ -296,6 +308,29 @@ def manifest_metrics(summary: dict[str, object]) -> dict[str, object]:
     return {
         field: summary[field] for field in MANIFEST_METRIC_FIELDS if field in summary
     }
+
+
+FAILURE_MANIFEST_STATUSES = {
+    "failed",
+    "partial_failure",
+    "repair_failed",
+    "repair_partial_failure",
+    "repair_no_rerunnable_rows",
+}
+
+
+def manifest_exit_code(rows: Sequence[dict[str, object]]) -> int:
+    """Return nonzero when a run or repair manifest contains unresolved failure."""
+
+    return int(
+        any(str(row.get("status", "")) in FAILURE_MANIFEST_STATUSES for row in rows)
+    )
+
+
+def chunk_status_from_summary(summary: dict[str, object]) -> str:
+    """Mark a written chunk incomplete when any filing remains unscored."""
+
+    return "ok" if int(summary.get("n_unscored", 0)) == 0 else "partial_failure"
 
 
 def repair_status_row(
@@ -339,12 +374,8 @@ def load_repair_source(
 
     source_label = str(score_df.get("source_label", pd.Series([""])).iloc[0])
     team, chunk_path = parse_team_and_path_from_source_label(source_label, args.team)
-    include_amended = args.include_amended or (
-        "form_type" in score_df.columns
-        and score_df["form_type"].astype(str).str.upper().eq("10-K/A").any()
-    )
     raw = u.read_rds_from_team_s3(chunk_path, team=team)
-    wide = u.long_to_wide(raw, include_amended=include_amended)
+    wide = u.long_to_wide(raw)
     return (
         source_label,
         chunk_path,
@@ -416,6 +447,69 @@ def read_summary_json(path: str) -> dict[str, Any]:
         return {}
 
 
+def require_compatible_existing_summary(
+    summary: dict[str, Any],
+    *,
+    summary_path: str,
+    chunk_name: str,
+    source_label: str,
+    args: argparse.Namespace,
+) -> None:
+    """Allow resume only when existing outputs match the current run exactly."""
+
+    expected = {
+        "chunk_name": chunk_name,
+        "source_label": source_label,
+        "script_version": u.SCRIPT_VERSION,
+        "prompt_version": u.PROMPT_VERSION,
+        "research_profile": u.RESEARCH_PROFILE,
+        "endpoint": args.model_id,
+        "prefilter_mode": args.prefilter_mode,
+        "prefilter_audit_rate": float(args.prefilter_audit_rate),
+        "prefilter_audit_limit": int(args.prefilter_audit_limit),
+        "max_prompt_chars": int(args.max_prompt_chars),
+        "sentence_window": int(args.sentence_window),
+        "lookup_csv": args.lookup_csv,
+        "max_filings_per_chunk": int(args.max_filings_per_chunk),
+        "max_analysis_year": int(args.max_analysis_year),
+    }
+    mismatches = {
+        field: {"expected": expected_value, "found": summary.get(field)}
+        for field, expected_value in expected.items()
+        if summary.get(field) != expected_value
+    }
+    if mismatches:
+        raise ValueError(
+            "Existing outputs are incompatible with the current scoring run: "
+            f"{summary_path} has mismatches {mismatches}. Use a new output "
+            "directory or remove the incompatible chunk outputs before resuming."
+        )
+
+
+def require_current_score_profile(score_df: pd.DataFrame, source: str) -> None:
+    """Prevent failed-row repair from mixing frozen scoring profiles."""
+
+    expected = {
+        "script_version": u.SCRIPT_VERSION,
+        "prompt_version": u.PROMPT_VERSION,
+        "research_profile": u.RESEARCH_PROFILE,
+    }
+    for field, expected_value in expected.items():
+        if field not in score_df.columns:
+            raise ValueError(f"{source} is missing required profile field {field!r}")
+        values = {
+            str(value).strip()
+            for value in score_df[field]
+            if value is not None and not pd.isna(value) and str(value).strip()
+        }
+        if values != {expected_value}:
+            raise ValueError(
+                f"Cannot repair {source} with the current prompt: {field} has "
+                f"{sorted(values)}, expected {[expected_value]}. Rescore the chunk "
+                "with the current frozen profile instead."
+            )
+
+
 def rebuild_repair_summary(
     repaired_df: pd.DataFrame,
     *,
@@ -452,11 +546,23 @@ def rebuild_repair_summary(
         max_prompt_chars=int(previous.get("max_prompt_chars", args.max_prompt_chars)),
         sentence_window=int(previous.get("sentence_window", args.sentence_window)),
         lookup_csv=previous.get("lookup_csv", args.lookup_csv),
+        max_filings_per_chunk=int(
+            previous.get("max_filings_per_chunk", args.max_filings_per_chunk)
+        ),
+        max_analysis_year=int(
+            previous.get("max_analysis_year", args.max_analysis_year)
+        ),
         n_filings_before_lookup=int(
             previous.get("n_filings_before_lookup", len(repaired_df))
         ),
         n_filings_after_lookup=int(
             previous.get("n_filings_after_lookup", len(repaired_df))
+        ),
+        n_filings_before_year_filter=int(
+            previous.get("n_filings_before_year_filter", len(repaired_df))
+        ),
+        n_filings_after_year_filter=int(
+            previous.get("n_filings_after_year_filter", len(repaired_df))
         ),
         output_csv=csv_path,
     )
@@ -479,6 +585,7 @@ def repair_failed_rows_from_csv(
     score_df = pd.read_csv(csv_path)
     if score_df.empty:
         return repair_status_row(csv_path, "repair_skipped_empty_csv")
+    require_current_score_profile(score_df, csv_path)
 
     source_label = str(score_df.get("source_label", pd.Series([""])).iloc[0])
     failed_indices = failed_record_indices(score_df)
@@ -525,15 +632,16 @@ def repair_failed_rows_from_csv(
         args=args,
     )
 
+    n_failed_remaining = len(failed_record_indices(repaired_df))
     return {
         "chunk_name": summary["chunk_name"],
         "source_label": source_label,
-        "status": "repair_ok",
+        "status": "repair_ok" if n_failed_remaining == 0 else "repair_partial_failure",
         "output_csv": csv_path,
         "output_summary": summary_path,
         "snippet_audit_csv": audit_path,
         "n_repaired": len(pending),
-        "n_failed_remaining": len(failed_record_indices(repaired_df)),
+        "n_failed_remaining": n_failed_remaining,
         **manifest_metrics(summary),
     }
 
@@ -631,6 +739,13 @@ def process_chunk(
         and os.path.exists(out_json)
         and os.path.exists(out_snippet_audit_csv)
     ):
+        require_compatible_existing_summary(
+            read_summary_json(out_json),
+            summary_path=out_json,
+            chunk_name=ref.name,
+            source_label=source_label,
+            args=args,
+        )
         logging.info("Skipping existing output for %s", ref.name)
         return {
             "chunk_name": ref.name,
@@ -641,11 +756,10 @@ def process_chunk(
             "snippet_audit_csv": out_snippet_audit_csv,
         }
 
-    # Read the RDS chunk from Data Workspace S3 and reshape Item 1 / Item 7
-    # into one filing-level row per accession number.
+    # Read the RDS chunk and combine every keyword window into one filing row.
     logging.info("Reading %s", source_label)
     raw = u.read_rds_from_team_s3(ref.path, team=args.team)
-    wide = u.long_to_wide(raw, include_amended=args.include_amended)
+    wide = u.long_to_wide(raw)
 
     # Keep only cik/year pairs that appear in the research lookup.
     # This happens before any LLM calls, so irrelevant filings are never labeled.
@@ -654,6 +768,18 @@ def process_chunk(
     n_after_lookup = len(wide)
     logging.info(
         "Lookup filter kept %d/%d filing rows", n_after_lookup, n_before_lookup
+    )
+
+    # The study period ends in 2025. Apply this even when older RDS chunks still
+    # contain later filings so they can never create model calls accidentally.
+    n_before_year_filter = len(wide)
+    wide = u.filter_to_analysis_year(wide, args.max_analysis_year)
+    n_after_year_filter = len(wide)
+    logging.info(
+        "Analysis-year filter kept %d/%d filing rows through %s",
+        n_after_year_filter,
+        n_before_year_filter,
+        args.max_analysis_year if args.max_analysis_year > 0 else "no limit",
     )
 
     # For QA runs, optionally cap the number of filings processed in the chunk.
@@ -705,23 +831,30 @@ def process_chunk(
         max_prompt_chars=args.max_prompt_chars,
         sentence_window=args.sentence_window,
         lookup_csv=args.lookup_csv,
+        max_filings_per_chunk=args.max_filings_per_chunk,
+        max_analysis_year=args.max_analysis_year,
         n_filings_before_lookup=n_before_lookup,
         n_filings_after_lookup=n_after_lookup,
+        n_filings_before_year_filter=n_before_year_filter,
+        n_filings_after_year_filter=n_after_year_filter,
         output_csv=out_csv,
     )
     u.write_json(out_json, summary)
 
     # Return one manifest row describing this chunk.
     logging.info("Wrote %s (%d rows)", out_csv, len(out_df))
+    chunk_status = chunk_status_from_summary(summary)
     return {
         "chunk_name": ref.name,
         "source_label": source_label,
-        "status": "ok",
+        "status": chunk_status,
         "output_csv": out_csv,
         "output_summary": out_json,
         "snippet_audit_csv": out_snippet_audit_csv,
         "n_filings_before_lookup": n_before_lookup,
         "n_filings_after_lookup": n_after_lookup,
+        "n_filings_before_year_filter": n_before_year_filter,
+        "n_filings_after_year_filter": n_after_year_filter,
         **manifest_metrics(summary),
     }
 
@@ -772,7 +905,7 @@ def run_repairs(args: argparse.Namespace) -> int:
         out_dir=run_out_dir,
         filename=f"repair_manifest_{run_id}.csv",
     )
-    return 0
+    return manifest_exit_code(rows)
 
 
 def run_chunks(args: argparse.Namespace) -> int:
@@ -825,7 +958,7 @@ def run_chunks(args: argparse.Namespace) -> int:
         out_dir=run_out_dir,
         filename=f"run_manifest_{run_id}.csv",
     )
-    return 0
+    return manifest_exit_code(rows)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

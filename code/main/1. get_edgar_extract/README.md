@@ -5,7 +5,8 @@ filings. It is the project's only EDGAR extraction workflow.
 
 ## What it does
 
-1. Reads the project's existing `cik_year.csv` research keys.
+1. Reads the project's existing `cik_year.csv` research keys. The maintained
+   lookup ends in 2025, so 2026 filings are outside the analysis sample.
 2. Uses the SEC `submissions.zip` bulk metadata to identify exact `10-K` and
    `10-K/A` filings. If a referenced historical continuation page is not in the
    bulk file, it is fetched and cached from the official Submissions API.
@@ -130,10 +131,10 @@ but it should not be used for the current project lookup.
 
 ## Capacity and runtime estimate
 
-The project lookup contains 49,533 requested CIK-year keys across 5,479 CIKs
-and filing years 2015–2026. The official bulk metadata used for the 1,100-file
-QA run produced 43,409 matching filings: 38,721 `10-K` and 4,688 `10-K/A`.
-A later refreshed archive may differ slightly.
+The project lookup contains 49,200 requested CIK-year keys across 5,479 CIKs
+and filing years 2015–2025. Removing 2026 leaves 43,103 matching extracted
+filings: 38,433 `10-K` and 4,670 `10-K/A`. A later refreshed SEC archive may
+differ slightly.
 
 A stratified sample of 1,100 actual SEC primary documents across years and
 forms transferred 3.30 GiB and had these transfer sizes:
@@ -151,8 +152,8 @@ the number and length of keyword windows, but they should be far below the full
 raw corpus. If space becomes constrained, lower `--raw-batch-gib`; this changes
 only the number of processing batches, not the extracted content.
 
-At the default 8 SEC requests/second, 43,409 filing requests have an absolute
-request-start floor of about 1.5 hours. Approximate raw-transfer floors for
+At the default 8 SEC requests/second, approximately 43,103 filing requests have
+an absolute request-start floor of about 1.5 hours. Approximate raw-transfer floors for
 130 GiB are:
 
 | Sustained download speed | Transfer floor |

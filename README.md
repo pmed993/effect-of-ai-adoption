@@ -9,8 +9,9 @@ This project studies whether firm-level AI adoption is associated with differenc
 - External AI exposure measures matched by industry
 
 ## Overall Process
-1. Extract and assemble EDGAR filing text.
-   Main scripts live in [code/main/1. get_edgar_extract](/Users/piomedolla/Desktop/effect-of-ai-adoption/code/main/1.%20get_edgar_extract).
+1. Extract high-recall AI keyword windows from whole SEC 10-K and 10-K/A
+   primary documents. The active workflow and run commands are documented in
+   [code/main/1. get_edgar_extract/README.md](/Users/piomedolla/Desktop/effect-of-ai-adoption/code/main/1.%20get_edgar_extract/README.md).
 
 2. Build firm-year AI adoption measures from filings.
    Main scripts live in [code/main/2. get_ai_adoption](/Users/piomedolla/Desktop/effect-of-ai-adoption/code/main/2.%20get_ai_adoption).

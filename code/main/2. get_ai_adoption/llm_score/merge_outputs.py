@@ -34,10 +34,6 @@ FILING_BASE_COLS = [
     "chunk_id",
     "filing_accession",
     "form_type",
-    "has_item1",
-    "has_item7",
-    "item1_chars",
-    "item7_chars",
     "combined_chars",
     "keyword_hits",
     "prefilter_mode",
@@ -194,6 +190,28 @@ def filter_to_lookup(
     return out
 
 
+def require_uniform_model_profile(df: pd.DataFrame, prefix: str) -> pd.DataFrame:
+    """Reject merges that mix outputs from different scoring definitions."""
+
+    for field in ["script_version", "prompt_version", "research_profile"]:
+        column = f"{prefix}_{field}"
+        if column not in df.columns:
+            continue
+        values = sorted(
+            {
+                str(value).strip()
+                for value in df[column]
+                if value is not None and not pd.isna(value) and str(value).strip()
+            }
+        )
+        if len(values) > 1:
+            raise ValueError(
+                f"Cannot merge mixed {field} values for {prefix}: {values}. "
+                "Merge each frozen research profile separately."
+            )
+    return df
+
+
 def rename_model_columns(df: pd.DataFrame, prefix: str) -> pd.DataFrame:
     out = ensure_identity_types(df)
     rename_map = {field: f"{prefix}_{field}" for field in MODEL_METADATA_FIELDS}
@@ -272,134 +290,8 @@ def write_duplicate_report(dupes: pd.DataFrame, out_dir: str, filename: str) -> 
     return path
 
 
-def join_distinct(series: pd.Series) -> object:
-    """Join distinct non-empty values while preserving their input order."""
-
-    values: list[str] = []
-    for value in series:
-        if value is None or pd.isna(value):
-            continue
-        text = str(value).strip()
-        if text and text not in values:
-            values.append(text)
-    return ";".join(values) if values else pd.NA
-
-
-def has_consistent_values(group: pd.DataFrame, columns: Iterable[str]) -> bool:
-    """Return whether each present column has at most one non-empty value."""
-
-    for column in columns:
-        if column not in group.columns:
-            continue
-        values = {
-            str(value).strip()
-            for value in group[column]
-            if value is not None and not pd.isna(value) and str(value).strip()
-        }
-        if len(values) > 1:
-            return False
-    return True
-
-
-def is_complementary_filing_split(group: pd.DataFrame) -> bool:
-    """Identify Item 1/Item 7 fragments created by an accession chunk boundary."""
-
-    if len(group) != 2 or not {"has_item1", "has_item7"}.issubset(group.columns):
-        return False
-    if not has_consistent_values(
-        group, ["cik", "year", "filing_accession", "form_type"]
-    ):
-        return False
-
-    has_item1 = group["has_item1"].map(u.coerce_bool)
-    has_item7 = group["has_item7"].map(u.coerce_bool)
-    if int(has_item1.sum()) != 1 or int(has_item7.sum()) != 1:
-        return False
-    if bool((has_item1 & has_item7).any()) or bool((~has_item1 & ~has_item7).any()):
-        return False
-
-    # Separately scored fragments are safe to collapse automatically only when
-    # they imply the same filing score. A disagreement needs a combined rescore.
-    score_columns = [column for column in group.columns if column.endswith("_ai_score")]
-    for column in score_columns:
-        scores = pd.to_numeric(group[column], errors="coerce")
-        if scores.isna().any() or scores.nunique() != 1:
-            return False
-    return bool(score_columns)
-
-
-def aggregate_fragment_parse_status(series: pd.Series) -> object:
-    """Preserve prefilter status while combining equivalent section results."""
-
-    statuses = [
-        str(value).strip()
-        for value in series
-        if value is not None and not pd.isna(value) and str(value).strip()
-    ]
-    unique_statuses = set(statuses)
-    if not unique_statuses:
-        return pd.NA
-    if len(unique_statuses) == 1:
-        return statuses[0]
-    if "failed" in unique_statuses:
-        return "failed"
-    if "retry_success" in unique_statuses:
-        return "retry_success"
-    if "success" in unique_statuses:
-        return "success"
-    return join_distinct(series)
-
-
-def coalesce_complementary_filing_split(group: pd.DataFrame) -> pd.Series:
-    """Collapse two complementary, score-equivalent section rows into one filing."""
-
-    row = group.iloc[0].copy()
-
-    for column in [
-        "source_label",
-        "chunk_id",
-        "prefilter_decision",
-        "snippet_sha256",
-    ]:
-        if column in group.columns:
-            row[column] = join_distinct(group[column])
-
-    for column in ["has_item1", "has_item7", "prefilter_audit_sample"]:
-        if column in group.columns:
-            row[column] = bool(group[column].map(u.coerce_bool).any())
-
-    for column in ["item1_chars", "item7_chars", "keyword_hits", "snippet_chars"]:
-        if column in group.columns:
-            row[column] = int(
-                pd.to_numeric(group[column], errors="coerce").fillna(0).sum()
-            )
-
-    if {"combined_chars", "item1_chars", "item7_chars"}.issubset(group.columns):
-        combined = pd.to_numeric(group["combined_chars"], errors="coerce").fillna(0)
-        item1 = pd.to_numeric(group["item1_chars"], errors="coerce").fillna(0)
-        item7 = pd.to_numeric(group["item7_chars"], errors="coerce").fillna(0)
-        section_label_overhead = int((combined - item1 - item7).max())
-        row["combined_chars"] = (
-            int(row["item1_chars"]) + int(row["item7_chars"]) + section_label_overhead
-        )
-
-    for column in group.columns:
-        if column.endswith(("_run_id", "_job_id", "_raw_json_sha256", "_source_csv")):
-            row[column] = join_distinct(group[column])
-        elif column.endswith(("_llm_called", "_retry_attempted")):
-            row[column] = bool(group[column].map(u.coerce_bool).any())
-        elif column.endswith("_endpoint_attempts"):
-            row[column] = int(
-                pd.to_numeric(group[column], errors="coerce").fillna(0).sum()
-            )
-        elif column.endswith("_parse_status"):
-            row[column] = aggregate_fragment_parse_status(group[column])
-
-    return row
-
-
 def require_unique_accessions(df: pd.DataFrame, out_dir: str) -> pd.DataFrame:
-    """Coalesce safe section splits and reject genuine duplicate filing rows."""
+    """Reject duplicate filing rows; extraction keeps each accession intact."""
 
     out = ensure_identity_types(df)
     dupes = out[out.duplicated(subset=["accession_number"], keep=False)].sort_values(
@@ -407,35 +299,13 @@ def require_unique_accessions(df: pd.DataFrame, out_dir: str) -> pd.DataFrame:
     )
     if dupes.empty:
         return out
-
-    duplicate_mask = out.duplicated(subset=["accession_number"], keep=False)
-    untouched = out[~duplicate_mask]
-    coalesced_rows: list[pd.Series] = []
-    unsafe_groups: list[pd.DataFrame] = []
-    for _, group in dupes.groupby("accession_number", sort=False, dropna=False):
-        if is_complementary_filing_split(group):
-            coalesced_rows.append(coalesce_complementary_filing_split(group))
-        else:
-            unsafe_groups.append(group)
-
-    if not unsafe_groups:
-        coalesced = pd.DataFrame(coalesced_rows, columns=out.columns)
-        result = pd.concat([untouched, coalesced], ignore_index=True)
-        print(
-            f"Coalesced {len(coalesced_rows)} filing accessions split across "
-            "adjacent Item 1/Item 7 chunks"
-        )
-        return ensure_identity_types(result)
-
-    unsafe_dupes = pd.concat(unsafe_groups, ignore_index=True)
     dupes_path = write_duplicate_report(
-        unsafe_dupes, out_dir, "filing_accession_duplicates.csv"
+        dupes, out_dir, "filing_accession_duplicates.csv"
     )
-    n_dupe_accessions = unsafe_dupes["accession_number"].nunique()
+    n_dupe_accessions = dupes["accession_number"].nunique()
     raise ValueError(
-        f"Found {n_dupe_accessions} duplicated filing accessions that cannot be "
-        f"safely coalesced. Review {dupes_path}; remove true overlapping outputs "
-        "or rescore conflicting Item 1/Item 7 fragments together before merging."
+        f"Found {n_dupe_accessions} duplicated filing accessions. Review "
+        f"{dupes_path} and remove overlapping score outputs before merging."
     )
 
 
@@ -578,6 +448,7 @@ def main() -> int:
         args.primary_dir, pattern_for_label(args.primary_label), args.primary_label
     )
     filing_df = filter_to_lookup(filing_df, lookup, args.primary_label)
+    filing_df = require_uniform_model_profile(filing_df, args.primary_label)
     filing_df = require_unique_accessions(filing_df, args.out_dir)
 
     snippet_audit_df = load_snippet_audit_outputs(args.primary_dir, args.primary_label)

@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -149,7 +151,7 @@ class LlmExtractionScoreTests(unittest.TestCase):
     def test_newline_bullets_and_long_lists_create_bounded_segments(self) -> None:
         long_product = "Product features " + "component " * 160
         text = (
-            "ITEM 1 BUSINESS:\n"
+            "PRODUCT OVERVIEW:\n"
             "Products\n"
             "• First product\n"
             "• Second product; Third product.\n"
@@ -161,28 +163,23 @@ class LlmExtractionScoreTests(unittest.TestCase):
         self.assertTrue(
             all(len(segment.text) <= u.MAX_TEXT_SEGMENT_CHARS for segment in segments)
         )
-        self.assertTrue(all(segment.section == "item1" for segment in segments))
 
-    def test_sec_headings_assign_and_end_priority_sections(self) -> None:
+    def test_structural_lines_remain_in_filing_order(self) -> None:
         text = (
-            "ITEM 1. BUSINESS\n"
+            "BUSINESS OVERVIEW\n"
             "We use artificial intelligence in our products.\n"
-            "ITEM 2. PROPERTIES\n"
+            "PROPERTIES\n"
             "We maintain offices in several cities.\n"
-            "ITEM 7. MANAGEMENT'S DISCUSSION AND ANALYSIS OF FINANCIAL "
-            "CONDITION AND RESULTS OF OPERATIONS\n"
+            "OPERATING REVIEW\n"
             "We use machine learning to forecast demand."
         )
 
         segments = u.normalize_and_segment_text(text)
-        sections = {segment.text: segment.section for segment in segments}
+        segment_text = [segment.text for segment in segments]
 
-        self.assertEqual(
-            sections["We use artificial intelligence in our products."], "item1"
-        )
-        self.assertEqual(sections["PROPERTIES"], "other")
-        self.assertEqual(
-            sections["We use machine learning to forecast demand."], "item7"
+        self.assertLess(
+            segment_text.index("We use artificial intelligence in our products."),
+            segment_text.index("We use machine learning to forecast demand."),
         )
 
     def test_keyword_survives_oversized_unpunctuated_segment(self) -> None:
@@ -291,12 +288,14 @@ class LlmExtractionScoreTests(unittest.TestCase):
     def test_short_adjacent_context_is_kept_when_budget_remains(self) -> None:
         anchor = "We use machine learning."
         context = "It is deployed across customer support."
+        oversized_tail = "Unrelated conventional disclosure. " * 20
+        text = "\n".join([anchor, context, oversized_tail])
 
         window_zero = u.extract_relevant_snippets(
-            "\n".join([anchor, context]), max_chars=1800, sentence_window=0
+            text, max_chars=180, sentence_window=0
         )
         window_one = u.extract_relevant_snippets(
-            "\n".join([anchor, context]), max_chars=1800, sentence_window=1
+            text, max_chars=180, sentence_window=1
         )
 
         self.assertNotIn(context, window_zero)
@@ -307,12 +306,187 @@ class LlmExtractionScoreTests(unittest.TestCase):
         result = u.parse_model_output_payload("2")
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["ai_score"], 2)
-        self.assertEqual(result["ai_score_label"], "limited_or_targeted_adoption")
+        self.assertEqual(
+            result["ai_score_label"], "emerging_or_bounded_implementation"
+        )
 
     def test_prompt_output_contract_remains_one_score_only(self) -> None:
         prompt = u.build_ai_prompt("We use machine learning in production.")
         self.assertIn("Return only one character: 1, 2, or 3.", prompt)
         self.assertNotIn('"evidence"', prompt)
+
+    def test_full_1800_character_evidence_reaches_the_prompt(self) -> None:
+        evidence = "A" * 1800
+        prompt = u.build_ai_prompt(evidence)
+        retry_prompt = u.build_ai_retry_prompt(evidence)
+        self.assertEqual(len(prompt), 2822)
+        self.assertEqual(len(retry_prompt), 2906)
+        self.assertIn(f"<filing_text>\n{evidence}\n</filing_text>", prompt)
+        self.assertIn(f"<filing_text>\n{evidence}\n</filing_text>", retry_prompt)
+
+    def test_zero_evidence_budget_preserves_all_extracted_windows(self) -> None:
+        text = (
+            "First window: we use machine learning in production.\n\n"
+            + "Middle disclosure. " * 500
+            + "\n\nFinal window: our AI service is currently available."
+        )
+        expected = u.normalize_structured_text(text)
+        self.assertGreater(len(expected), 1800)
+        self.assertEqual(u.extract_relevant_snippets(expected, 0, 1), expected)
+
+    def test_evidence_below_positive_budget_passes_through_intact(self) -> None:
+        text = (
+            "First window: we use machine learning in production.\n\n"
+            "Second window without another keyword remains available to the model."
+        )
+        expected = u.normalize_structured_text(text)
+        self.assertLess(len(expected), 10_000)
+        self.assertEqual(u.extract_relevant_snippets(text, 10_000, 1), expected)
+
+    def test_high_context_settings_are_the_frozen_defaults(self) -> None:
+        self.assertEqual(u.MODEL_NAME, "eu.anthropic.claude-sonnet-4-6")
+        self.assertEqual(u.DEFAULT_MAX_PROMPT_CHARS, 10_000)
+        args = b.parse_args(["--chunk-ids", "1"])
+        self.assertEqual(args.model_id, "eu.anthropic.claude-sonnet-4-6")
+        self.assertEqual(args.max_prompt_chars, 10_000)
+        self.assertEqual(args.prefilter_mode, "hard_zero")
+        self.assertEqual(args.max_analysis_year, 2025)
+        self.assertEqual(len(u.build_ai_prompt("A" * 10_000)), 11_022)
+        self.assertEqual(len(u.build_ai_retry_prompt("A" * 10_000)), 11_106)
+        with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+            b.parse_args(["--chunk-ids", "1", "--max-prompt-chars", "-1"])
+
+    def test_prompt_uses_concise_ordered_score_derivation(self) -> None:
+        prompt = u.build_ai_prompt("We use machine learning in production.")
+        self.assertLessEqual(len(u._score_rubric()), 1000)
+        self.assertIn("AI may be developed internally or obtained externally", prompt)
+        self.assertIn("current use or specific active implementation", prompt)
+        self.assertIn("Score 2 - Emerging or bounded implementation", prompt)
+        self.assertIn("operational use is explicit AND", prompt)
+        self.assertIn(
+            "Strategy or expected benefits alone cannot support Score 3",
+            prompt,
+        )
+        self.assertIn("When evidence is ambiguous, choose the lower score", prompt)
+        self.assertNotIn("Realized importance", prompt)
+        self.assertNotIn("meaningful realized effect", prompt)
+
+    def test_retry_prompt_preserves_one_character_contract(self) -> None:
+        prompt = u.build_ai_retry_prompt("We use machine learning in production.")
+        self.assertIn("AI may be developed internally or obtained externally", prompt)
+        self.assertIn("current use or specific active implementation", prompt)
+        self.assertIn("operational use is explicit AND", prompt)
+        self.assertIn("Output exactly one ASCII digit", prompt)
+        self.assertNotIn('"implementation_stage"', prompt)
+
+    def test_concise_profile_versions_are_frozen(self) -> None:
+        self.assertEqual(u.SCRIPT_VERSION, "2026-08-14-llm_extraction_v15")
+        self.assertEqual(u.PROMPT_VERSION, "llm_extraction_claude_v6")
+        self.assertEqual(u.RESEARCH_PROFILE, "llm_extraction_ai_1to3_v6")
+
+    def test_concise_rubric_does_not_change_output_schema(self) -> None:
+        columns = u.preferred_output_columns(save_raw_json=False)
+        self.assertIn("ai_score", columns)
+        self.assertIn("ai_score_label", columns)
+        self.assertNotIn("implementation_stage", columns)
+        self.assertNotIn("organizational_scope", columns)
+        self.assertNotIn("realized_importance", columns)
+
+    def test_skip_existing_requires_current_profile_and_settings(self) -> None:
+        args = SimpleNamespace(
+            model_id=u.MODEL_NAME,
+            prefilter_mode="hard_zero",
+            prefilter_audit_rate=0.02,
+            prefilter_audit_limit=0,
+            max_prompt_chars=1800,
+            sentence_window=1,
+            lookup_csv=None,
+            max_filings_per_chunk=0,
+            max_analysis_year=2025,
+        )
+        summary = {
+            "chunk_name": "extract_df_chunk_00001.rds",
+            "source_label": "team=effect_of_ai:prefix/extract_df_chunk_00001.rds",
+            "script_version": u.SCRIPT_VERSION,
+            "prompt_version": u.PROMPT_VERSION,
+            "research_profile": u.RESEARCH_PROFILE,
+            "endpoint": u.MODEL_NAME,
+            "prefilter_mode": "hard_zero",
+            "prefilter_audit_rate": 0.02,
+            "prefilter_audit_limit": 0,
+            "max_prompt_chars": 1800,
+            "sentence_window": 1,
+            "lookup_csv": None,
+            "max_filings_per_chunk": 0,
+            "max_analysis_year": 2025,
+        }
+        b.require_compatible_existing_summary(
+            summary,
+            summary_path="summary.json",
+            chunk_name="extract_df_chunk_00001.rds",
+            source_label="team=effect_of_ai:prefix/extract_df_chunk_00001.rds",
+            args=args,
+        )
+
+        for field, incompatible_value in [
+            ("prompt_version", "obsolete_prompt"),
+            ("lookup_csv", "different_lookup.csv"),
+            ("max_filings_per_chunk", 20),
+            ("max_analysis_year", 2026),
+        ]:
+            with self.subTest(field=field):
+                incompatible = summary.copy()
+                incompatible[field] = incompatible_value
+                with self.assertRaisesRegex(ValueError, "incompatible"):
+                    b.require_compatible_existing_summary(
+                        incompatible,
+                        summary_path="summary.json",
+                        chunk_name="extract_df_chunk_00001.rds",
+                        source_label=(
+                            "team=effect_of_ai:prefix/"
+                            "extract_df_chunk_00001.rds"
+                        ),
+                        args=args,
+                    )
+
+    def test_analysis_year_filter_excludes_2026(self) -> None:
+        filings = pd.DataFrame(
+            {
+                "accession_number": ["a2025", "a2026"],
+                "year": [2025, 2026],
+            }
+        )
+        filtered = u.filter_to_analysis_year(filings, 2025)
+        self.assertEqual(filtered["accession_number"].tolist(), ["a2025"])
+        self.assertEqual(len(u.filter_to_analysis_year(filings, 0)), 2)
+
+    def test_repairs_reject_obsolete_scoring_profiles(self) -> None:
+        current = pd.DataFrame(
+            {
+                "script_version": [u.SCRIPT_VERSION],
+                "prompt_version": [u.PROMPT_VERSION],
+                "research_profile": [u.RESEARCH_PROFILE],
+            }
+        )
+        b.require_current_score_profile(current, "scores.csv")
+
+        obsolete = current.copy()
+        obsolete["research_profile"] = "llm_extraction_ai_1to3_v2"
+        with self.assertRaisesRegex(ValueError, "Cannot repair"):
+            b.require_current_score_profile(obsolete, "scores.csv")
+
+    def test_manifest_exit_code_and_partial_chunk_status(self) -> None:
+        self.assertEqual(b.chunk_status_from_summary({"n_unscored": 0}), "ok")
+        self.assertEqual(
+            b.chunk_status_from_summary({"n_unscored": 1}), "partial_failure"
+        )
+        self.assertEqual(b.manifest_exit_code([{"status": "ok"}]), 0)
+        self.assertEqual(b.manifest_exit_code([{"status": "skipped_existing"}]), 0)
+        self.assertEqual(b.manifest_exit_code([{"status": "partial_failure"}]), 1)
+        self.assertEqual(b.manifest_exit_code([{"status": "failed"}]), 1)
+        self.assertEqual(
+            b.manifest_exit_code([{"status": "repair_no_rerunnable_rows"}]), 1
+        )
 
     def test_parse_json_score_fallback(self) -> None:
         payload = """
@@ -323,7 +497,9 @@ class LlmExtractionScoreTests(unittest.TestCase):
         result = u.parse_model_output_payload(payload)
         self.assertEqual(result["status"], "ok")
         self.assertEqual(result["ai_score"], 3)
-        self.assertEqual(result["ai_score_label"], "production_or_strategic_adoption")
+        self.assertEqual(
+            result["ai_score_label"], "established_and_integrated_implementation"
+        )
 
     def test_parse_conflicting_scores_fails(self) -> None:
         result = u.parse_model_output_payload("The answer could be 2 or 3.")
@@ -406,10 +582,6 @@ class LlmExtractionScoreTests(unittest.TestCase):
                     "cik": "1001",
                     "year": 2024,
                     "form_type": "10-K",
-                    "has_item1": True,
-                    "has_item7": True,
-                    "item1_chars": 40,
-                    "item7_chars": 20,
                     "combined_chars": 60,
                     "combined_text": "We currently use machine learning in customer support.",
                 },
@@ -418,10 +590,6 @@ class LlmExtractionScoreTests(unittest.TestCase):
                     "cik": "1002",
                     "year": 2024,
                     "form_type": "10-K",
-                    "has_item1": True,
-                    "has_item7": True,
-                    "item1_chars": 30,
-                    "item7_chars": 20,
                     "combined_chars": 50,
                     "combined_text": "We expanded conventional analytics and reporting.",
                 },
@@ -545,7 +713,7 @@ class LlmExtractionScoreTests(unittest.TestCase):
                     "claude_max_new_tokens": 32,
                     "claude_parse_status": "success",
                     "claude_ai_score": 1,
-                    "claude_ai_score_label": "no_current_adoption",
+                    "claude_ai_score_label": "no_disclosed_current_implementation",
                     "claude_score_explanation": "Parsed AI adoption score 1.",
                 },
                 {
@@ -561,7 +729,7 @@ class LlmExtractionScoreTests(unittest.TestCase):
                     "claude_max_new_tokens": 32,
                     "claude_parse_status": "success",
                     "claude_ai_score": 3,
-                    "claude_ai_score_label": "production_or_strategic_adoption",
+                    "claude_ai_score_label": "established_and_integrated_implementation",
                     "claude_score_explanation": "Parsed AI adoption score 3.",
                 },
             ]
@@ -570,8 +738,22 @@ class LlmExtractionScoreTests(unittest.TestCase):
         panel = m.build_firm_year_panel(df, "claude")
         self.assertEqual(int(panel.loc[0, "ai_score"]), 3)
         self.assertEqual(
-            panel.loc[0, "ai_score_label"], "production_or_strategic_adoption"
+            panel.loc[0, "ai_score_label"], "established_and_integrated_implementation"
         )
+
+    def test_merge_rejects_mixed_prompt_profiles(self) -> None:
+        df = pd.DataFrame(
+            {
+                "claude_script_version": [u.SCRIPT_VERSION, u.SCRIPT_VERSION],
+                "claude_prompt_version": ["llm_extraction_claude_v2", u.PROMPT_VERSION],
+                "claude_research_profile": [
+                    "llm_extraction_ai_1to3_v2",
+                    u.RESEARCH_PROFILE,
+                ],
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "mixed prompt_version"):
+            m.require_uniform_model_profile(df, "claude")
 
     def test_duplicate_accessions_are_rejected_with_report(self) -> None:
         df = pd.DataFrame(
@@ -580,8 +762,6 @@ class LlmExtractionScoreTests(unittest.TestCase):
                     "accession_number": "a1",
                     "cik": 1001,
                     "year": 2024,
-                    "has_item1": True,
-                    "has_item7": True,
                     "combined_chars": 2000,
                     "snippet_chars": 1800,
                     "claude_llm_called": True,
@@ -591,8 +771,6 @@ class LlmExtractionScoreTests(unittest.TestCase):
                     "accession_number": "a1",
                     "cik": 1001,
                     "year": 2024,
-                    "has_item1": True,
-                    "has_item7": False,
                     "combined_chars": 1000,
                     "snippet_chars": 900,
                     "claude_llm_called": True,
@@ -605,7 +783,6 @@ class LlmExtractionScoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 m.require_unique_accessions(df, tmp)
             self.assertTrue((Path(tmp) / "filing_accession_duplicates.csv").exists())
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -25,15 +25,19 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
-SCRIPT_VERSION = "2026-08-01-llm_extraction_v5"
-PROMPT_VERSION = "llm_extraction_claude_v2"
-RESEARCH_PROFILE = "llm_extraction_ai_1to3_v2"
-MODEL_NAME = "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
+SCRIPT_VERSION = "2026-08-14-llm_extraction_v15"
+PROMPT_VERSION = "llm_extraction_claude_v6"
+RESEARCH_PROFILE = "llm_extraction_ai_1to3_v6"
+MODEL_NAME = "eu.anthropic.claude-sonnet-4-6"
 TEMPERATURE = 0.0
 DEFAULT_MAX_NEW_TOKENS = 128
-DEFAULT_MAX_PROMPT_CHARS = 1800
+# The high-context production profile passes through ordinary filing extracts
+# intact and applies anchor-first selection only when evidence exceeds the cap.
+# Zero remains available to send every extracted filing window without a cap.
+DEFAULT_MAX_PROMPT_CHARS = 10_000
 DEFAULT_SENTENCE_WINDOW = 1
 DEFAULT_PREFILTER_MODE = "hard_zero"
+DEFAULT_MAX_ANALYSIS_YEAR = 2025
 
 DEFAULT_BUCKET = "jupyter.notebook.uktrade.io"
 
@@ -45,12 +49,6 @@ WHITESPACE_RE = re.compile(r"\s+")
 HORIZONTAL_WHITESPACE_RE = re.compile(r"[^\S\r\n]+")
 EXCESS_NEWLINES_RE = re.compile(r"\n{3,}")
 SENTENCE_SPLIT_RE = re.compile(r"(?<=[\.\!\?\;])\s+")
-SECTION_HEADING_RE = re.compile(
-    r"(?i)^ITEM\s+(?P<item>\d{1,2}[A-Z]?)\s*[\.\-–—:]?\s*"
-    r"(?:(?:BUSINESS|MD&A|MANAGEMENT['’]S DISCUSSION(?:\s+AND\s+ANALYSIS)?"
-    r"(?:\s+OF\s+FINANCIAL\s+CONDITION\s+AND\s+RESULTS\s+OF\s+OPERATIONS)?)"
-    r"\s*[\.\-–—:]?\s*)?"
-)
 BULLET_RE = re.compile(r"[\u2022\u2023\u25e6\u2043\u2219\u25aa\u25cf]")
 INLINE_LIST_ITEM_RE = re.compile(r"\s+(?=(?:\d{1,2}|[A-Za-z])\)\s+[A-Z])")
 TABLE_SEPARATOR_RE = re.compile(r"\s+\|\s+")
@@ -534,7 +532,6 @@ class TextSegment:
     """One structurally delimited filing segment."""
 
     text: str
-    section: str
     position: int
 
 
@@ -552,7 +549,6 @@ class AnchorCandidate:
     operational_score: int
     current_use_score: int
     negation_or_future_score: int
-    section: str
     position: int
     match_start: int
     match_end: int
@@ -667,9 +663,9 @@ BACKUP_AUDIT_CUES = re.compile(
 )
 
 AI_SCORE_LABELS = {
-    1: "no_current_adoption",
-    2: "limited_or_targeted_adoption",
-    3: "production_or_strategic_adoption",
+    1: "no_disclosed_current_implementation",
+    2: "emerging_or_bounded_implementation",
+    3: "established_and_integrated_implementation",
 }
 
 SNIPPET_AUDIT_COLUMNS = [
@@ -963,10 +959,6 @@ def preferred_output_columns(save_raw_json: bool) -> list[str]:
         "cik",
         "year",
         "form_type",
-        "has_item1",
-        "has_item7",
-        "item1_chars",
-        "item7_chars",
         "combined_chars",
         "keyword_hits",
         "prefilter_mode",
@@ -1096,6 +1088,12 @@ def list_chunks(
             path = obj["Key"][len(team_prefix) :].strip("/")
             name = Path(path).name
             if CHUNK_RE.match(name):
+                if name in refs and refs[name].path != path:
+                    raise ValueError(
+                        "Duplicate chunk basename under the selected team prefix: "
+                        f"{name!r} exists at both {refs[name].path!r} and {path!r}. "
+                        "Use a clean --chunk-prefix containing only one extraction run."
+                    )
                 refs[name] = ChunkRef(name=name, path=path)
     return dict(sorted(refs.items()))
 
@@ -1203,13 +1201,17 @@ def load_cik_year_lookup(path: Optional[str]) -> Optional[pd.DataFrame]:
     return lookup[["cik_match", "year_match"]]
 
 
-def long_to_wide(df: pd.DataFrame, include_amended: bool) -> pd.DataFrame:
-    """
-    Convert long-format Item 1 / Item 7 rows into one row per filing.
+def filter_to_analysis_year(df: pd.DataFrame, max_year: int) -> pd.DataFrame:
+    """Exclude filings after the configured terminal analysis year."""
 
-    The labeling methodology works at filing level, so each accession number
-    needs its Item 1 and Item 7 text side by side.
-    """
+    if max_year <= 0 or df.empty:
+        return df.copy()
+    years = pd.to_numeric(df["year"], errors="coerce")
+    return df[years.le(max_year)].copy().reset_index(drop=True)
+
+
+def long_to_wide(df: pd.DataFrame) -> pd.DataFrame:
+    """Join whole-filing keyword windows into one row per filing."""
 
     required = {"item", "year", "accession_number", "cik", "form_type", "text"}
     missing = required - set(df.columns)
@@ -1224,60 +1226,60 @@ def long_to_wide(df: pd.DataFrame, include_amended: bool) -> pd.DataFrame:
     work["cik"] = work["cik"].astype(str).str.strip()
     work["text"] = work["text"].apply(normalize_structured_text)
 
-    # Keep annual filings and the two disclosure sections used in the label.
-    keep_forms = {"10-K", "10-K/A"} if include_amended else {"10-K"}
-    work = work[work["form_type"].isin(keep_forms)]
-    work = work[work["item"].isin(["item1", "item7"])]
-
     base_cols = [
         "accession_number",
         "cik",
         "year",
         "form_type",
-        "item1_text",
-        "item7_text",
-        "has_item1",
-        "has_item7",
-        "item1_chars",
-        "item7_chars",
         "combined_text",
         "combined_chars",
     ]
+    window_mask = work["item"].eq("keyword_window")
+    if not bool(window_mask.all()):
+        unsupported = sorted(set(work.loc[~window_mask, "item"]))
+        raise ValueError(
+            "Only whole-filing keyword_window input is supported; "
+            f"found item values: {unsupported}"
+        )
+
+    work = work[work["form_type"].isin({"10-K", "10-K/A"})]
+
     if work.empty:
         return pd.DataFrame(columns=base_cols)
 
-    # Collapse duplicate section rows, then pivot item1/item7 into columns.
-    collapsed = work.groupby(
-        ["accession_number", "cik", "year", "form_type", "item"], as_index=False
-    ).agg(text=("text", lambda x: "\n\n".join([t for t in pd.unique(x) if t])))
-
-    wide = collapsed.pivot_table(
-        index=["accession_number", "cik", "year", "form_type"],
-        columns="item",
-        values="text",
-        aggfunc="first",
-        fill_value="",
-    ).reset_index()
-    wide.columns.name = None
-
-    for col in ["item1", "item7"]:
-        if col not in wide.columns:
-            wide[col] = ""
-
-    wide = wide.rename(columns={"item1": "item1_text", "item7": "item7_text"})
-    wide["year"] = pd.to_numeric(wide["year"], errors="coerce").astype("Int64")
-    wide["has_item1"] = wide["item1_text"].astype(str).str.len().gt(0)
-    wide["has_item7"] = wide["item7_text"].astype(str).str.len().gt(0)
-    wide["item1_chars"] = wide["item1_text"].astype(str).str.len()
-    wide["item7_chars"] = wide["item7_text"].astype(str).str.len()
-    # Add section labels before concatenation so the model sees the source.
-    wide["combined_text"] = (
-        "ITEM 1 BUSINESS:\n"
-        + wide["item1_text"].fillna("").astype(str)
-        + "\n\nITEM 7 MD&A:\n"
-        + wide["item7_text"].fillna("").astype(str)
+    windows = work.copy()
+    windows["_input_order"] = range(len(windows))
+    order_cols = ["accession_number", "cik", "year", "form_type"]
+    if "window_id" in windows.columns:
+        windows["_window_order"] = pd.to_numeric(
+            windows["window_id"], errors="coerce"
+        )
+    elif "sentence_start" in windows.columns:
+        windows["_window_order"] = pd.to_numeric(
+            windows["sentence_start"], errors="coerce"
+        )
+    else:
+        windows["_window_order"] = windows["_input_order"]
+    windows = windows.sort_values(
+        order_cols + ["_window_order", "_input_order"], kind="stable"
     )
-    wide["combined_chars"] = wide["combined_text"].astype(str).str.len()
+
+    def join_exact_unique(values: pd.Series) -> str:
+        seen: set[str] = set()
+        kept: list[str] = []
+        for value in values:
+            text = str(value).strip()
+            if text and text not in seen:
+                seen.add(text)
+                kept.append(text)
+        return "\n\n".join(kept)
+
+    wide = windows.groupby(order_cols, as_index=False, sort=False).agg(
+        window_text=("text", join_exact_unique)
+    )
+    wide["year"] = pd.to_numeric(wide["year"], errors="coerce").astype("Int64")
+    wide["combined_text"] = wide["window_text"]
+    wide["combined_chars"] = wide["combined_text"].str.len()
     return wide[base_cols].sort_values(["accession_number"]).reset_index(drop=True)
 
 
@@ -1354,18 +1356,10 @@ def normalize_and_segment_text(text: str) -> list[TextSegment]:
         return []
 
     segments: list[TextSegment] = []
-    current_section = "unknown"
     for raw_line in structured.split("\n"):
         line = raw_line.strip()
         if not line:
             continue
-        heading = SECTION_HEADING_RE.match(line)
-        if heading:
-            item = heading.group("item").lower()
-            current_section = f"item{item}" if item in {"1", "7"} else "other"
-            line = line[heading.end() :].strip()
-            if not line:
-                continue
         for raw_part in SENTENCE_SPLIT_RE.split(line):
             part = raw_part.strip()
             if not part:
@@ -1374,17 +1368,10 @@ def normalize_and_segment_text(text: str) -> list[TextSegment]:
                 segments.append(
                     TextSegment(
                         text=bounded_part,
-                        section=current_section,
                         position=len(segments),
                     )
                 )
     return segments
-
-
-def split_into_sentences(text: str) -> list[str]:
-    """Compatibility wrapper returning the new structural text segments."""
-
-    return [segment.text for segment in normalize_and_segment_text(text)]
 
 
 def _distance_between_spans(
@@ -1470,13 +1457,11 @@ def create_anchor_candidates(segments: Sequence[TextSegment]) -> list[AnchorCand
         if negated_use:
             negation_or_future_score -= 6
 
-        section_score = 1 if segment.section in {"item1", "item7"} else 0
         total_score = (
             primary.ranking_weight * 10
             + operational_score
             + current_use_score
             + negation_or_future_score
-            + section_score
         )
         current_link = (
             operational_score > 0 and not future_or_hypothetical and not negated_use
@@ -1496,15 +1481,11 @@ def create_anchor_candidates(segments: Sequence[TextSegment]) -> list[AnchorCand
             AnchorCandidate(
                 anchor_text=segment.text,
                 previous_text=(
-                    segments[index - 1].text
-                    if index > 0 and segments[index - 1].section == segment.section
-                    else ""
+                    segments[index - 1].text if index > 0 else ""
                 ),
                 next_text=(
                     segments[index + 1].text
-                    if index + 1 < len(segments)
-                    and segments[index + 1].section == segment.section
-                    else ""
+                    if index + 1 < len(segments) else ""
                 ),
                 matched_keyword=primary.keyword,
                 keyword_category=primary.category,
@@ -1513,7 +1494,6 @@ def create_anchor_candidates(segments: Sequence[TextSegment]) -> list[AnchorCand
                 operational_score=operational_score,
                 current_use_score=current_use_score,
                 negation_or_future_score=negation_or_future_score,
-                section=segment.section,
                 position=segment.position,
                 match_start=primary.start,
                 match_end=primary.end,
@@ -1704,8 +1684,6 @@ def add_context_within_budget(
                 if position in selected_positions:
                     continue
                 context_segment = segments[position]
-                if context_segment.section != candidate.section:
-                    continue
                 context_text = context_segment.text
                 if any(_near_duplicate_text(context_text, seen) for seen in seen_texts):
                     continue
@@ -1764,10 +1742,7 @@ def run_no_keyword_audit_if_needed(
             continue
         operational = 2 if OPERATIONAL_CUES.search(segment.text) else 0
         firm_context = 2 if FIRM_CONTEXT_CUES.search(segment.text) else 0
-        section_score = 1 if segment.section in {"item1", "item7"} else 0
-        score = (
-            min(12, len(proxy_matches) * 3) + operational + firm_context + section_score
-        )
+        score = min(12, len(proxy_matches) * 3) + operational + firm_context
         first = proxy_matches[0]
         proxy_candidates.append(
             (score, segment.position, segment.text, first.start(), first.end())
@@ -1828,9 +1803,18 @@ def run_no_keyword_audit_if_needed(
 def extract_relevant_snippets(
     full_text: str, max_chars: int, sentence_window: int
 ) -> str:
-    """Extract anchor-first AI evidence and then add budgeted context."""
+    """Return all extracted evidence, or apply an optional positive budget."""
 
-    segments = normalize_and_segment_text(full_text)
+    if max_chars == 0:
+        return full_text.strip()
+
+    normalized = normalize_structured_text(full_text)
+    if not normalized:
+        return ""
+    if len(normalized) <= max_chars:
+        return normalized
+
+    segments = normalize_and_segment_text(normalized)
     if not segments:
         return ""
     candidates = create_anchor_candidates(segments)
@@ -1853,12 +1837,20 @@ def extract_relevant_snippets(
 # The scoring prompt is intentionally short and rigid so Claude can return one
 # clean ordinal score with minimal parsing risk.
 def _score_rubric() -> str:
-    """Return the 1-3 AI-adoption scoring rubric."""
+    """Return the concise 1-3 AI-adoption decision framework."""
 
     return (
-        "Score 1: No current AI adoption. This includes no AI mention, or AI mentioned only as industry context, competitor activity, future plans, exploration, or risk, with no evidence of current firm use.\n"
-        "Score 2: Limited or targeted AI adoption. The firm is building AI capacity, piloting or experimenting with AI, or using AI in a limited set of products or operational processes, but AI does not yet appear central to strategy or financial performance.\n"
-        "Score 3: Production-level or strategic AI adoption. AI is used in a clear, ongoing way and is described as important for strategy, operations, cost savings, revenue generation, or broad business performance.\n"
+        "AI may be developed internally or obtained externally.\n\n"
+        "Score 1 - No disclosed current implementation: No concrete current use or "
+        "specific active implementation. Plans, exploration, risks, general discussion, "
+        "capacity building, and AI activity by other firms do not count.\n"
+        "Score 2 - Emerging or bounded implementation: A specific AI application is "
+        "in active development, testing, or pilot, or is in limited production use.\n"
+        "Score 3 - Established and integrated implementation: Current production or "
+        "operational use is explicit AND AI is deployed at meaningful scale or embedded "
+        "in a core product, service, function, or process.\n\n"
+        "A pilot is Score 2. Strategy or expected benefits alone cannot support Score 3. "
+        "When evidence is ambiguous, choose the lower score.\n"
     )
 
 
@@ -1866,13 +1858,12 @@ def build_ai_prompt(text: str) -> str:
     """Build the main Claude-style 1-3 AI-adoption scoring prompt."""
 
     return (
-        "You are an expert analyst.\n"
-        "Using the rubric below, assign one integer score from 1 to 3 for the firm's level of AI adoption.\n"
-        "Use only the filing text. Do not rely on outside knowledge.\n\n"
+        "Classify the firm's disclosed AI adoption using the rules below.\n"
+        "Use only the extracted filing evidence; do not infer missing facts.\n\n"
         f"{_score_rubric()}\n"
         "Choose the single best score.\n"
         "Return only one character: 1, 2, or 3.\n\n"
-        "FILING TEXT:\n"
+        "EXTRACTED FILING EVIDENCE:\n"
         "<filing_text>\n"
         f"{text}\n"
         "</filing_text>\n"
@@ -1883,14 +1874,13 @@ def build_ai_retry_prompt(text: str) -> str:
     """Build a stricter retry prompt that asks for only one digit."""
 
     return (
-        "You are an expert analyst.\n"
-        "Using the rubric below, assign one integer score from 1 to 3 for the firm's level of AI adoption.\n"
-        "Use only the filing text. Do not rely on outside knowledge.\n\n"
+        "Classify the firm's disclosed AI adoption using the rules below.\n"
+        "Use only the extracted filing evidence; do not infer missing facts.\n\n"
         f"{_score_rubric()}\n"
         "Choose the single best score.\n"
         "Output exactly one ASCII digit—1, 2, or 3—and nothing else. "
         "Do not include an explanation, punctuation, markdown, or JSON.\n\n"
-        "FILING TEXT:\n"
+        "EXTRACTED FILING EVIDENCE:\n"
         "<filing_text>\n"
         f"{text}\n"
         "</filing_text>\n"
@@ -2122,10 +2112,6 @@ def base_output_record(
         "cik": str(row.get("cik", "")).strip(),
         "year": year,
         "form_type": str(row.get("form_type", "")).strip(),
-        "has_item1": bool(row.get("has_item1", False)),
-        "has_item7": bool(row.get("has_item7", False)),
-        "item1_chars": int(row.get("item1_chars", 0) or 0),
-        "item7_chars": int(row.get("item7_chars", 0) or 0),
         "combined_chars": int(row.get("combined_chars", 0) or 0),
         "keyword_hits": 0,
         "prefilter_mode": prefilter_mode,
@@ -2181,7 +2167,7 @@ def prepare_record_prompt(
         record.update(
             ai_score=1,
             ai_score_label=AI_SCORE_LABELS[1],
-            score_explanation="No text was available after combining Item 1 and Item 7.",
+            score_explanation="No keyword-window text was available for this filing.",
             score_status="empty_text_zero",
             prefilter_decision="empty_text",
         )
@@ -2473,8 +2459,12 @@ def summarize_output(
     max_prompt_chars: int,
     sentence_window: int,
     lookup_csv: Optional[str],
+    max_filings_per_chunk: int,
+    max_analysis_year: int,
     n_filings_before_lookup: int,
     n_filings_after_lookup: int,
+    n_filings_before_year_filter: int,
+    n_filings_after_year_filter: int,
     output_csv: str,
 ) -> dict[str, Any]:
     """Build the per-chunk JSON summary."""
@@ -2499,8 +2489,12 @@ def summarize_output(
         "max_prompt_chars": int(max_prompt_chars),
         "sentence_window": int(sentence_window),
         "lookup_csv": lookup_csv,
+        "max_filings_per_chunk": int(max_filings_per_chunk),
+        "max_analysis_year": int(max_analysis_year),
         "n_filings_before_lookup": int(n_filings_before_lookup),
         "n_filings_after_lookup": int(n_filings_after_lookup),
+        "n_filings_before_year_filter": int(n_filings_before_year_filter),
+        "n_filings_after_year_filter": int(n_filings_after_year_filter),
         "n_filings": int(len(out_df)),
         "n_unique_cik": int(out_df["cik"].nunique()) if not out_df.empty else 0,
         "n_llm_called": int(out_df["llm_called"].sum()) if not out_df.empty else 0,
@@ -2535,8 +2529,6 @@ def summarize_output(
             if not out_df.empty and "retry_attempted" in out_df.columns
             else 0
         ),
-        "n_missing_item1": int((~out_df["has_item1"]).sum()) if not out_df.empty else 0,
-        "n_missing_item7": int((~out_df["has_item7"]).sum()) if not out_df.empty else 0,
         "status_counts": (
             out_df["score_status"].value_counts(dropna=False).to_dict()
             if not out_df.empty

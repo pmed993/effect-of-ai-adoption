@@ -42,6 +42,10 @@ if (!exists("COMPUSTAT_QUERY_FILE", inherits = FALSE)) {
   COMPUSTAT_QUERY_FILE <- file.path("code", "main", "comp_query.txt")
 }
 
+if (!exists("MAX_ANALYSIS_YEAR", inherits = FALSE)) {
+  MAX_ANALYSIS_YEAR <- 2025L
+}
+
 
 # ---- WRDS connection ----------------------------------------------------------
 ua <- Sys.getenv("COMPUSTAT_USER")
@@ -80,7 +84,7 @@ comp_data[, cyear := as.integer(cyear)]
 
 cik_year <- unique(
   comp_data[
-    !is.na(cik) & cik != "" & !is.na(cyear),
+    !is.na(cik) & cik != "" & !is.na(cyear) & cyear <= MAX_ANALYSIS_YEAR,
     .(cik, year = cyear)
   ],
   by = c("cik", "year")
@@ -101,5 +105,6 @@ cat("\nBuilt CIK-year lookup from comp_query.txt.\n")
 cat("Rows:", nrow(cik_year), "\n")
 cat("Unique CIKs:", uniqueN(cik_year$cik), "\n")
 cat("Year span:", min(cik_year$year), "to", max(cik_year$year), "\n")
+cat("Maximum analysis year:", MAX_ANALYSIS_YEAR, "\n")
 cat("Saved RDS to:", LOOKUP_RDS, "\n")
 cat("Saved CSV to:", LOOKUP_CSV, "\n")
