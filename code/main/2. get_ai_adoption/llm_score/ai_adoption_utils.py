@@ -25,11 +25,15 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
-SCRIPT_VERSION = "2026-08-14-llm_extraction_v18"
+SCRIPT_VERSION = "2026-08-14-llm_extraction_v19"
 PROMPT_VERSION = "llm_extraction_claude_v7"
-RESEARCH_PROFILE = "llm_extraction_ai_1to3_v9"
+RESEARCH_PROFILE = "llm_extraction_ai_1to3_v10"
 MODEL_NAME = "eu.anthropic.claude-sonnet-4-6"
-TEMPERATURE = 0.0
+# This dwutils release does not expose temperature on invoke_bulk. Keep the
+# requested value separately for compatible releases, but do not claim that a
+# temperature was enforced when the installed interface cannot accept it.
+REQUESTED_TEMPERATURE = 0.0
+TEMPERATURE: Optional[float] = None
 DEFAULT_MAX_NEW_TOKENS = 8
 # The capped production profile passes through short filing extracts intact and
 # applies anchor-first selection only when evidence exceeds the cap.
@@ -2116,7 +2120,7 @@ def base_output_record(
     chunk_id: str,
     llm_model: str,
     llm_checkpoint: str,
-    temperature: float,
+    temperature: Optional[float],
     max_new_tokens: int,
     max_prompt_chars: int,
     sentence_window: int,
@@ -2135,7 +2139,9 @@ def base_output_record(
         "research_profile": RESEARCH_PROFILE,
         "llm_model": llm_model,
         "llm_checkpoint": llm_checkpoint,
-        "temperature": float(temperature),
+        "temperature": (
+            float(temperature) if temperature is not None else pd.NA
+        ),
         "max_new_tokens": int(max_new_tokens),
         "max_prompt_chars": int(max_prompt_chars),
         "sentence_window": int(sentence_window),
@@ -2262,7 +2268,7 @@ def prepare_records_and_prompts(
     source_label: str,
     llm_model: str,
     llm_checkpoint: str,
-    temperature: float,
+    temperature: Optional[float],
     max_new_tokens: int,
     endpoint: str,
     prefilter_mode: str,

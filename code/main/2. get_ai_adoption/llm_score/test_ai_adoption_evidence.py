@@ -371,6 +371,8 @@ class LlmExtractionScoreTests(unittest.TestCase):
 
     def test_capped_settings_are_the_frozen_defaults(self) -> None:
         self.assertEqual(u.MODEL_NAME, "eu.anthropic.claude-sonnet-4-6")
+        self.assertIsNone(u.TEMPERATURE)
+        self.assertEqual(u.REQUESTED_TEMPERATURE, 0.0)
         self.assertEqual(u.DEFAULT_MAX_NEW_TOKENS, 8)
         self.assertEqual(u.DEFAULT_MAX_PROMPT_CHARS, 2_000)
         args = b.parse_args(["--chunk-ids", "1"])
@@ -406,9 +408,9 @@ class LlmExtractionScoreTests(unittest.TestCase):
         self.assertNotIn('"implementation_stage"', prompt)
 
     def test_concise_profile_versions_are_frozen(self) -> None:
-        self.assertEqual(u.SCRIPT_VERSION, "2026-08-14-llm_extraction_v18")
+        self.assertEqual(u.SCRIPT_VERSION, "2026-08-14-llm_extraction_v19")
         self.assertEqual(u.PROMPT_VERSION, "llm_extraction_claude_v7")
-        self.assertEqual(u.RESEARCH_PROFILE, "llm_extraction_ai_1to3_v9")
+        self.assertEqual(u.RESEARCH_PROFILE, "llm_extraction_ai_1to3_v10")
 
     def test_bedrock_generation_controls_use_direct_parameters(self) -> None:
         def invoke_bulk(
@@ -433,6 +435,17 @@ class LlmExtractionScoreTests(unittest.TestCase):
         self.assertEqual(
             b.bedrock_generation_kwargs(invoke_bulk),
             {"inference_config": {"temperature": 0.0, "maxTokens": 8}},
+        )
+
+    def test_bedrock_generation_controls_allow_token_limit_without_temperature(
+        self,
+    ) -> None:
+        def invoke_bulk(prompts, *, model_id, max_workers, max_new_tokens):
+            return None
+
+        self.assertEqual(
+            b.bedrock_generation_kwargs(invoke_bulk),
+            {"max_new_tokens": 8},
         )
 
     def test_bedrock_generation_controls_fail_closed_if_unsupported(self) -> None:

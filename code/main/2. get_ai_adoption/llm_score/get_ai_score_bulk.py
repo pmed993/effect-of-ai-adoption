@@ -699,20 +699,20 @@ def bedrock_generation_kwargs(invoke_bulk: Any) -> dict[str, Any]:
 
     if "inference_config" in names:
         kwargs["inference_config"] = {
-            "temperature": u.TEMPERATURE,
+            "temperature": u.REQUESTED_TEMPERATURE,
             "maxTokens": u.DEFAULT_MAX_NEW_TOKENS,
         }
         return kwargs
 
     if "model_kwargs" in names:
         kwargs["model_kwargs"] = {
-            "temperature": u.TEMPERATURE,
+            "temperature": u.REQUESTED_TEMPERATURE,
             "max_tokens": u.DEFAULT_MAX_NEW_TOKENS,
         }
         return kwargs
 
     if "temperature" in names:
-        kwargs["temperature"] = u.TEMPERATURE
+        kwargs["temperature"] = u.REQUESTED_TEMPERATURE
 
     token_parameter = next(
         (
@@ -725,9 +725,11 @@ def bedrock_generation_kwargs(invoke_bulk: Any) -> dict[str, Any]:
     if token_parameter:
         kwargs[token_parameter] = u.DEFAULT_MAX_NEW_TOKENS
         if "temperature" not in kwargs:
-            raise RuntimeError(
-                "dwutils.bedrock.invoke_bulk exposes an output-token limit but "
-                "not temperature; the frozen generation profile cannot be enforced."
+            logging.warning(
+                "dwutils.bedrock.invoke_bulk does not expose temperature; using "
+                "its model default while enforcing %s=%d",
+                token_parameter,
+                u.DEFAULT_MAX_NEW_TOKENS,
             )
         return kwargs
 
@@ -739,14 +741,14 @@ def bedrock_generation_kwargs(invoke_bulk: Any) -> dict[str, Any]:
         # Claude's Bedrock request field is max_tokens; wrappers accepting
         # arbitrary keyword arguments conventionally forward this field.
         return {
-            "temperature": u.TEMPERATURE,
+            "temperature": u.REQUESTED_TEMPERATURE,
             "max_tokens": u.DEFAULT_MAX_NEW_TOKENS,
         }
 
     signature = str(inspect.signature(invoke_bulk))
     raise RuntimeError(
         "The installed dwutils.bedrock.invoke_bulk does not expose supported "
-        "temperature and output-token controls. No Bedrock request was sent. "
+        "an output-token control. No Bedrock request was sent. "
         f"Installed signature: {signature}"
     )
 

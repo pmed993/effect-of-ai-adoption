@@ -47,8 +47,8 @@ deployment, AI capability, AI spending, or productivity.
 The pipeline is now frozen as:
 
 ```text
-research_profile = llm_extraction_ai_1to3_v9
-script_version   = 2026-08-14-llm_extraction_v18
+research_profile = llm_extraction_ai_1to3_v10
+script_version   = 2026-08-14-llm_extraction_v19
 prompt_version   = llm_extraction_claude_v7
 ```
 
@@ -57,7 +57,7 @@ Recommended default settings:
 ```text
 model_label       = claude
 model_id          = eu.anthropic.claude-sonnet-4-6
-temperature       = 0.0
+temperature       = dwutils model default (not exposed by invoke_bulk)
 max_prompt_chars  = 2000
 sentence_window   = 1
 max_new_tokens    = 8
@@ -75,11 +75,11 @@ python3 -m pip install -r requirements.txt
 These settings are written into the row-level CSV output and the chunk summary
 JSON so runs can be reproduced later.
 
-The v9 research profile uses the v7 concise prompt and a 2,000-character
+The v10 research profile uses the v7 concise prompt and a 2,000-character
 filing-evidence cap. The prompt is based only on implementation stage
 and scope or core integration. Earlier score files remain valid as historical
-outputs but must not be mixed with v9 files. The extracted EDGAR RDS chunks can
-be reused; run v9 scoring into a new output directory.
+outputs but must not be mixed with v10 files. The extracted EDGAR RDS chunks can
+be reused; run v10 scoring into a new output directory.
 
 ## Why This Design
 
@@ -234,15 +234,18 @@ context.
 
 Using the observed pilot billing rate, the 2,000-character profile is estimated
 at roughly USD 16.7 for initial requests before retries. This remains a planning
-estimate: the pilot should be used to measure the v9 retry rate and actual
+estimate: the pilot should be used to measure the v10 retry rate and actual
 Data Workspace charge before launching all 44 chunks.
 
 The eight-token generation limit does not reduce the dominant input-token cost.
 It prevents rare verbose completions and bounds their output-token cost. Before
 submitting any paid request, the pipeline inspects the installed
-`dwutils.bedrock.invoke_bulk` signature and maps the frozen temperature and
-token limit to its supported parameter names. It fails without submitting if
-those controls cannot be guaranteed.
+`dwutils.bedrock.invoke_bulk` signature and maps the eight-token limit to its
+supported parameter name. Temperature `0.0` is also passed when the installed
+interface exposes temperature. The current Data Workspace interface does not,
+so the row-level temperature field is left missing rather than falsely claiming
+that a value was enforced. The pipeline fails without submitting if it cannot
+enforce the output-token limit.
 
 Verify the installed Data Workspace interface without making a paid request:
 
@@ -250,8 +253,9 @@ Verify the installed Data Workspace interface without making a paid request:
 python3 get_ai_score_bulk.py --check-bedrock-config
 ```
 
-The output must report resolved controls with `temperature` equal to `0.0` and
-an output-token field equal to `8`, followed by `No Bedrock request was sent.`
+The output must report an output-token field equal to `8`, followed by
+`No Bedrock request was sent.` Temperature may be absent when the installed
+interface does not expose it.
 
 Prompt principles:
 
@@ -345,7 +349,7 @@ python3 get_ai_score_bulk.py \
   --sentence-window 1 \
   --skip-existing \
   --flat-output \
-  --out-dir output/final_llm_extraction_v9_2000
+  --out-dir output/final_llm_extraction_v10_2000
 ```
 
 This command assumes the RDS files are stored at the `effect_of_ai` team root.
@@ -360,12 +364,13 @@ Incompatible outputs stop that chunk instead of being silently reused.
 The command exits nonzero when a chunk fails or any filing remains unscored.
 Inspect the run manifest and repair or rerun incomplete chunks before merging.
 
-`temperature` and `max_new_tokens` are fixed by the frozen research profile.
+`max_new_tokens` is fixed by the frozen research profile. Temperature uses the
+`dwutils` model default when `invoke_bulk` does not expose that control.
 After scoring, aggregate the chunk outputs with:
 
 ```bash
 python3 merge_outputs.py \
-  --primary-dir output/final_llm_extraction_v9_2000 \
+  --primary-dir output/final_llm_extraction_v10_2000 \
   --primary-label claude \
   --lookup-csv ../lookup/cik_year.csv \
   --out-dir output/final_merged
