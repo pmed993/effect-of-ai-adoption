@@ -25,12 +25,12 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
-SCRIPT_VERSION = "2026-08-14-llm_extraction_v17"
+SCRIPT_VERSION = "2026-08-14-llm_extraction_v18"
 PROMPT_VERSION = "llm_extraction_claude_v7"
-RESEARCH_PROFILE = "llm_extraction_ai_1to3_v8"
+RESEARCH_PROFILE = "llm_extraction_ai_1to3_v9"
 MODEL_NAME = "eu.anthropic.claude-sonnet-4-6"
 TEMPERATURE = 0.0
-DEFAULT_MAX_NEW_TOKENS = 128
+DEFAULT_MAX_NEW_TOKENS = 8
 # The capped production profile passes through short filing extracts intact and
 # applies anchor-first selection only when evidence exceeds the cap.
 # Zero remains available to send every extracted filing window without a cap.
@@ -549,6 +549,7 @@ class AnchorCandidate:
     operational_score: int
     current_use_score: int
     negation_or_future_score: int
+    strong_current_use: bool
     position: int
     match_start: int
     match_end: int
@@ -654,6 +655,25 @@ NEGATION_CUES = re.compile(
     r"(?i)\b(?:do not|does not|did not|not currently|no current|without)\s+"
     r"(?:use|using|deploy|deploying|implement|implementing|adopt|adopting|apply|applying|"
     r"integrate|integrating|incorporate|incorporating|leverage|leveraging)\b"
+)
+
+# Strong, explicit current-use formulations should outrank generic risk-factor
+# sentences even when the latter spell out "artificial intelligence" and the
+# operational sentence uses only the shorter "AI" abbreviation.
+STRONG_CURRENT_USE_CUES = re.compile(
+    r"(?i)(?:"
+    r"\b(?:we|the company)\s+(?:(?:are|have)\s+)?(?:also\s+)?(?:currently\s+)?"
+    r"(?:use|uses|using|utilize|utilizes|utilizing|deploy|deploys|deploying|"
+    r"implement|implements|implementing|integrate|integrates|integrating|"
+    r"leverage|leverages|leveraging)\b|"
+    r"\bAI[- ](?:powered|enabled)\b|"
+    r"\b(?:powered|enabled)\s+by\s+(?:AI|artificial intelligence)\b|"
+    r"\bour\s+(?:AI|artificial intelligence)[- ](?:powered|enabled)\b"
+    r")"
+)
+
+OTHER_FIRM_CUES = re.compile(
+    r"(?i)\b(?:competitor|competitors|other companies|other firms|third[- ]party)\b"
 )
 
 BACKUP_AUDIT_CUES = re.compile(
@@ -1436,6 +1456,9 @@ def create_anchor_candidates(segments: Sequence[TextSegment]) -> list[AnchorCand
         production_or_strategic = bool(
             PRODUCTION_OR_STRATEGIC_CUES.search(segment.text)
         )
+        strong_current_use = bool(STRONG_CURRENT_USE_CUES.search(segment.text))
+        if future_or_hypothetical or negated_use or OTHER_FIRM_CUES.search(segment.text):
+            strong_current_use = False
 
         current_use_score = 0
         if operational_score and firm_context and not negated_use:
@@ -1466,9 +1489,21 @@ def create_anchor_candidates(segments: Sequence[TextSegment]) -> list[AnchorCand
         current_link = (
             operational_score > 0 and not future_or_hypothetical and not negated_use
         )
-        if current_link and primary.ranking_weight >= 8:
+        risk_or_speculative = (
+            future_or_hypothetical
+            or negated_use
+            or ((low_value or industry_or_risk) and not strong_current_use)
+        )
+        if strong_current_use:
+            quality_band = 5
+        elif (
+            current_link
+            and firm_context
+            and not risk_or_speculative
+            and primary.ranking_weight >= 8
+        ):
             quality_band = 4
-        elif current_link:
+        elif current_link and not risk_or_speculative:
             quality_band = 3
         elif primary.ranking_weight >= 7:
             quality_band = 2
@@ -1494,6 +1529,7 @@ def create_anchor_candidates(segments: Sequence[TextSegment]) -> list[AnchorCand
                 operational_score=operational_score,
                 current_use_score=current_use_score,
                 negation_or_future_score=negation_or_future_score,
+                strong_current_use=strong_current_use,
                 position=segment.position,
                 match_start=primary.start,
                 match_end=primary.end,

@@ -122,7 +122,33 @@ class LlmExtractionScoreTests(unittest.TestCase):
             "competitive environment", " ".join(item.anchor_text for item in candidates)
         )
         self.assertIn("in production", ranked[0].anchor_text)
-        self.assertEqual(ranked[0].quality_band, 4)
+        self.assertEqual(ranked[0].quality_band, 5)
+
+    def test_ai_powered_product_outranks_repetitive_risk_discussion(self) -> None:
+        product = (
+            "Robotic waste sorting equipment consists of smart robots, powered by "
+            "AI software, designed to pick, sort and recycle waste."
+        )
+        risk = (
+            "Issues related to the development, deployment and use of artificial "
+            "intelligence technologies could result in regulatory risk and liability."
+        )
+        text = "\n\n".join([risk, risk.replace("regulatory", "legal"), product])
+
+        candidates = u.create_anchor_candidates(u.normalize_and_segment_text(text))
+        product_candidate = next(
+            candidate for candidate in candidates if "powered by AI" in candidate.anchor_text
+        )
+        risk_candidate = next(
+            candidate
+            for candidate in candidates
+            if "regulatory risk" in candidate.anchor_text
+        )
+        extracted = u.extract_relevant_snippets(text, max_chars=300, sentence_window=0)
+
+        self.assertTrue(product_candidate.strong_current_use)
+        self.assertGreater(product_candidate.quality_band, risk_candidate.quality_band)
+        self.assertIn(product, extracted)
 
     def test_anchor_survives_when_surrounding_window_exceeds_budget(self) -> None:
         previous = "Previous context " + "ordinary disclosure " * 35 + "."
@@ -345,6 +371,7 @@ class LlmExtractionScoreTests(unittest.TestCase):
 
     def test_capped_settings_are_the_frozen_defaults(self) -> None:
         self.assertEqual(u.MODEL_NAME, "eu.anthropic.claude-sonnet-4-6")
+        self.assertEqual(u.DEFAULT_MAX_NEW_TOKENS, 8)
         self.assertEqual(u.DEFAULT_MAX_PROMPT_CHARS, 2_000)
         args = b.parse_args(["--chunk-ids", "1"])
         self.assertEqual(args.model_id, "eu.anthropic.claude-sonnet-4-6")
@@ -379,9 +406,46 @@ class LlmExtractionScoreTests(unittest.TestCase):
         self.assertNotIn('"implementation_stage"', prompt)
 
     def test_concise_profile_versions_are_frozen(self) -> None:
-        self.assertEqual(u.SCRIPT_VERSION, "2026-08-14-llm_extraction_v17")
+        self.assertEqual(u.SCRIPT_VERSION, "2026-08-14-llm_extraction_v18")
         self.assertEqual(u.PROMPT_VERSION, "llm_extraction_claude_v7")
-        self.assertEqual(u.RESEARCH_PROFILE, "llm_extraction_ai_1to3_v8")
+        self.assertEqual(u.RESEARCH_PROFILE, "llm_extraction_ai_1to3_v9")
+
+    def test_bedrock_generation_controls_use_direct_parameters(self) -> None:
+        def invoke_bulk(
+            prompts,
+            *,
+            model_id,
+            max_workers,
+            temperature,
+            max_new_tokens,
+        ):
+            return None
+
+        self.assertEqual(
+            b.bedrock_generation_kwargs(invoke_bulk),
+            {"temperature": 0.0, "max_new_tokens": 8},
+        )
+
+    def test_bedrock_generation_controls_support_inference_config(self) -> None:
+        def invoke_bulk(prompts, *, model_id, max_workers, inference_config):
+            return None
+
+        self.assertEqual(
+            b.bedrock_generation_kwargs(invoke_bulk),
+            {"inference_config": {"temperature": 0.0, "maxTokens": 8}},
+        )
+
+    def test_bedrock_generation_controls_fail_closed_if_unsupported(self) -> None:
+        def invoke_bulk(prompts, *, model_id, max_workers):
+            return None
+
+        with self.assertRaisesRegex(RuntimeError, "No Bedrock request was sent"):
+            b.bedrock_generation_kwargs(invoke_bulk)
+
+    def test_bedrock_config_check_is_available_without_chunk_selection(self) -> None:
+        args = b.parse_args(["--check-bedrock-config"])
+        self.assertTrue(args.check_bedrock_config)
+        self.assertFalse(args.all_chunks)
 
     def test_concise_rubric_does_not_change_output_schema(self) -> None:
         columns = u.preferred_output_columns(save_raw_json=False)

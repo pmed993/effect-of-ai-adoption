@@ -12,6 +12,7 @@ bedrock proxy.
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import logging
 import os
@@ -79,6 +80,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     # QA and sample-filtering options.
     ap.add_argument(
         "--list-only", action="store_true", help="List available chunks and exit."
+    )
+    ap.add_argument(
+        "--check-bedrock-config",
+        action="store_true",
+        help=(
+            "Resolve and print the installed invoke_bulk generation controls, "
+            "then exit without reading chunks or sending a paid request."
+        ),
     )
     ap.add_argument(
         "--max-chunks", type=int, default=0, help="Cap selected chunks after selection."
@@ -655,15 +664,104 @@ def invoke_bedrock(
     model_id: str,
     max_workers: int,
 ):
-    """Submit one dictionary of linked prompts through the Bedrock bulk API."""
+    """Submit prompts with explicitly enforced generation controls."""
 
     from dwutils import bedrock
 
+    generation_kwargs = bedrock_generation_kwargs(bedrock.invoke_bulk)
     return bedrock.invoke_bulk(
         u.iter_bedrock_prompts(pending),
         model_id=model_id,
         max_workers=max_workers,
+        **generation_kwargs,
     )
+
+
+def bedrock_generation_kwargs(invoke_bulk: Any) -> dict[str, Any]:
+    """Map frozen controls onto the installed dwutils invoke_bulk interface.
+
+    Data Workspace versions have exposed generation settings under different
+    parameter names. Resolve the installed signature before any paid request;
+    fail closed when the controls cannot be expressed rather than recording
+    settings that were never sent to Bedrock.
+    """
+
+    try:
+        parameters = inspect.signature(invoke_bulk).parameters
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "Cannot inspect dwutils.bedrock.invoke_bulk; generation controls "
+            "cannot be guaranteed."
+        ) from exc
+
+    names = set(parameters)
+    kwargs: dict[str, Any] = {}
+
+    if "inference_config" in names:
+        kwargs["inference_config"] = {
+            "temperature": u.TEMPERATURE,
+            "maxTokens": u.DEFAULT_MAX_NEW_TOKENS,
+        }
+        return kwargs
+
+    if "model_kwargs" in names:
+        kwargs["model_kwargs"] = {
+            "temperature": u.TEMPERATURE,
+            "max_tokens": u.DEFAULT_MAX_NEW_TOKENS,
+        }
+        return kwargs
+
+    if "temperature" in names:
+        kwargs["temperature"] = u.TEMPERATURE
+
+    token_parameter = next(
+        (
+            name
+            for name in ("max_new_tokens", "max_tokens", "max_tokens_to_sample")
+            if name in names
+        ),
+        None,
+    )
+    if token_parameter:
+        kwargs[token_parameter] = u.DEFAULT_MAX_NEW_TOKENS
+        if "temperature" not in kwargs:
+            raise RuntimeError(
+                "dwutils.bedrock.invoke_bulk exposes an output-token limit but "
+                "not temperature; the frozen generation profile cannot be enforced."
+            )
+        return kwargs
+
+    has_var_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    if has_var_kwargs:
+        # Claude's Bedrock request field is max_tokens; wrappers accepting
+        # arbitrary keyword arguments conventionally forward this field.
+        return {
+            "temperature": u.TEMPERATURE,
+            "max_tokens": u.DEFAULT_MAX_NEW_TOKENS,
+        }
+
+    signature = str(inspect.signature(invoke_bulk))
+    raise RuntimeError(
+        "The installed dwutils.bedrock.invoke_bulk does not expose supported "
+        "temperature and output-token controls. No Bedrock request was sent. "
+        f"Installed signature: {signature}"
+    )
+
+
+def run_bedrock_config_check() -> int:
+    """Print resolved generation controls without invoking the model."""
+
+    from dwutils import bedrock
+
+    signature = str(inspect.signature(bedrock.invoke_bulk))
+    controls = bedrock_generation_kwargs(bedrock.invoke_bulk)
+    print(f"invoke_bulk signature: {signature}")
+    print(f"resolved generation controls: {json.dumps(controls, sort_keys=True)}")
+    print("No Bedrock request was sent.")
+    return 0
 
 
 def score_pending_records(
@@ -969,6 +1067,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         level=getattr(logging, args.log_level),
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
+    if args.check_bedrock_config:
+        return run_bedrock_config_check()
     return run_repairs(args) if args.repair_failed_from_csv else run_chunks(args)
 
 

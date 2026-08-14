@@ -47,8 +47,8 @@ deployment, AI capability, AI spending, or productivity.
 The pipeline is now frozen as:
 
 ```text
-research_profile = llm_extraction_ai_1to3_v8
-script_version   = 2026-08-14-llm_extraction_v17
+research_profile = llm_extraction_ai_1to3_v9
+script_version   = 2026-08-14-llm_extraction_v18
 prompt_version   = llm_extraction_claude_v7
 ```
 
@@ -60,7 +60,7 @@ model_id          = eu.anthropic.claude-sonnet-4-6
 temperature       = 0.0
 max_prompt_chars  = 2000
 sentence_window   = 1
-max_new_tokens    = 128
+max_new_tokens    = 8
 prefilter_mode    = hard_zero
 max_analysis_year = 2025
 ```
@@ -75,11 +75,11 @@ python3 -m pip install -r requirements.txt
 These settings are written into the row-level CSV output and the chunk summary
 JSON so runs can be reproduced later.
 
-The v8 research profile uses the v7 concise prompt and a 2,000-character
+The v9 research profile uses the v7 concise prompt and a 2,000-character
 filing-evidence cap. The prompt is based only on implementation stage
 and scope or core integration. Earlier score files remain valid as historical
-outputs but must not be mixed with v8 files. The extracted EDGAR RDS chunks can
-be reused; run v8 scoring into a new output directory.
+outputs but must not be mixed with v9 files. The extracted EDGAR RDS chunks can
+be reused; run v9 scoring into a new output directory.
 
 ## Why This Design
 
@@ -137,6 +137,11 @@ Explicit terms such as `artificial intelligence`, `machine learning`, and
 such as `transformer`, `Claude`, and `Gemini` must pass local context checks and
 receive lower ranking priority. Bare `learning model` has a non-routing weight;
 it can appear only as context around a separately validated AI anchor.
+
+Concrete current-use formulations such as `we use`, `AI-powered`, and `powered
+by AI` receive the highest evidence-priority band. Generic risk, competitor,
+future, and regulatory sentences cannot displace this direct operational or
+product evidence merely because they spell out `artificial intelligence`.
 
 Abbreviations are compiled independently. Standalone `AI`, `ML`, `NLP`, and
 `LLM` use case-sensitive token boundaries, so dosage units such as `5 mL` do
@@ -229,8 +234,24 @@ context.
 
 Using the observed pilot billing rate, the 2,000-character profile is estimated
 at roughly USD 16.7 for initial requests before retries. This remains a planning
-estimate: the pilot should be used to measure the v8 retry rate and actual
+estimate: the pilot should be used to measure the v9 retry rate and actual
 Data Workspace charge before launching all 44 chunks.
+
+The eight-token generation limit does not reduce the dominant input-token cost.
+It prevents rare verbose completions and bounds their output-token cost. Before
+submitting any paid request, the pipeline inspects the installed
+`dwutils.bedrock.invoke_bulk` signature and maps the frozen temperature and
+token limit to its supported parameter names. It fails without submitting if
+those controls cannot be guaranteed.
+
+Verify the installed Data Workspace interface without making a paid request:
+
+```bash
+python3 get_ai_score_bulk.py --check-bedrock-config
+```
+
+The output must report resolved controls with `temperature` equal to `0.0` and
+an output-token field equal to `8`, followed by `No Bedrock request was sent.`
 
 Prompt principles:
 
@@ -324,7 +345,7 @@ python3 get_ai_score_bulk.py \
   --sentence-window 1 \
   --skip-existing \
   --flat-output \
-  --out-dir output/final_llm_extraction_v8_2000
+  --out-dir output/final_llm_extraction_v9_2000
 ```
 
 This command assumes the RDS files are stored at the `effect_of_ai` team root.
@@ -344,7 +365,7 @@ After scoring, aggregate the chunk outputs with:
 
 ```bash
 python3 merge_outputs.py \
-  --primary-dir output/final_llm_extraction_v8_2000 \
+  --primary-dir output/final_llm_extraction_v9_2000 \
   --primary-label claude \
   --lookup-csv ../lookup/cik_year.csv \
   --out-dir output/final_merged
