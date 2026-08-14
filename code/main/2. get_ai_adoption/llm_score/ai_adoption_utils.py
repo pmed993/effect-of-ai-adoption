@@ -25,9 +25,9 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
-SCRIPT_VERSION = "2026-08-14-llm_extraction_v19"
-PROMPT_VERSION = "llm_extraction_claude_v7"
-RESEARCH_PROFILE = "llm_extraction_ai_1to3_v10"
+SCRIPT_VERSION = "2026-08-14-llm_extraction_v21"
+PROMPT_VERSION = "llm_extraction_claude_v8"
+RESEARCH_PROFILE = "llm_extraction_ai_1to3_v12"
 MODEL_NAME = "eu.anthropic.claude-sonnet-4-6"
 # This dwutils release does not expose temperature on invoke_bulk. Keep the
 # requested value separately for compatible releases, but do not claim that a
@@ -38,7 +38,7 @@ DEFAULT_MAX_NEW_TOKENS = 8
 # The capped production profile passes through short filing extracts intact and
 # applies anchor-first selection only when evidence exceeds the cap.
 # Zero remains available to send every extracted filing window without a cap.
-DEFAULT_MAX_PROMPT_CHARS = 2_000
+DEFAULT_MAX_PROMPT_CHARS = 2_400
 DEFAULT_SENTENCE_WINDOW = 1
 DEFAULT_PREFILTER_MODE = "hard_zero"
 DEFAULT_MAX_ANALYSIS_YEAR = 2025
@@ -1888,6 +1888,7 @@ def _score_rubric() -> str:
         "Score 3 - Established and integrated implementation: Current production or "
         "operational use is explicit AND AI is deployed at meaningful scale or embedded "
         "in a core product, service, function, or process.\n\n"
+        "AI-enabled products or services currently provided by the firm count.\n\n"
         "If the evidence is ambiguous, choose the lower score.\n"
     )
 

@@ -26,6 +26,7 @@ Interpretation:
   current production use that does not satisfy score 3.
 - `3` requires explicit current production or operational use **and** evidence
   of meaningful organizational scale or integration into a core activity.
+  AI-enabled products or services currently provided by the firm count.
   Strategy language and expected benefits alone are insufficient.
 
 The logical derivation is:
@@ -47,9 +48,9 @@ deployment, AI capability, AI spending, or productivity.
 The pipeline is now frozen as:
 
 ```text
-research_profile = llm_extraction_ai_1to3_v10
-script_version   = 2026-08-14-llm_extraction_v19
-prompt_version   = llm_extraction_claude_v7
+research_profile = llm_extraction_ai_1to3_v12
+script_version   = 2026-08-14-llm_extraction_v21
+prompt_version   = llm_extraction_claude_v8
 ```
 
 Recommended default settings:
@@ -58,7 +59,7 @@ Recommended default settings:
 model_label       = claude
 model_id          = eu.anthropic.claude-sonnet-4-6
 temperature       = dwutils model default (not exposed by invoke_bulk)
-max_prompt_chars  = 2000
+max_prompt_chars  = 2400
 sentence_window   = 1
 max_new_tokens    = 8
 prefilter_mode    = hard_zero
@@ -75,11 +76,11 @@ python3 -m pip install -r requirements.txt
 These settings are written into the row-level CSV output and the chunk summary
 JSON so runs can be reproduced later.
 
-The v10 research profile uses the v7 concise prompt and a 2,000-character
+The v12 research profile uses the v8 concise prompt and a 2,400-character
 filing-evidence cap. The prompt is based only on implementation stage
 and scope or core integration. Earlier score files remain valid as historical
-outputs but must not be mixed with v10 files. The extracted EDGAR RDS chunks can
-be reused; run v10 scoring into a new output directory.
+outputs but must not be mixed with v12 files. The extracted EDGAR RDS chunks can
+be reused; run v12 scoring into a new output directory.
 
 ## Why This Design
 
@@ -178,7 +179,7 @@ Recommended audit mode for validation:
 ## Filing Evidence Sent To The Model
 
 The EDGAR stage has already reduced the full filing to merged keyword windows.
-The default, `max_prompt_chars = 2000`, selects anchor-first
+The default, `max_prompt_chars = 2400`, selects anchor-first
 evidence within that limit. Direct keyword-hit text takes priority over
 surrounding context.
 
@@ -215,8 +216,8 @@ Return only one character: 1, 2, or 3.
 ```
 
 `max_prompt_chars` limits only the extracted filing evidence, not the complete
-request. The configured value `2000` produces a maximum 2,908-character
-main prompt and a 2,992-character retry prompt. Set it to `0` to send every
+request. The configured value `2400` produces a maximum 3,379-character
+main prompt and a 3,463-character retry prompt. Set it to `0` to send every
 extracted keyword window for the filing without a character cap. Complete
 prompts are submitted to Bedrock without a second truncation step.
 
@@ -227,15 +228,16 @@ made 6,363 model calls with a 2,400-character evidence cap and only three
 retries. Its maximum prompt-character envelope was 21.37 million characters.
 
 After excluding 2026, the current corpus produces 10,281 calls under
-`hard_zero`. A local preparation pass found that approximately 4,106 calls
-(39.9%) exceed the 2,000-character evidence cap. Anchor-first selection retains
-the direct keyword sentences before spending the remaining budget on adjacent
-context.
+`hard_zero`. A local preparation pass found that 4,106 calls exceeded 2,000
+characters and 2,959 exceeded 3,000 characters. The number affected by the
+2,400-character cap therefore lies between 2,959 and 4,106 calls (28.8% to
+39.9%). Anchor-first selection retains direct keyword sentences before spending
+the remaining budget on adjacent context.
 
-Using the observed pilot billing rate, the 2,000-character profile is estimated
-at roughly USD 16.7 for initial requests before retries. This remains a planning
-estimate: the pilot should be used to measure the v10 retry rate and actual
-Data Workspace charge before launching all 44 chunks.
+Using the observed pilot billing rate, budget roughly USD 18–19 for initial
+requests before retries under the 2,400-character profile. This remains a
+planning estimate: the pilot should be used to measure the v12 retry rate and
+actual Data Workspace charge before launching all 44 chunks.
 
 The eight-token generation limit does not reduce the dominant input-token cost.
 It prevents rare verbose completions and bounds their output-token cost. Before
@@ -345,11 +347,11 @@ python3 get_ai_score_bulk.py \
   --max-analysis-year 2025 \
   --model-id eu.anthropic.claude-sonnet-4-6 \
   --prefilter-mode hard_zero \
-  --max-prompt-chars 2000 \
+  --max-prompt-chars 2400 \
   --sentence-window 1 \
   --skip-existing \
   --flat-output \
-  --out-dir output/final_llm_extraction_v10_2000
+  --out-dir output/final_llm_extraction_v12_2400
 ```
 
 This command assumes the RDS files are stored at the `effect_of_ai` team root.
@@ -370,7 +372,7 @@ After scoring, aggregate the chunk outputs with:
 
 ```bash
 python3 merge_outputs.py \
-  --primary-dir output/final_llm_extraction_v10_2000 \
+  --primary-dir output/final_llm_extraction_v12_2400 \
   --primary-label claude \
   --lookup-csv ../lookup/cik_year.csv \
   --out-dir output/final_merged
@@ -400,9 +402,9 @@ post-processing rules.
 - It measures disclosed adoption, not latent adoption.
 - It depends on the research sample and EDGAR text extraction quality.
 - The hard-zero prefilter excludes 1,304 non-empty extracts in the full corpus,
-  and the 2,000-character evidence cap applies anchor-first selection to
-  approximately 4,106 model-bound extracts
-  in the current through-2025 corpus. Use `--prefilter-mode off
+  and the 2,400-character evidence cap applies anchor-first selection to between
+  2,959 and 4,106 model-bound extracts in the current through-2025 corpus. Use
+  `--prefilter-mode off
   --max-prompt-chars 0` only when maximum recall takes priority over cost.
 - Small LLMs can still make classification errors, which is why the workflow
   keeps prompt structure minimal and output parsing strict.

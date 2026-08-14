@@ -345,8 +345,8 @@ class LlmExtractionScoreTests(unittest.TestCase):
         evidence = "A" * 1800
         prompt = u.build_ai_prompt(evidence)
         retry_prompt = u.build_ai_retry_prompt(evidence)
-        self.assertEqual(len(prompt), 2708)
-        self.assertEqual(len(retry_prompt), 2792)
+        self.assertEqual(len(prompt), 2779)
+        self.assertEqual(len(retry_prompt), 2863)
         self.assertIn(f"<filing_text>\n{evidence}\n</filing_text>", prompt)
         self.assertIn(f"<filing_text>\n{evidence}\n</filing_text>", retry_prompt)
 
@@ -374,14 +374,14 @@ class LlmExtractionScoreTests(unittest.TestCase):
         self.assertIsNone(u.TEMPERATURE)
         self.assertEqual(u.REQUESTED_TEMPERATURE, 0.0)
         self.assertEqual(u.DEFAULT_MAX_NEW_TOKENS, 8)
-        self.assertEqual(u.DEFAULT_MAX_PROMPT_CHARS, 2_000)
+        self.assertEqual(u.DEFAULT_MAX_PROMPT_CHARS, 2_400)
         args = b.parse_args(["--chunk-ids", "1"])
         self.assertEqual(args.model_id, "eu.anthropic.claude-sonnet-4-6")
-        self.assertEqual(args.max_prompt_chars, 2_000)
+        self.assertEqual(args.max_prompt_chars, 2_400)
         self.assertEqual(args.prefilter_mode, "hard_zero")
         self.assertEqual(args.max_analysis_year, 2025)
-        self.assertEqual(len(u.build_ai_prompt("A" * 2_000)), 2_908)
-        self.assertEqual(len(u.build_ai_retry_prompt("A" * 2_000)), 2_992)
+        self.assertEqual(len(u.build_ai_prompt("A" * 2_400)), 3_379)
+        self.assertEqual(len(u.build_ai_retry_prompt("A" * 2_400)), 3_463)
         with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
             b.parse_args(["--chunk-ids", "1", "--max-prompt-chars", "-1"])
 
@@ -393,6 +393,10 @@ class LlmExtractionScoreTests(unittest.TestCase):
         self.assertIn("current use or specific active implementation", prompt)
         self.assertIn("Score 2 - Emerging or bounded implementation", prompt)
         self.assertIn("operational use is explicit AND", prompt)
+        self.assertIn(
+            "AI-enabled products or services currently provided by the firm count",
+            prompt,
+        )
         self.assertIn("If the evidence is ambiguous, choose the lower score", prompt)
         self.assertNotIn("AI may be developed internally or obtained externally", prompt)
         self.assertNotIn("Realized importance", prompt)
@@ -408,9 +412,9 @@ class LlmExtractionScoreTests(unittest.TestCase):
         self.assertNotIn('"implementation_stage"', prompt)
 
     def test_concise_profile_versions_are_frozen(self) -> None:
-        self.assertEqual(u.SCRIPT_VERSION, "2026-08-14-llm_extraction_v19")
-        self.assertEqual(u.PROMPT_VERSION, "llm_extraction_claude_v7")
-        self.assertEqual(u.RESEARCH_PROFILE, "llm_extraction_ai_1to3_v10")
+        self.assertEqual(u.SCRIPT_VERSION, "2026-08-14-llm_extraction_v21")
+        self.assertEqual(u.PROMPT_VERSION, "llm_extraction_claude_v8")
+        self.assertEqual(u.RESEARCH_PROFILE, "llm_extraction_ai_1to3_v12")
 
     def test_bedrock_generation_controls_use_direct_parameters(self) -> None:
         def invoke_bulk(
