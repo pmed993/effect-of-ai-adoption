@@ -319,8 +319,8 @@ class LlmExtractionScoreTests(unittest.TestCase):
         evidence = "A" * 1800
         prompt = u.build_ai_prompt(evidence)
         retry_prompt = u.build_ai_retry_prompt(evidence)
-        self.assertEqual(len(prompt), 2822)
-        self.assertEqual(len(retry_prompt), 2906)
+        self.assertEqual(len(prompt), 2708)
+        self.assertEqual(len(retry_prompt), 2792)
         self.assertIn(f"<filing_text>\n{evidence}\n</filing_text>", prompt)
         self.assertIn(f"<filing_text>\n{evidence}\n</filing_text>", retry_prompt)
 
@@ -343,46 +343,45 @@ class LlmExtractionScoreTests(unittest.TestCase):
         self.assertLess(len(expected), 10_000)
         self.assertEqual(u.extract_relevant_snippets(text, 10_000, 1), expected)
 
-    def test_high_context_settings_are_the_frozen_defaults(self) -> None:
+    def test_capped_settings_are_the_frozen_defaults(self) -> None:
         self.assertEqual(u.MODEL_NAME, "eu.anthropic.claude-sonnet-4-6")
-        self.assertEqual(u.DEFAULT_MAX_PROMPT_CHARS, 10_000)
+        self.assertEqual(u.DEFAULT_MAX_PROMPT_CHARS, 2_000)
         args = b.parse_args(["--chunk-ids", "1"])
         self.assertEqual(args.model_id, "eu.anthropic.claude-sonnet-4-6")
-        self.assertEqual(args.max_prompt_chars, 10_000)
+        self.assertEqual(args.max_prompt_chars, 2_000)
         self.assertEqual(args.prefilter_mode, "hard_zero")
         self.assertEqual(args.max_analysis_year, 2025)
-        self.assertEqual(len(u.build_ai_prompt("A" * 10_000)), 11_022)
-        self.assertEqual(len(u.build_ai_retry_prompt("A" * 10_000)), 11_106)
+        self.assertEqual(len(u.build_ai_prompt("A" * 2_000)), 2_908)
+        self.assertEqual(len(u.build_ai_retry_prompt("A" * 2_000)), 2_992)
         with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
             b.parse_args(["--chunk-ids", "1", "--max-prompt-chars", "-1"])
 
     def test_prompt_uses_concise_ordered_score_derivation(self) -> None:
         prompt = u.build_ai_prompt("We use machine learning in production.")
         self.assertLessEqual(len(u._score_rubric()), 1000)
-        self.assertIn("AI may be developed internally or obtained externally", prompt)
+        self.assertIn("You are an expert analyst", prompt)
+        self.assertIn("Do not rely on outside knowledge", prompt)
         self.assertIn("current use or specific active implementation", prompt)
         self.assertIn("Score 2 - Emerging or bounded implementation", prompt)
         self.assertIn("operational use is explicit AND", prompt)
-        self.assertIn(
-            "Strategy or expected benefits alone cannot support Score 3",
-            prompt,
-        )
-        self.assertIn("When evidence is ambiguous, choose the lower score", prompt)
+        self.assertIn("If the evidence is ambiguous, choose the lower score", prompt)
+        self.assertNotIn("AI may be developed internally or obtained externally", prompt)
         self.assertNotIn("Realized importance", prompt)
         self.assertNotIn("meaningful realized effect", prompt)
 
     def test_retry_prompt_preserves_one_character_contract(self) -> None:
         prompt = u.build_ai_retry_prompt("We use machine learning in production.")
-        self.assertIn("AI may be developed internally or obtained externally", prompt)
+        self.assertIn("You are an expert analyst", prompt)
+        self.assertIn("Do not rely on outside knowledge", prompt)
         self.assertIn("current use or specific active implementation", prompt)
         self.assertIn("operational use is explicit AND", prompt)
         self.assertIn("Output exactly one ASCII digit", prompt)
         self.assertNotIn('"implementation_stage"', prompt)
 
     def test_concise_profile_versions_are_frozen(self) -> None:
-        self.assertEqual(u.SCRIPT_VERSION, "2026-08-14-llm_extraction_v15")
-        self.assertEqual(u.PROMPT_VERSION, "llm_extraction_claude_v6")
-        self.assertEqual(u.RESEARCH_PROFILE, "llm_extraction_ai_1to3_v6")
+        self.assertEqual(u.SCRIPT_VERSION, "2026-08-14-llm_extraction_v17")
+        self.assertEqual(u.PROMPT_VERSION, "llm_extraction_claude_v7")
+        self.assertEqual(u.RESEARCH_PROFILE, "llm_extraction_ai_1to3_v8")
 
     def test_concise_rubric_does_not_change_output_schema(self) -> None:
         columns = u.preferred_output_columns(save_raw_json=False)

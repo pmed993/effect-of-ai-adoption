@@ -25,16 +25,16 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 # These values are written into every output file so results can be traced back
 # to the exact script and prompt version that produced them.
-SCRIPT_VERSION = "2026-08-14-llm_extraction_v15"
-PROMPT_VERSION = "llm_extraction_claude_v6"
-RESEARCH_PROFILE = "llm_extraction_ai_1to3_v6"
+SCRIPT_VERSION = "2026-08-14-llm_extraction_v17"
+PROMPT_VERSION = "llm_extraction_claude_v7"
+RESEARCH_PROFILE = "llm_extraction_ai_1to3_v8"
 MODEL_NAME = "eu.anthropic.claude-sonnet-4-6"
 TEMPERATURE = 0.0
 DEFAULT_MAX_NEW_TOKENS = 128
-# The high-context production profile passes through ordinary filing extracts
-# intact and applies anchor-first selection only when evidence exceeds the cap.
+# The capped production profile passes through short filing extracts intact and
+# applies anchor-first selection only when evidence exceeds the cap.
 # Zero remains available to send every extracted filing window without a cap.
-DEFAULT_MAX_PROMPT_CHARS = 10_000
+DEFAULT_MAX_PROMPT_CHARS = 2_000
 DEFAULT_SENTENCE_WINDOW = 1
 DEFAULT_PREFILTER_MODE = "hard_zero"
 DEFAULT_MAX_ANALYSIS_YEAR = 2025
@@ -1840,7 +1840,6 @@ def _score_rubric() -> str:
     """Return the concise 1-3 AI-adoption decision framework."""
 
     return (
-        "AI may be developed internally or obtained externally.\n\n"
         "Score 1 - No disclosed current implementation: No concrete current use or "
         "specific active implementation. Plans, exploration, risks, general discussion, "
         "capacity building, and AI activity by other firms do not count.\n"
@@ -1849,8 +1848,7 @@ def _score_rubric() -> str:
         "Score 3 - Established and integrated implementation: Current production or "
         "operational use is explicit AND AI is deployed at meaningful scale or embedded "
         "in a core product, service, function, or process.\n\n"
-        "A pilot is Score 2. Strategy or expected benefits alone cannot support Score 3. "
-        "When evidence is ambiguous, choose the lower score.\n"
+        "If the evidence is ambiguous, choose the lower score.\n"
     )
 
 
@@ -1858,10 +1856,10 @@ def build_ai_prompt(text: str) -> str:
     """Build the main Claude-style 1-3 AI-adoption scoring prompt."""
 
     return (
-        "Classify the firm's disclosed AI adoption using the rules below.\n"
-        "Use only the extracted filing evidence; do not infer missing facts.\n\n"
+        "You are an expert analyst. Using the classification rules below, classify the "
+        "firm's disclosed AI adoption using only the extracted filing evidence. Do not "
+        "rely on outside knowledge.\n\n"
         f"{_score_rubric()}\n"
-        "Choose the single best score.\n"
         "Return only one character: 1, 2, or 3.\n\n"
         "EXTRACTED FILING EVIDENCE:\n"
         "<filing_text>\n"
@@ -1874,10 +1872,10 @@ def build_ai_retry_prompt(text: str) -> str:
     """Build a stricter retry prompt that asks for only one digit."""
 
     return (
-        "Classify the firm's disclosed AI adoption using the rules below.\n"
-        "Use only the extracted filing evidence; do not infer missing facts.\n\n"
+        "You are an expert analyst. Using the classification rules below, classify the "
+        "firm's disclosed AI adoption using only the extracted filing evidence. Do not "
+        "rely on outside knowledge.\n\n"
         f"{_score_rubric()}\n"
-        "Choose the single best score.\n"
         "Output exactly one ASCII digit—1, 2, or 3—and nothing else. "
         "Do not include an explanation, punctuation, markdown, or JSON.\n\n"
         "EXTRACTED FILING EVIDENCE:\n"

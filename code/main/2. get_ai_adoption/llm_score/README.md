@@ -36,10 +36,8 @@ score 2: concrete implementation AND (specific pilot OR bounded production use)
 score 3: current production use AND (meaningful scale OR core integration)
 ```
 
-A narrow use can therefore receive score 3 when it is demonstrably core. AI
-may be developed internally or obtained externally, but it counts only with
-evidence of active implementation or use, including in products or services
-currently provided by the firm. Ambiguous evidence receives the lower score.
+A narrow use can therefore receive score 3 when it is demonstrably core.
+Ambiguous evidence receives the lower score.
 
 This is a measure of disclosed AI adoption, not a direct measure of true AI
 deployment, AI capability, AI spending, or productivity.
@@ -49,9 +47,9 @@ deployment, AI capability, AI spending, or productivity.
 The pipeline is now frozen as:
 
 ```text
-research_profile = llm_extraction_ai_1to3_v6
-script_version   = 2026-08-14-llm_extraction_v15
-prompt_version   = llm_extraction_claude_v6
+research_profile = llm_extraction_ai_1to3_v8
+script_version   = 2026-08-14-llm_extraction_v17
+prompt_version   = llm_extraction_claude_v7
 ```
 
 Recommended default settings:
@@ -60,7 +58,7 @@ Recommended default settings:
 model_label       = claude
 model_id          = eu.anthropic.claude-sonnet-4-6
 temperature       = 0.0
-max_prompt_chars  = 10000
+max_prompt_chars  = 2000
 sentence_window   = 1
 max_new_tokens    = 128
 prefilter_mode    = hard_zero
@@ -77,10 +75,11 @@ python3 -m pip install -r requirements.txt
 These settings are written into the row-level CSV output and the chunk summary
 JSON so runs can be reproduced later.
 
-The v6 prompt uses a concise decision tree based only on implementation stage
+The v8 research profile uses the v7 concise prompt and a 2,000-character
+filing-evidence cap. The prompt is based only on implementation stage
 and scope or core integration. Earlier score files remain valid as historical
-outputs but must not be mixed with v6 files. The extracted EDGAR RDS chunks can
-be reused; run v6 scoring into a new output directory.
+outputs but must not be mixed with v8 files. The extracted EDGAR RDS chunks can
+be reused; run v8 scoring into a new output directory.
 
 ## Why This Design
 
@@ -174,7 +173,7 @@ Recommended audit mode for validation:
 ## Filing Evidence Sent To The Model
 
 The EDGAR stage has already reduced the full filing to merged keyword windows.
-The default, `max_prompt_chars = 10000`, selects anchor-first
+The default, `max_prompt_chars = 2000`, selects anchor-first
 evidence within that limit. Direct keyword-hit text takes priority over
 surrounding context.
 
@@ -202,17 +201,17 @@ to send the complete filing-level extraction instead.
 The prompt is intentionally short:
 
 ```text
-Classify the firm's disclosed AI adoption using the rules below.
-Use only the extracted filing evidence; do not infer missing facts.
+You are an expert analyst. Using the classification rules below, classify the
+firm's disclosed AI adoption using only the extracted filing evidence. Do not
+rely on outside knowledge.
 [frozen 1-3 rubric]
-Choose the single best score.
 Return only one character: 1, 2, or 3.
 [extracted filing evidence]
 ```
 
 `max_prompt_chars` limits only the extracted filing evidence, not the complete
-request. The configured value `10000` produces a maximum 11,022-character
-main prompt and an 11,106-character retry prompt. Set it to `0` to send every
+request. The configured value `2000` produces a maximum 2,908-character
+main prompt and a 2,992-character retry prompt. Set it to `0` to send every
 extracted keyword window for the filing without a character cap. Complete
 prompts are submitted to Bedrock without a second truncation step.
 
@@ -223,24 +222,15 @@ made 6,363 model calls with a 2,400-character evidence cap and only three
 retries. Its maximum prompt-character envelope was 21.37 million characters.
 
 After excluding 2026, the current corpus produces 10,281 calls under
-`hard_zero`. A local preparation pass found that 745 calls (7.25%) exceed the
-10,000-character evidence cap. Before anchor selection, applying the cap gives
-a conservative upper estimate of 26.99 million evidence characters and 37.50
-million total main-prompt characters before retries, retaining at most 77.9%
-of all extracted evidence characters.
+`hard_zero`. A local preparation pass found that approximately 4,106 calls
+(39.9%) exceed the 2,000-character evidence cap. Anchor-first selection retains
+the direct keyword sentences before spending the remaining budget on adjacent
+context.
 
-The 37.50-million-character upper estimate is 1.76 times the **maximum** prompt
-envelope of the previous Sonnet run. It should therefore not be expected to
-retain the previous sub-USD-5 cost. If that run was close to USD 5, a rough
-proportional planning allowance is around USD 9 or more, subject to Data
-Workspace pricing, tokenization, caching, and retry behavior. Because the
-previous figure is an upper bound rather than its measured input volume, the
-actual multiplier could be higher.
-
-For a workload close to the previous sub-USD-5 envelope, explicitly use
-`--max-prompt-chars 900`; its 19.76-million-character maximum is about 7.5%
-below the previous envelope. The project default remains 10,000 as a compromise
-between context retention and cost.
+Using the observed pilot billing rate, the 2,000-character profile is estimated
+at roughly USD 16.7 for initial requests before retries. This remains a planning
+estimate: the pilot should be used to measure the v8 retry rate and actual
+Data Workspace charge before launching all 44 chunks.
 
 Prompt principles:
 
@@ -325,23 +315,25 @@ score_explanation
 ```bash
 python3 get_ai_score_bulk.py \
   --team effect_of_ai \
-  --chunk-prefix edgar_keyword_windows_full \
   --all-chunks \
   --lookup-csv ../lookup/cik_year.csv \
   --max-analysis-year 2025 \
   --model-id eu.anthropic.claude-sonnet-4-6 \
   --prefilter-mode hard_zero \
-  --max-prompt-chars 10000 \
+  --max-prompt-chars 2000 \
   --sentence-window 1 \
   --skip-existing \
-  --out-dir output/final_llm_extraction
+  --flat-output \
+  --out-dir output/final_llm_extraction_v8_2000
 ```
 
-Use a new, clean `--chunk-prefix` containing only the RDS files from one EDGAR
-run. The scorer deliberately requires `--all-chunks` or another explicit chunk
+This command assumes the RDS files are stored at the `effect_of_ai` team root.
+Add `--chunk-prefix NAME` only when all 44 files are inside that exact folder.
+The scorer deliberately requires `--all-chunks` or another explicit chunk
 selection option; it will not guess which uploaded files should be processed.
 `--skip-existing` skips a chunk only when its stored profile, model, prefilter,
 prompt budget, source path, and other scoring settings match the current run.
+`--flat-output` makes this resume behavior work across separate invocations.
 Incompatible outputs stop that chunk instead of being silently reused.
 
 The command exits nonzero when a chunk fails or any filing remains unscored.
@@ -352,8 +344,9 @@ After scoring, aggregate the chunk outputs with:
 
 ```bash
 python3 merge_outputs.py \
-  --primary-dir output/final_llm_extraction/RUN_ID \
+  --primary-dir output/final_llm_extraction_v8_2000 \
   --primary-label claude \
+  --lookup-csv ../lookup/cik_year.csv \
   --out-dir output/final_merged
 ```
 
@@ -381,7 +374,8 @@ post-processing rules.
 - It measures disclosed adoption, not latent adoption.
 - It depends on the research sample and EDGAR text extraction quality.
 - The hard-zero prefilter excludes 1,304 non-empty extracts in the full corpus,
-  and the 10,000-character evidence cap truncates up to 745 model-bound extracts
+  and the 2,000-character evidence cap applies anchor-first selection to
+  approximately 4,106 model-bound extracts
   in the current through-2025 corpus. Use `--prefilter-mode off
   --max-prompt-chars 0` only when maximum recall takes priority over cost.
 - Small LLMs can still make classification errors, which is why the workflow
