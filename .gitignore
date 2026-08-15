@@ -60,10 +60,13 @@ po/*~
 # Project folder
 data/*
 cache/*
+.venv-edgar/
 figure/*
 output/*
 external/*
 code/main/2. get_ai_adoption/llm_score/__pycache__/
+__pycache__/
+*.py[cod]
 
 # RStudio Connect folder
 rsconnect/
