@@ -310,6 +310,51 @@ llm_extraction_filing_master.csv
 llm_extraction_firm_year_panel.csv
 ```
 
+### Reproducible scoring-example table
+
+After the merge completes, `build_ai_scoring_examples.R` creates a compact,
+paper-audit CSV containing one curated EDGAR keyword window for each score. It
+combines the final score, SEC firm metadata, exact keyword hits, and the complete
+stored extraction-window text. The selection is transparent and editable in
+`scoring_example_selection.csv`; no model call or additional cost is involved.
+
+Run this command from the repository root, replacing the merged-output path if
+needed:
+
+```bash
+Rscript "code/main/2. get_ai_adoption/llm_score/build_ai_scoring_examples.R" \
+  --snippet-audit output/final_merged/llm_extraction_snippet_audit.csv \
+  --filing-manifest cache/edgar_keyword_windows/filing_manifest.csv \
+  --rds-dir cache/edgar_keyword_windows/assembled \
+  --selection "code/main/2. get_ai_adoption/llm_score/scoring_example_selection.csv" \
+  --out output/summary_stats/ai_scoring_example/ai_adoption_scoring_examples.csv
+```
+
+The script reads the assembled RDS files sequentially and stops once all selected
+windows are found, so it does not load the full extraction corpus into memory.
+It fails rather than writing a misleading table if a filing is absent, a selected
+window is missing, an accession is duplicated, or the final score differs from
+the score declared in the selection file. The resulting columns include:
+
+```text
+score
+firm_name
+year
+form
+keyword_hits
+keyword_hit_count
+actual_extracted_chunk
+source_chunk
+window_id
+scoring_chunk
+cik
+filing_accession
+parse_status
+score_status
+model_snippet_chars
+model_snippet_at_limit
+```
+
 Duplicate accessions stop the merge and are written to
 `filing_accession_duplicates.csv` for review. The extractor keeps all windows
 for one accession in the same input chunk, so duplicates indicate overlapping
