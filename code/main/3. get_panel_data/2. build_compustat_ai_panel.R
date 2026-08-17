@@ -255,6 +255,29 @@ panel[, ai_adopted := fifelse(
   fifelse(ai_adoption_year > 0L & year >= ai_adoption_year, 1L, 0L)
 )]
 
+# `ai_adoption_3_year` is the first year with ai_score == 3. As above, firms
+# observed in the AI panel but never reaching score 3 receive 0. Score-2-only
+# firms are identified and removed in the score-3 DiD sample, rather than here,
+# so treated firms retain any score-2 observations that precede score 3.
+panel[, ai_adoption_3_year := {
+  treated_3_years <- year[!is.na(ai_score) & ai_score == 3L]
+  observed_years <- year[!is.na(ai_score)]
+
+  if (length(treated_3_years) > 0L) {
+    min(treated_3_years)
+  } else if (length(observed_years) > 0L) {
+    0L
+  } else {
+    NA_integer_
+  }
+}, by = cik]
+
+panel[, ai_adopted3 := fifelse(
+  is.na(ai_adoption_3_year),
+  NA_integer_,
+  fifelse(ai_adoption_3_year > 0L & year >= ai_adoption_3_year, 1L, 0L)
+)]
+
 
 # ---- Build matched and unmatched samples --------------------------------------
 panel_analysis_window <- panel[year >= ANALYSIS_START_YEAR & year <= ANALYSIS_END_YEAR]
