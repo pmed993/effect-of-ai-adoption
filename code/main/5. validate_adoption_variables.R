@@ -17,7 +17,7 @@ library(ggplot2)
 
 
 # ---- Settings ----------------------------------------------------------------
-ABS_REFERENCE_YEAR <- 2022L
+ABS_REFERENCE_YEAR <- c(2020, 2021, 2022) # 2022L
 ABS_QDESC <- "B70"
 ABS_QDESC_LABEL <- "TECHADOPT"
 ABS_BUSCHAR <- "T01A04"
@@ -168,20 +168,24 @@ read_abs_naics2_ai_use <- function(path) {
       QDESC == ABS_QDESC,
       QDESC_LABEL == ABS_QDESC_LABEL,
       BUSCHAR == ABS_BUSCHAR,
-      YEAR == as.character(ABS_REFERENCE_YEAR),
+      YEAR %in% as.character(ABS_REFERENCE_YEAR),
       is.na(FIRMPDEMP_PCT_F) | FIRMPDEMP_PCT_F == ""
     ) |>
     transmute(
+      year = as.integer(YEAR),
       naics2 = NAICS2022,
       abs_naics2_title = NAICS2022_LABEL,
       abs_ai_adopting_firms = suppressWarnings(as.numeric(FIRMPDEMP)),
-      abs_ai_adopting_firms_se = suppressWarnings(as.numeric(FIRMPDEMP_S)),
-      abs_ai_adoption_share = suppressWarnings(as.numeric(FIRMPDEMP_PCT)) / 100,
-      abs_ai_adoption_share_se = suppressWarnings(as.numeric(FIRMPDEMP_PCT_S)) / 100,
-      abs_firm_estimate_flag = FIRMPDEMP_F,
-      abs_share_estimate_flag = FIRMPDEMP_PCT_F
+      abs_ai_adoption_share = suppressWarnings(as.numeric(FIRMPDEMP_PCT)) / 100
     ) |>
     filter(!is.na(abs_ai_adoption_share)) |>
+    group_by(naics2, abs_naics2_title) |>
+    summarise(
+      abs_ai_adopting_firms = mean(abs_ai_adopting_firms, na.rm = TRUE),
+      abs_ai_adoption_share = mean(abs_ai_adoption_share, na.rm = TRUE),
+      n_abs_years = n_distinct(year),
+      .groups = "drop"
+    ) |>
     arrange(naics2)
 
   duplicate_naics2 <- abs_naics2 |>
@@ -224,7 +228,7 @@ panel_btos_validation <- panel_ai |>
 panel_abs_validation <- panel_ai |>
   filter(
     !is.na(year),
-    year == ABS_REFERENCE_YEAR,
+    year %in% ABS_REFERENCE_YEAR,
     !is.na(ai_score)
   )
 
@@ -247,7 +251,8 @@ validation_sample_overview <- tibble::tibble(
     format(nrow(panel_btos_validation), big.mark = ","),
     format(dplyr::n_distinct(panel_btos_validation$cik), big.mark = ","),
     "Matched Compustat + AI panel only",
-    ABS_REFERENCE_YEAR,
+    paste0(ABS_REFERENCE_YEAR[1], "-", ABS_REFERENCE_YEAR[length(ABS_REFERENCE_YEAR)]),
+#    ABS_REFERENCE_YEAR,
     format(nrow(panel_abs_validation), big.mark = ","),
     format(dplyr::n_distinct(panel_abs_validation$cik), big.mark = ","),
     dplyr::n_distinct(panel_abs_validation$naics2[!is.na(panel_abs_validation$naics2) & panel_abs_validation$naics2 != ""]),
@@ -279,7 +284,7 @@ naics2_abs_validation <- panel_abs_naics2 |>
 abs_validation_overview <- build_validation_overview(
   naics2_abs_validation,
   external_col = "abs_ai_adoption_share",
-  sample_label = "NAICS2 sectors in the 2022 matched Compustat + AI panel",
+  sample_label = "NAICS2 sectors in the 2020-2022 matched Compustat + AI panel",
   measure_label = paste0(
     "2023 ABS: ", ABS_QDESC, "/", ABS_QDESC_LABEL, ", ", ABS_BUSCHAR,
     " (AI used in processes or methods)"
@@ -320,7 +325,7 @@ validation_plot_data <- bind_rows(
     ),
   naics2_abs_validation |>
     transmute(
-      benchmark = "Census ABS (2022)",
+      benchmark = "Census ABS (2020-2022)",
       naics2,
       naics2_title,
       external_ai_adoption_share = abs_ai_adoption_share,
@@ -330,7 +335,7 @@ validation_plot_data <- bind_rows(
   mutate(
     benchmark = factor(
       benchmark,
-      levels = c("BTOS (2023-2025)", "Census ABS (2022)")
+      levels = c("BTOS (2023-2025)", "Census ABS (2020-2022)")
     )
   )
 
@@ -362,14 +367,14 @@ validation_correlation_labels <- bind_rows(
     correlation = btos_validation_overview$corr_mean_ai_score
   ),
   tibble::tibble(
-    benchmark = "Census ABS (2022)",
+    benchmark = "Census ABS (2020-2022)",
     correlation = abs_validation_overview$corr_mean_ai_score
   )
 ) |>
   mutate(
     benchmark = factor(
       benchmark,
-      levels = c("BTOS (2023-2025)", "Census ABS (2022)")
+      levels = c("BTOS (2023-2025)", "Census ABS (2020-2022)")
     ),
     label = paste0(
       "Pearson r = ",
@@ -431,7 +436,7 @@ p_validation_side_by_side <- ggplot(
     fill = "white",
     color = "gray20"
   ) +
-  facet_wrap(~ benchmark, ncol = 2, scales = "free_x") +
+  facet_wrap(~ benchmark, ncol = 2, scales = "free") +
   scale_x_continuous(
     labels = scales::percent_format(accuracy = 1),
     breaks = scales::pretty_breaks(n = 5),
@@ -439,14 +444,14 @@ p_validation_side_by_side <- ggplot(
   ) +
   scale_y_continuous(
     breaks = c(1, 1.5, 2, 2.5, 3),
-    expand = expansion(mult = c(0.03, 0.12))
+    expand = expansion(mult = c(0.03, 0.06))
   ) +
   labs(
     x = "External AI adoption share",
     y = "Mean filing-based AI score (1-3)",
     caption = paste0(
       "Census ABS: ", ABS_QDESC, "/", ABS_QDESC_LABEL, ", ", ABS_BUSCHAR,
-      "; 2023 collection, reference year 2022."
+      "; 2023 collection, reference year (2020-2022)"
     )
   ) +
   theme_minimal(base_size = VALIDATION_PLOT_BASE_SIZE) +

@@ -262,9 +262,9 @@ score_distribution_overall <- panel_diag |>
   mutate(
     share_firm_years = n_firm_years / sum(n_firm_years),
     ai_score_label = dplyr::case_when(
-      ai_score == 1L ~ "No current adoption",
-      ai_score == 2L ~ "Limited / targeted adoption",
-      ai_score == 3L ~ "Production / strategic adoption",
+      ai_score == 1L ~ "No disclosed current implementation",
+      ai_score == 2L ~ "Emerging / bounded implementation",
+      ai_score == 3L ~ "Established / integrated implementation",
       TRUE ~ "Other"
     )
   ) |>
@@ -283,6 +283,24 @@ treated_share_by_year <- panel_diag |>
     .groups = "drop"
   ) |>
   round_numeric_cols()
+
+score_distribution_by_year <- panel_diag |>
+  count(year, ai_score, name = "n_firm_years") |>
+  group_by(year) |>
+  mutate(
+    share_firm_years = n_firm_years / sum(n_firm_years),
+    score_label = factor(
+      ai_score,
+      levels = c(1, 2, 3),
+      labels = c(
+        "1: No disclosed current implementation",
+        "2: Emerging/bounded implementation",
+        "3: Established/integrated implementation"
+      )
+    ),
+    label_colour = if_else(ai_score == 1L, "dark", "light")
+  ) |>
+  ungroup()
 
 
 # ---- Industry coverage --------------------------------------------------------
@@ -407,6 +425,15 @@ p_treated_share_by_year <- ggplot(treated_share_by_year, aes(x = year, y = share
     breaks = seq(0, 1, by = 0.2),
     expand = c(0, 0)
   ) +
+  scale_x_continuous(
+    breaks = seq(
+      min(treated_share_by_year$year),
+      max(treated_share_by_year$year),
+      by = 1
+    ),
+    labels = function(x) sprintf("%.0f", x),
+    expand = expansion(mult = c(0.015, 0.015))
+  ) +
   labs(
     title = NULL,
     x = "Year",
@@ -418,6 +445,14 @@ p_mean_ai_score_by_year <- ggplot(treated_share_by_year, aes(x = year, y = mean_
   geom_line(color = "#E15759", linewidth = 1) +
   geom_point(color = "#E15759", size = 2) +
   scale_y_continuous(breaks = c(1, 2, 3)) +
+  scale_x_continuous(
+    breaks = seq(
+      min(treated_share_by_year$year),
+      max(treated_share_by_year$year),
+      by = 1
+    ),
+    labels = function(x) sprintf("%.0f", x)
+  ) +
   coord_cartesian(ylim = c(1, 3)) +
   labs(
     title = NULL,
@@ -440,13 +475,6 @@ p_panel_trends_side_by_side <- (
     axis.text = element_text(size = 13)
   )
 
-score_distribution_by_year <- panel_diag |>
-  count(year, ai_score, name = "n_firm_years") |>
-  group_by(year) |>
-  mutate(share_firm_years = n_firm_years / sum(n_firm_years)) |>
-  ungroup() |>
-  round_numeric_cols()
-
 p_score_mix_by_year <- ggplot(
   score_distribution_by_year,
   aes(x = year, y = share_firm_years, fill = factor(ai_score))
@@ -459,6 +487,80 @@ p_score_mix_by_year <- ggplot(
     y = "Share of firm-years"
   ) +
   theme_minimal(base_size = 12)
+
+p_ai_intensity <- ggplot(
+  score_distribution_by_year,
+  aes(x = year, y = share_firm_years, fill = score_label)
+) +
+  geom_col(width = 0.78, colour = "white", linewidth = 0.25) +
+  geom_text(
+    aes(
+      label = if_else(
+        share_firm_years >= 0.04,
+        scales::percent(share_firm_years, accuracy = 1),
+        ""
+      ),
+      colour = label_colour
+    ),
+    position = position_stack(vjust = 0.5),
+    size = 3.2,
+    fontface = "bold",
+    show.legend = FALSE
+  ) +
+  scale_colour_manual(
+    values = c("dark" = "#374151", "light" = "white")
+  ) +
+  scale_fill_manual(
+    values = c(
+      "1: No disclosed current implementation" = "#CBD5DF",
+      "2: Emerging/bounded implementation" = "#5B9ABD",
+      "3: Established/integrated implementation" = "#1F4E79"
+    ),
+    labels = c(
+      "1  No disclosed current implementation",
+      "2  Emerging / bounded implementation",
+      "3  Established / integrated implementation"
+    )
+  ) +
+  scale_x_continuous(
+    breaks = seq(
+      min(score_distribution_by_year$year),
+      max(score_distribution_by_year$year),
+      by = 1
+    ),
+    labels = function(x) sprintf("%.0f", x),
+    expand = expansion(mult = c(0.015, 0.015))
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    breaks = seq(0, 1, by = 0.2),
+    limits = c(0, 1),
+    expand = c(0, 0)
+  ) +
+  labs(
+    x = "Year",
+    y = "Share of firm-year observations",
+    fill = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(colour = "grey88", linewidth = 0.4),
+    axis.title.x = element_text(size = 12, margin = margin(t = 8)),
+    axis.title.y = element_text(size = 12, margin = margin(r = 8)),
+    axis.text = element_text(colour = "grey25", size = 10.5),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.text = element_text(size = 10),
+    legend.margin = margin(t = 7),
+    plot.margin = margin(10, 15, 5, 10)
+  )
+
+p_ai_adoption_summary <-
+  p_mean_ai_score_by_year /
+  p_ai_intensity +
+  plot_layout(heights = c(1.4, 1))
 
 
 # ---- Save figures ------------------------------------------------------------
@@ -478,6 +580,27 @@ if (SAVE_PANEL_DIAGNOSTICS_FIGURES) {
     p_panel_trends_side_by_side,
     width = 9,
     height = 6,
+    dpi = 300
+  )
+
+  ggsave(
+    file.path(PANEL_DIAGNOSTICS_FIGURES_DIR, "p_panel_trend_share.png"),
+    p_treated_share_by_year,
+    width = 10,
+    height = 5.5,
+    units = "in",
+    dpi = 300
+  )
+
+  ggsave(
+    file.path(
+      PANEL_DIAGNOSTICS_FIGURES_DIR,
+      "p_panel_trends_side_by_side_NEW.png"
+    ),
+    p_ai_adoption_summary,
+    width = 10,
+    height = 5.5,
+    units = "in",
     dpi = 300
   )
 }
@@ -504,7 +627,9 @@ panel_diagnostics <- list(
   p_treated_share_by_year = p_treated_share_by_year,
   p_mean_ai_score_by_year = p_mean_ai_score_by_year,
   p_score_mix_by_year = p_score_mix_by_year,
-  p_panel_trends_side_by_side = p_panel_trends_side_by_side
+  p_panel_trends_side_by_side = p_panel_trends_side_by_side,
+  p_ai_intensity = p_ai_intensity,
+  p_ai_adoption_summary = p_ai_adoption_summary
 )
 
 if (SAVE_PANEL_DIAGNOSTICS) {

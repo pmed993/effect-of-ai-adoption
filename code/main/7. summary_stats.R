@@ -7,9 +7,11 @@
 # 1. produce the main descriptive table for outcomes and controls;
 # 2. compare firm characteristics by adoption status;
 # 3. summarise pre-treatment balance; and
-# 4. trace AI-score evolution in key sectors; and
-# 5. compare pre-treatment characteristic distributions for adopters and non-adopters; and
-# 6. compare contemporaneous firm-characteristic distributions by AI-adoption status.
+# 4. trace both AI-adoption definitions over time;
+# 5. trace mean AI scores across key NAICS2 sectors;
+# 6. compare AI adoption across the largest NAICS2 sectors;
+# 7. compare pre-treatment characteristic distributions for adopters and non-adopters; and
+# 8. compare contemporaneous firm-characteristic distributions by AI-adoption status.
 # ------------------------------------------------------------------------------
 
 source("code/config/global_settings.R")
@@ -29,9 +31,17 @@ KEY_DISTRIBUTION_PNG <- file.path(
   SUMMARY_STATS_OUTPUT_DIR,
   "key_variable_distributions_by_adoption_status.png"
 )
+ADOPTION_PREVALENCE_PNG <- file.path(
+  SUMMARY_STATS_OUTPUT_DIR,
+  "ai_adoption_prevalence_over_time.png"
+)
 KEY_SECTOR_SCORE_PNG <- file.path(
   SUMMARY_STATS_OUTPUT_DIR,
   "ai_score_evolution_key_sectors.png"
+)
+INDUSTRY_ADOPTION_PNG <- file.path(
+  SUMMARY_STATS_OUTPUT_DIR,
+  "ai_adoption_across_major_industries.png"
 )
 ADOPTION_STATUS_DISTRIBUTION_PNG <- file.path(
   SUMMARY_STATS_OUTPUT_DIR,
@@ -41,6 +51,10 @@ ADOPTION_STATUS_DISTRIBUTION_PNG <- file.path(
 SAVE_SUMMARY_BUNDLE <- TRUE
 SAVE_SUMMARY_FIGURES <- TRUE
 
+# Fixed sectors used for the long-run mean-score comparison. Construction is
+# retained even though its adoption rate is low because it is economically
+# important and provides an informative contrast with technology-intensive
+# sectors.
 KEY_SECTOR_CODES <- c("21", "23", "31-33", "44-45", "51", "54", "62")
 KEY_SECTOR_LABELS <- c(
   "21" = "Mining",
@@ -51,6 +65,11 @@ KEY_SECTOR_LABELS <- c(
   "54" = "Professional & Scientific",
   "62" = "Health Care"
 )
+
+# The industry comparison uses the latest three years and selects sectors by
+# sample size, not by their AI-adoption rate.
+INDUSTRY_COMPARISON_WINDOW_YEARS <- 3L
+N_LARGEST_NAICS2_SECTORS <- 13L
 
 KEY_DISTRIBUTION_LABELS <- c(
   log_at = "Firm size (log assets)",
@@ -323,50 +342,62 @@ p_firm_char_distributions_by_adoption <- firm_char_density_plot(
 )
 
 
-# ---- AI score mix by year ----------------------------------------------------
-ai_score_share_by_year <- panel_summary |>
-  count(year, ai_score, name = "n_firm_years") |>
+# ---- AI-adoption prevalence over time -----------------------------------------
+ai_adoption_prevalence_by_year <- panel_summary |>
+  filter(!is.na(ai_score)) |>
   group_by(year) |>
-  mutate(
-    share_firm_years = n_firm_years / sum(n_firm_years),
-    ai_score_label = case_when(
-      ai_score == 1L ~ "Score 1: No current adoption",
-      ai_score == 2L ~ "Score 2: Limited / targeted adoption",
-      ai_score == 3L ~ "Score 3: Production / strategic adoption",
-      TRUE ~ paste("Score", ai_score)
-    )
+  summarise(
+    n_firm_years = n(),
+    `AI adoption ≥ 2` = mean(ai_score >= 2L),
+    `Strong AI adoption = 3` = mean(ai_score == 3L),
+    .groups = "drop"
   ) |>
-  ungroup() |>
-  round_numeric_cols()
+  pivot_longer(
+    cols = c(`AI adoption ≥ 2`, `Strong AI adoption = 3`),
+    names_to = "adoption_definition",
+    values_to = "share_firm_years"
+  ) |>
+  mutate(
+    adoption_definition = factor(
+      adoption_definition,
+      levels = c("AI adoption ≥ 2", "Strong AI adoption = 3")
+    )
+  )
 
-p_ai_score_share_by_year <- ggplot(
-  ai_score_share_by_year,
-  aes(x = year, y = share_firm_years, fill = factor(ai_score, levels = c(1, 2, 3)))
+p_ai_adoption_prevalence <- ggplot(
+  ai_adoption_prevalence_by_year,
+  aes(
+    x = year,
+    y = share_firm_years,
+    colour = adoption_definition
+  )
 ) +
-  geom_col(width = 0.72, color = "white", linewidth = 0.25) +
-  scale_x_continuous(breaks = sort(unique(ai_score_share_by_year$year))) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2.2) +
+  scale_colour_manual(
+    values = c(
+      "AI adoption ≥ 2" = "#12436D",
+      "Strong AI adoption = 3" = "#F46A25"
+    ),
+    name = NULL
+  ) +
+  scale_x_continuous(
+    breaks = sort(unique(ai_adoption_prevalence_by_year$year)),
+    expand = expansion(mult = c(0.015, 0.015))
+  ) +
   scale_y_continuous(
     labels = scales::percent_format(accuracy = 1),
-    breaks = seq(0, 1, by = 0.2),
-    expand = c(0, 0)
-  ) +
-  scale_fill_manual(
-    values = c("1" = "#D9D9D9", "2" = "#9ECAE1", "3" = "#3182BD"),
-    name = NULL,
-    labels = c(
-      "1" = "1: No current adoption",
-      "2" = "2: Limited / targeted adoption",
-      "3" = "3: Production / strategic adoption"
-    )
+    breaks = scales::breaks_pretty(n = 6),
+    limits = c(0, NA),
+    expand = expansion(mult = c(0, 0.06))
   ) +
   labs(
-    title = "AI adoption score mix by year",
-    subtitle = "Shares among firm-years with an observed AI score",
+    title = "AI adoption prevalence over time",
+    subtitle = "The two treatment definitions used in the empirical analysis",
     x = NULL,
     y = "Share of firm-years"
   ) +
   theme_minimal(base_size = 12) +
-  guides(fill = guide_legend(nrow = 1, byrow = TRUE)) +
   theme(
     legend.position = "bottom",
     panel.grid.minor = element_blank(),
@@ -374,28 +405,26 @@ p_ai_score_share_by_year <- ggplot(
   )
 
 
-# ---- AI score evolution in key sectors ---------------------------------------
+# ---- Mean AI score across key sectors ----------------------------------------
 key_sector_score_by_year <- panel_summary |>
-  filter(naics2 %in% KEY_SECTOR_CODES) |>
+  filter(naics2 %in% KEY_SECTOR_CODES, !is.na(ai_score)) |>
   group_by(year, naics2) |>
   summarise(
-    naics2_title = dplyr::first(naics2_title),
     n_firm_years = n(),
     mean_ai_score = safe_mean(ai_score),
-    share_ai_adopted = safe_mean(ai_adopted),
+    share_ai_adopted = mean(ai_score >= 2L),
     .groups = "drop"
   ) |>
   mutate(
     sector_label = recode(naics2, !!!KEY_SECTOR_LABELS)
-  ) |>
-  round_numeric_cols()
+  )
 
 key_sector_overview <- key_sector_score_by_year |>
   group_by(naics2, sector_label) |>
   summarise(
+    mean_ai_score = weighted.mean(mean_ai_score, n_firm_years, na.rm = TRUE),
+    share_ai_adopted = weighted.mean(share_ai_adopted, n_firm_years, na.rm = TRUE),
     n_firm_years = sum(n_firm_years),
-    mean_ai_score = safe_mean(mean_ai_score),
-    share_ai_adopted = safe_mean(share_ai_adopted),
     .groups = "drop"
   ) |>
   arrange(desc(mean_ai_score), desc(share_ai_adopted)) |>
@@ -406,9 +435,9 @@ key_sector_end_labels <- key_sector_score_by_year |>
   filter(year == max(year, na.rm = TRUE)) |>
   ungroup()
 
-p_score_mix_by_year_sector <- ggplot(
+p_mean_ai_score_by_key_sector <- ggplot(
   key_sector_score_by_year,
-  aes(x = year, y = mean_ai_score, color = sector_label)
+  aes(x = year, y = mean_ai_score, colour = sector_label)
 ) +
   geom_line(linewidth = 0.9) +
   geom_point(size = 2) +
@@ -425,30 +454,131 @@ p_score_mix_by_year_sector <- ggplot(
     expand = expansion(mult = c(0.01, 0.14))
   ) +
   scale_y_continuous(
-    breaks = c(1, 1.25, 1.5, 1.75, 2, 2.25),
-    limits = c(1, NA)
+    breaks = scales::breaks_pretty(n = 6),
+    limits = c(1, NA),
+    expand = expansion(mult = c(0, 0.05))
   ) +
-  scale_color_manual(values = c(
-    "Mining" = "#a6761d",
-    "Information" = "#1b9e77",
-    "Professional & Scientific" = "#d95f02",
-    "Health Care" = "#7570b3",
-    "Manufacturing" = "#e7298a",
-    "Retail Trade" = "#66a61e",
+  scale_colour_manual(values = c(
+    "Mining" = "#A6761D",
+    "Information" = "#1B9E77",
+    "Professional & Scientific" = "#D95F02",
+    "Health Care" = "#7570B3",
+    "Manufacturing" = "#E7298A",
+    "Retail Trade" = "#66A61E",
     "Construction" = "#666666"
   )) +
   labs(
-   # title = "AI scores evolve very differently across key sectors",
-  #  subtitle = "Information leads, followed by Professional & Scientific and Health Care",
+    title = "Mean AI-adoption score across key sectors",
+    subtitle = "Mean filing-level score among firm-years with an observed AI score",
     x = "Year",
-    y = "Mean AI score (1-3)"
+    y = "Mean AI score (1–3)"
   ) +
   coord_cartesian(clip = "off") +
   theme_minimal(base_size = 12) +
   theme(
     legend.position = "none",
     panel.grid.minor = element_blank(),
-    plot.margin = margin(5.5, 90, 5.5, 5.5)
+    plot.margin = margin(5.5, 95, 5.5, 5.5)
+  )
+
+
+# ---- AI adoption across major industries -------------------------------------
+industry_comparison_end_year <- max(panel_summary$year, na.rm = TRUE)
+industry_comparison_start_year <- max(
+  min(panel_summary$year, na.rm = TRUE),
+  industry_comparison_end_year - INDUSTRY_COMPARISON_WINDOW_YEARS + 1L
+)
+
+industry_adoption_summary <- panel_summary |>
+  filter(
+    !is.na(ai_score),
+    !is.na(naics2),
+    naics2 != "",
+    year >= industry_comparison_start_year,
+    year <= industry_comparison_end_year
+  ) |>
+  mutate(
+    industry_label = if_else(
+      !is.na(naics2_title) & naics2_title != "",
+      naics2_title,
+      paste("NAICS2", naics2)
+    )
+  ) |>
+  group_by(naics2, industry_label) |>
+  summarise(
+    n_firm_years = n(),
+    n_firms = n_distinct(cik),
+    share_ai_adoption = mean(ai_score >= 2L),
+    share_strong_ai_adoption = mean(ai_score == 3L),
+    .groups = "drop"
+  ) |>
+  arrange(desc(n_firms), desc(n_firm_years), naics2) |>
+  slice_head(n = N_LARGEST_NAICS2_SECTORS) |>
+  arrange(share_ai_adoption, share_strong_ai_adoption) |>
+  mutate(
+    industry_label = factor(industry_label, levels = industry_label)
+  )
+
+if (nrow(industry_adoption_summary) < N_LARGEST_NAICS2_SECTORS) {
+  warning(
+    "Only ", nrow(industry_adoption_summary),
+    " valid NAICS2 sectors are available for the industry-adoption figure."
+  )
+}
+
+p_ai_adoption_by_industry <- ggplot(
+  industry_adoption_summary,
+  aes(y = industry_label)
+) +
+  geom_segment(
+    aes(
+      x = share_strong_ai_adoption,
+      xend = share_ai_adoption,
+      yend = industry_label
+    ),
+    colour = "grey82",
+    linewidth = 1.4,
+    lineend = "round"
+  ) +
+  geom_point(
+    aes(x = share_ai_adoption, colour = "AI adoption ≥ 2"),
+    size = 3
+  ) +
+  geom_point(
+    aes(x = share_strong_ai_adoption, colour = "Strong AI adoption = 3"),
+    size = 3
+  ) +
+  scale_colour_manual(
+    values = c(
+      "AI adoption ≥ 2" = "#12436D",
+      "Strong AI adoption = 3" = "#F46A25"
+    ),
+    name = NULL
+  ) +
+  scale_x_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    breaks = scales::breaks_pretty(n = 7),
+    limits = c(0, NA),
+    expand = expansion(mult = c(0.01, 0.06))
+  ) +
+  labs(
+    title = "AI adoption across major industries",
+    subtitle = paste0(
+      industry_comparison_start_year,
+      "–",
+      industry_comparison_end_year,
+      " rates for the ",
+      nrow(industry_adoption_summary),
+      " largest NAICS2 sectors in the sample"
+    ),
+    x = "Share of firm-years",
+    y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank(),
+    panel.grid.major.y = element_blank()
   )
 
 
@@ -529,12 +659,15 @@ summary_stats_bundle <- list(
   overall_summary = overall_summary,
   firm_char_summary = firm_char_summary,
   firm_char_summary_wide = firm_char_summary_wide,
-  ai_score_share_by_year = ai_score_share_by_year,
+  ai_adoption_prevalence_by_year = ai_adoption_prevalence_by_year,
   key_sector_score_by_year = key_sector_score_by_year,
   key_sector_overview = key_sector_overview,
+  industry_adoption_summary = industry_adoption_summary,
   pre_treatment_balance = pre_treatment_balance,
   key_distribution_data = key_distribution_data,
-  p_ai_score_share_by_year = p_ai_score_share_by_year,
+  p_ai_adoption_prevalence = p_ai_adoption_prevalence,
+  p_mean_ai_score_by_key_sector = p_mean_ai_score_by_key_sector,
+  p_ai_adoption_by_industry = p_ai_adoption_by_industry,
   p_firm_char_distributions_by_adoption = p_firm_char_distributions_by_adoption,
   p_key_variable_distributions = p_key_variable_distributions
 )
@@ -554,10 +687,24 @@ if (SAVE_SUMMARY_FIGURES) {
     dpi = 300
   )
   ggsave(
+    filename = ADOPTION_PREVALENCE_PNG,
+    plot = p_ai_adoption_prevalence,
+    width = 10,
+    height = 5.5,
+    dpi = 300
+  )
+  ggsave(
     filename = KEY_SECTOR_SCORE_PNG,
-    plot = p_score_mix_by_year_sector,
+    plot = p_mean_ai_score_by_key_sector,
     width = 11,
     height = 8,
+    dpi = 300
+  )
+  ggsave(
+    filename = INDUSTRY_ADOPTION_PNG,
+    plot = p_ai_adoption_by_industry,
+    width = 11,
+    height = 7.5,
     dpi = 300
   )
   ggsave(
@@ -581,6 +728,8 @@ if (SAVE_SUMMARY_BUNDLE) {
 
 if (SAVE_SUMMARY_FIGURES) {
   cat("Saved key distribution figure to:", KEY_DISTRIBUTION_PNG, "\n")
-  cat("Saved key sector score figure to:", KEY_SECTOR_SCORE_PNG, "\n")
+  cat("Saved AI-adoption prevalence figure to:", ADOPTION_PREVALENCE_PNG, "\n")
+  cat("Saved key-sector mean-score figure to:", KEY_SECTOR_SCORE_PNG, "\n")
+  cat("Saved industry-adoption figure to:", INDUSTRY_ADOPTION_PNG, "\n")
   cat("Saved adoption-status distribution figure to:", ADOPTION_STATUS_DISTRIBUTION_PNG, "\n")
 }
