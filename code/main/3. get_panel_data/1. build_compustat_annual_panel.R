@@ -216,6 +216,8 @@ comp[, log_at := safe_log(at)]
 comp[, log_market_cap := safe_log(market_cap)]
 comp[, log_sale := safe_log(sale)]
 comp[, log_emp := safe_log(emp)]
+comp[, log_xopr := safe_log(xopr)]
+
 comp[, firm_age := fifelse(
   !is.na(first_compustat_fyear) & fyear >= first_compustat_fyear,
   fyear - first_compustat_fyear,
@@ -315,6 +317,14 @@ comp[, tobins_q := fifelse(
   (market_cap + total_debt) / at,
   NA_real_
 )]
+
+comp[, operating_profit := fifelse(
+  !is.na(oibdp) & !is.na(at),
+  oibdp / at,
+  NA_real_
+)]
+
+comp[, operating_profit_w := winsorize_vec(operating_profit)]
 
 comp[, `:=`(
   capx_intensity_l1 = fifelse(

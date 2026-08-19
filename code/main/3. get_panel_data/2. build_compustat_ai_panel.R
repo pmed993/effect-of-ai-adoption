@@ -3,39 +3,156 @@
 # ------------------------------------------------------------------------------
 # Build merged Compustat + AI panel
 # ------------------------------------------------------------------------------
-# This script starts from the annual Compustat panel built in step 1, adds
-# industry AI exposure and BTOS validation data, then merges filing-level AI
-# scores by comparable cik-year to create `panel`, `panel_ai`, and `unmatched`.
+# This script:
+#   1. Loads the annual Compustat panel.
+#   2. Adds AIIE industry exposure and BTOS validation data.
+#   3. Loads filing-level AI scores and SEC filing metadata.
+#   4. Matches each 10-K to the Compustat fiscal period it reports using:
+#
+#          CIK + Compustat datadate
+#                      =
+#          CIK + SEC report_date
+#
+#   5. Retains SEC filing_date separately for treatment timing.
+#   6. Creates `panel`, `panel_ai`, and `unmatched`.
+#
+# `ai_score = 1` means an observed filing was classified as no disclosed
+# current AI adoption. An unmatched Compustat observation remains NA.
 # ------------------------------------------------------------------------------
 
 source("code/config/global_settings.R")
 
 
 # ---- Settings ----------------------------------------------------------------
-SAVE_MERGED_OUTPUTS <- isTRUE(get0("SAVE_MERGED_OUTPUTS", ifnotfound = FALSE))
-REBUILD_ANNUAL_PANEL <- isTRUE(get0("REBUILD_ANNUAL_PANEL", ifnotfound = FALSE))
-SKIP_AI_EXPOSURE <- isTRUE(get0("SKIP_AI_EXPOSURE", ifnotfound = FALSE))
 
-AI_EXPOSURE_FILE <- get0("AI_EXPOSURE_FILE", ifnotfound = file.path(INPUT_DIR, "AIOE_DataAppendix.xlsx"))
-AI_EXPOSURE_SHEET <- get0("AI_EXPOSURE_SHEET", ifnotfound = "Appendix B")
-AI_ADOPTION_FILE <- get0("AI_ADOPTION_FILE", ifnotfound = file.path(INPUT_DIR, "llm_score", "llm_extraction_firm_year_panel.csv"))
-BTOS_Q7_NAICS2_SUMMARY_CSV <- get0("BTOS_Q7_NAICS2_SUMMARY_CSV", ifnotfound = file.path(INPUT_DIR, "btos_q7_naics2_summary.csv"))
-ANNUAL_PANEL_RDS <- get0("ANNUAL_PANEL_RDS", ifnotfound = file.path(INPUT_DIR, "compustat_annual_panel.rds"))
+SAVE_MERGED_OUTPUTS <- isTRUE(
+  get0("SAVE_MERGED_OUTPUTS", ifnotfound = FALSE)
+)
 
-OUTPUT_MERGED_PANEL_RDS <- get0("OUTPUT_MERGED_PANEL_RDS", ifnotfound = file.path(INPUT_DIR, "compustat_ai_panel.rds"))
-OUTPUT_MERGED_PANEL_CSV <- get0("OUTPUT_MERGED_PANEL_CSV", ifnotfound = file.path(INPUT_DIR, "compustat_ai_panel.csv"))
-OUTPUT_MATCHED_PANEL_RDS <- get0("OUTPUT_MATCHED_PANEL_RDS", ifnotfound = file.path(INPUT_DIR, "compustat_ai_matched_panel.rds"))
-OUTPUT_MATCHED_PANEL_CSV <- get0("OUTPUT_MATCHED_PANEL_CSV", ifnotfound = file.path(INPUT_DIR, "compustat_ai_matched_panel.csv"))
-OUTPUT_UNMATCHED_CSV <- get0("OUTPUT_UNMATCHED_CSV", ifnotfound = file.path(INPUT_DIR, "compustat_ai_unmatched.csv"))
+REBUILD_ANNUAL_PANEL <- isTRUE(
+  get0("REBUILD_ANNUAL_PANEL", ifnotfound = FALSE)
+)
 
-ANALYSIS_START_YEAR <- as.integer(get0("ANALYSIS_START_YEAR", ifnotfound = 2015L))
-ANALYSIS_END_YEAR <- as.integer(get0("ANALYSIS_END_YEAR", ifnotfound = 2025L))
+SKIP_AI_EXPOSURE <- isTRUE(
+  get0("SKIP_AI_EXPOSURE", ifnotfound = FALSE)
+)
+
+
+AI_EXPOSURE_FILE <- get0(
+  "AI_EXPOSURE_FILE",
+  ifnotfound = file.path(INPUT_DIR, "AIOE_DataAppendix.xlsx")
+)
+
+AI_EXPOSURE_SHEET <- get0(
+  "AI_EXPOSURE_SHEET",
+  ifnotfound = "Appendix B"
+)
+
+AI_FILING_MASTER_FILE <- get0(
+  "AI_FILING_MASTER_FILE",
+  ifnotfound = file.path(
+    INPUT_DIR,
+    "llm_score",
+    "llm_extraction_filing_master.csv"
+  )
+)
+
+EDGAR_MANIFEST_MAIN_FILE <- get0(
+  "EDGAR_MANIFEST_MAIN_FILE",
+  ifnotfound = file.path(
+    "cache",
+    "edgar_keyword_windows",
+    "filing_manifest.csv"
+  )
+)
+
+EDGAR_MANIFEST_2025_FILE <- get0(
+  "EDGAR_MANIFEST_2025_FILE",
+  ifnotfound = file.path(
+    "cache",
+    "edgar_keyword_windows_fy2025_completion",
+    "filing_manifest.csv"
+  )
+)
+
+
+BTOS_Q7_NAICS2_SUMMARY_CSV <- get0(
+  "BTOS_Q7_NAICS2_SUMMARY_CSV",
+  ifnotfound = file.path(
+    INPUT_DIR,
+    "btos_q7_naics2_summary.csv"
+  )
+)
+
+ANNUAL_PANEL_RDS <- get0(
+  "ANNUAL_PANEL_RDS",
+  ifnotfound = file.path(
+    INPUT_DIR,
+    "compustat_annual_panel.rds"
+  )
+)
+
+
+OUTPUT_MERGED_PANEL_RDS <- get0(
+  "OUTPUT_MERGED_PANEL_RDS",
+  ifnotfound = file.path(
+    INPUT_DIR,
+    "compustat_ai_panel.rds"
+  )
+)
+
+OUTPUT_MERGED_PANEL_CSV <- get0(
+  "OUTPUT_MERGED_PANEL_CSV",
+  ifnotfound = file.path(
+    INPUT_DIR,
+    "compustat_ai_panel.csv"
+  )
+)
+
+OUTPUT_MATCHED_PANEL_RDS <- get0(
+  "OUTPUT_MATCHED_PANEL_RDS",
+  ifnotfound = file.path(
+    INPUT_DIR,
+    "compustat_ai_matched_panel.rds"
+  )
+)
+
+OUTPUT_MATCHED_PANEL_CSV <- get0(
+  "OUTPUT_MATCHED_PANEL_CSV",
+  ifnotfound = file.path(
+    INPUT_DIR,
+    "compustat_ai_matched_panel.csv"
+  )
+)
+
+OUTPUT_UNMATCHED_CSV <- get0(
+  "OUTPUT_UNMATCHED_CSV",
+  ifnotfound = file.path(
+    INPUT_DIR,
+    "compustat_ai_unmatched.csv"
+  )
+)
+
+
+# ---- Required columns ---------------------------------------------------------
 
 ANNUAL_REQUIRED_COLS <- c(
-  "cik", "year", "naics2", "naics4",
-  "lag_source_fyear", "lag_is_consecutive", "firm_age_l1", "rd_reporter_l1",
-  "rd_intensity_y", "capx_intensity_y", "total_inv_intensity_y",
-  "rd_intensity_y_w", "capx_intensity_y_w", "total_inv_intensity_y_w"
+  "cik",
+  "year",
+  "fyear",
+  "datadate",
+  "naics2",
+  "naics4",
+  "lag_source_fyear",
+  "lag_is_consecutive",
+  "firm_age_l1",
+  "rd_reporter_l1",
+  "rd_intensity_y",
+  "capx_intensity_y",
+  "total_inv_intensity_y",
+  "rd_intensity_y_w",
+  "capx_intensity_y_w",
+  "total_inv_intensity_y_w"
 )
 
 BTOS_NUMERIC_COLS <- c(
@@ -60,263 +177,1435 @@ BTOS_CHARACTER_COLS <- c(
 
 
 # ---- Helpers -----------------------------------------------------------------
+
 normalize_cik <- function(x) {
   out <- suppressWarnings(as.numeric(x))
-  ifelse(is.na(out), NA_character_, as.character(as.integer(out)))
+  ifelse(
+    is.na(out),
+    NA_character_,
+    as.character(as.integer(out))
+  )
 }
+
 
 assert_unique_keys <- function(data, keys, label) {
-  dt <- as.data.table(data)
-  keep <- dt[, Reduce(`&`, lapply(.SD, function(x) !is.na(x) & (if (is.character(x)) x != "" else TRUE))), .SDcols = keys]
-  dupes <- dt[keep, .N, by = keys][N > 1]
-
-  if (nrow(dupes) > 0) {
-    stop(label, " has duplicate rows on key: ", paste(keys, collapse = ", "))
+  
+  dupes <- as.data.table(data)[
+    ,
+    .N,
+    by = keys
+  ][
+    N > 1L
+  ]
+  
+  if (nrow(dupes) > 0L) {
+    stop(
+      label,
+      " has duplicate rows on key: ",
+      paste(keys, collapse = ", ")
+    )
   }
+  
+  invisible(TRUE)
 }
 
+
+min_idate <- function(x) {
+  
+  x <- x[!is.na(x)]
+  
+  if (length(x) == 0L) {
+    return(as.IDate(NA))
+  }
+  
+  min(x)
+}
+
+
+# ---- Load AIIE ---------------------------------------------------------------
+
 load_ai_exposure <- function(path, sheet_name) {
+  
   if (!file.exists(path)) {
     stop("AI exposure file not found: ", path)
   }
-
-  sheets <- excel_sheets(path)
-  if (!sheet_name %in% sheets) {
-    stop("AI exposure sheet not found: ", sheet_name, ". Available sheets: ", paste(sheets, collapse = ", "))
-  }
-
-  exposure <- read_excel(path, sheet = sheet_name) |>
+  
+  exposure <- read_excel(
+    path,
+    sheet = sheet_name
+  ) |>
     clean_names() |>
     as.data.table()
-
+  
   required_cols <- c("naics", "aiie")
   missing_cols <- setdiff(required_cols, names(exposure))
-  if (length(missing_cols) > 0) {
-    stop("AI exposure sheet is missing required columns: ", paste(missing_cols, collapse = ", "))
+  
+  if (length(missing_cols) > 0L) {
+    stop(
+      "AI exposure file is missing required columns: ",
+      paste(missing_cols, collapse = ", ")
+    )
   }
-
-  exposure[, naics4 := as.character(as.integer(naics))]
-  exposure <- exposure[!is.na(naics4) & nchar(naics4) == 4, .(naics4, aiie)]
-
-  if (exposure[, uniqueN(naics4)] != nrow(exposure)) {
-    stop("AI exposure data has duplicate NAICS4 rows.")
-  }
-
+  
+  exposure[,  naics4 := as.character(as.integer(naics))]
+  
+  exposure <- exposure[
+    !is.na(naics4) &
+      nchar(naics4) == 4,
+    .(
+      naics4,
+      aiie
+    )
+  ]
+  
+  assert_unique_keys(
+    exposure,
+    "naics4",
+    "AI exposure data"
+  )
+  
   exposure
 }
 
+
+# ---- Load BTOS ---------------------------------------------------------------
+
 load_btos_validation <- function(path) {
+  
   btos <- fread(path)
-
-  required_cols <- c(
-    "naics2",
-    "btos_q7_ai_share_yes_mean",
-    "btos_q7_ai_share_yes_mean_2023_2025",
-    "btos_q7_ai_share_yes_latest",
-    "btos_q7_ai_share_validation"
-  )
-  missing_cols <- setdiff(required_cols, names(btos))
-  if (length(missing_cols) > 0) {
-    stop("BTOS summary file is missing required columns: ", paste(missing_cols, collapse = ", "))
-  }
-
+  
   btos[, naics2 := as.character(naics2)]
-
-  keep_cols <- intersect(c("naics2", BTOS_INTEGER_COLS, BTOS_NUMERIC_COLS, BTOS_CHARACTER_COLS), names(btos))
+  
+  keep_cols <- intersect(
+    c(
+      "naics2",
+      BTOS_INTEGER_COLS,
+      BTOS_NUMERIC_COLS,
+      BTOS_CHARACTER_COLS
+    ),
+    names(btos)
+  )
+  
   btos <- btos[, ..keep_cols]
-
-  if (btos[, uniqueN(naics2)] != nrow(btos)) {
-    stop("BTOS summary file has duplicate NAICS2 rows.")
-  }
-
+  
+  assert_unique_keys(
+    btos,
+    "naics2",
+    "BTOS validation data"
+  )
+  
   btos
 }
 
-load_ai_scores <- function(path) {
-  if (!file.exists(path)) {
-    stop("LLM extraction panel not found: ", path)
-  }
 
-  ai <- fread(path)
-  required_cols <- c("cik", "year", "ai_score")
-  missing_cols <- setdiff(required_cols, names(ai))
-  if (length(missing_cols) > 0) {
-    stop("LLM extraction panel is missing required columns: ", paste(missing_cols, collapse = ", "))
-  }
+# ---- Load filing-level AI data -----------------------------------------------
 
-  ai <- ai[, .(cik, year, ai_score)]
-  ai[, cik := normalize_cik(cik)]
-  ai[, year := as.integer(year)]
-  ai[, ai_score := suppressWarnings(as.integer(ai_score))]
-  ai <- ai[
-    !is.na(cik) &
-      cik != "" &
-      !is.na(year) &
-      year >= ANALYSIS_START_YEAR &
-      year <= ANALYSIS_END_YEAR
+load_ai_filings <- function(
+    scored_file,
+    manifest_main_file,
+    manifest_2025_file
+) {
+  
+  # ---- Load scored filing master ---------------------------------------------
+  
+  scored <- fread(scored_file)
+  
+  required_scored <- c(
+    "cik",
+    "accession_number",
+    "claude_ai_score"
+  )
+  
+  missing_scored <- setdiff(
+    required_scored,
+    names(scored)
+  )
+  
+  if (length(missing_scored) > 0L) {
+    stop(
+      "Scored filing master is missing: ",
+      paste(missing_scored, collapse = ", ")
+    )
+  }
+  
+  scored[, cik := normalize_cik(cik)]
+  
+  scored[
+    ,
+    accession_number :=
+      trimws(as.character(accession_number))
   ]
+  
+  # Preserve the extraction/scoring year only for audit.
+  # It is NOT used for the Compustat match.
+  if ("year" %in% names(scored)) {
+    setnames(
+      scored,
+      "year",
+      "scored_year_raw"
+    )
+  }
+  
+  # Avoid collision with SEC manifest form_type.
+  if ("form_type" %in% names(scored)) {
+    setnames(
+      scored,
+      "form_type",
+      "scored_form_type"
+    )
+  }
+  
+  scored[
+    ,
+    ai_score :=
+      suppressWarnings(
+        as.integer(claude_ai_score)
+      )
+  ]
+  
+  if (
+    scored[
+      is.na(ai_score) |
+      !ai_score %in% 1:3,
+      .N
+    ] > 0L
+  ) {
+    stop(
+      "Scored filing master contains missing or invalid AI scores."
+    )
+  }
+  
+  assert_unique_keys(
+    scored,
+    c(
+      "cik",
+      "accession_number"
+    ),
+    "Scored filing master"
+  )
+  
+  
+  # ---- Load BOTH EDGAR manifests ---------------------------------------------
+  
+  manifest_main <- fread(
+    manifest_main_file
+  )
+  
+  manifest_2025 <- fread(
+    manifest_2025_file
+  )
+  
+  manifest_main[
+    ,
+    manifest_source := "main"
+  ]
+  
+  manifest_2025[
+    ,
+    manifest_source := "fy2025_completion"
+  ]
+  
+  manifest <- rbindlist(
+    list(
+      manifest_main,
+      manifest_2025
+    ),
+    use.names = TRUE,
+    fill = TRUE
+  )
+  
+  
+  # ---- Standardise SEC metadata ----------------------------------------------
+  
+  required_manifest <- c(
+    "cik",
+    "accession_number",
+    "form_type",
+    "report_date",
+    "filing_date"
+  )
+  
+  missing_manifest <- setdiff(
+    required_manifest,
+    names(manifest)
+  )
+  
+  if (length(missing_manifest) > 0L) {
+    stop(
+      "EDGAR manifest is missing: ",
+      paste(missing_manifest, collapse = ", ")
+    )
+  }
+  
+  manifest[
+    ,
+    cik := normalize_cik(cik)
+  ]
+  
+  manifest[
+    ,
+    accession_number :=
+      trimws(as.character(accession_number))
+  ]
+  
+  manifest[
+    ,
+    report_date := as.IDate(report_date)
+  ]
+  
+  manifest[
+    ,
+    filing_date := as.IDate(filing_date)
+  ]
+  
+  
+  # ---- Remove only TRUE duplicate CIK-accession records ----------------------
+  
+  # Same accession may legitimately belong to more than one registrant.
+  # Therefore DO NOT deduplicate accession_number alone.
+  
+  if ("extract_updated_at" %in% names(manifest)) {
+    
+    setorder(
+      manifest,
+      cik,
+      accession_number,
+      -extract_updated_at
+    )
+  }
+  
+  manifest <- manifest[
+    !duplicated(
+      manifest,
+      by = c(
+        "cik",
+        "accession_number"
+      )
+    )
+  ]
+  
+  assert_unique_keys(
+    manifest,
+    c(
+      "cik",
+      "accession_number"
+    ),
+    "Combined EDGAR manifest"
+  )
+  
+  
+  # ---- Create unambiguous SEC variables --------------------------------------
+  
+  manifest_meta <- manifest[
+    ,
+    .(
+      cik,
+      accession_number,
+      
+      # Fiscal period represented by filing
+      ai_report_date = report_date,
+      
+      # Date disclosure became public
+      ai_filing_date = filing_date,
+      
+      # Calendar year of Compustat fiscal observation
+      ai_report_year =
+        as.integer(
+          format(
+            report_date,
+            "%Y"
+          )
+        ),
+      
+      # Calendar filing year; audit/timing only
+      ai_filing_year =
+        as.integer(
+          format(
+            filing_date,
+            "%Y"
+          )
+        ),
+      
+      ai_form_type = form_type,
+      ai_company_name = company_name,
+      ai_primary_document = primary_document,
+      ai_source_url = source_url,
+      manifest_source
+    )
+  ]
+  
+  
+  # ---- Attach SEC metadata to scored filings ---------------------------------
+  
+  ai_filings <- merge(
+    scored,
+    manifest_meta,
+    by = c(
+      "cik",
+      "accession_number"
+    ),
+    all.x = TRUE,
+    sort = FALSE
+  )
+  
+  # At this point every scored row must have exactly one SEC metadata match.
+  if (nrow(ai_filings) != nrow(scored)) {
+    stop(
+      "SEC metadata merge changed the number of scored filing rows."
+    )
+  }
+  
+  
+  missing_dates <- ai_filings[
+    is.na(ai_report_date) |
+      is.na(ai_filing_date)
+  ]
+  
+  if (nrow(missing_dates) > 0L) {
+    
+    fwrite(
+      missing_dates,
+      file.path(
+        INPUT_DIR,
+        "scored_filings_missing_sec_dates.csv"
+      )
+    )
+    
+    stop(
+      nrow(missing_dates),
+      " scored filings are missing SEC report_date or filing_date. ",
+      "See scored_filings_missing_sec_dates.csv."
+    )
+  }
+  
+  
+  # Optional cross-check of form labels.
+  if ("scored_form_type" %in% names(ai_filings)) {
+    
+    bad_forms <- ai_filings[
+      !is.na(scored_form_type) &
+        !is.na(ai_form_type) &
+        scored_form_type != ai_form_type
+    ]
+    
+    if (nrow(bad_forms) > 0L) {
+      stop(
+        "Scored filing form_type disagrees with SEC manifest form_type."
+      )
+    }
+  }
+  
+  
+  # ---- Canonical annual filing rule --------------------------------------------
+  
+  # For each CIK + fiscal report_date:
+  #
+  #   1. Prefer an original 10-K whenever one exists.
+  #   2. If no 10-K exists, use a 10-K/A.
+  #   3. Within the preferred form type, keep the earliest filing_date.
+  #   4. accession_number provides a deterministic final tie-break.
+  
+  ai_filings <- ai_filings[
+    ai_form_type %in% c(
+      "10-K",
+      "10-K/A"
+    )
+  ]
+  
+  
+  # Form priority:
+  # original 10-K always preferred to amendment
+  ai_filings[
+    ,
+    form_priority := fcase(
+      ai_form_type == "10-K",   1L,
+      ai_form_type == "10-K/A", 2L,
+      default = 99L
+    )
+  ]
+  
+  
+  # Audit the raw multiplicity before choosing the canonical filing
+  canonical_candidates <- ai_filings[
+    ,
+    .(
+      n_candidate_filings = .N,
+      has_10k = any(ai_form_type == "10-K"),
+      has_10ka = any(ai_form_type == "10-K/A")
+    ),
+    by = .(
+      cik,
+      ai_report_date
+    )
+  ]
+  
+  
+  # Sort so the desired filing is always first:
+  #
+  # 10-K before 10-K/A
+  # earliest filing within form
+  # accession as deterministic tie-break
+  setorder(
+    ai_filings,
+    cik,
+    ai_report_date,
+    form_priority,
+    ai_filing_date,
+    accession_number
+  )
+  
+  
+  # Keep one canonical annual filing per CIK + report_date
+  ai_filings <- ai_filings[
+    ,
+    .SD[1L],
+    by = .(
+      cik,
+      ai_report_date
+    )
+  ]
+  
+  
+  ai_filings[, form_priority := NULL]
+  
+  
+  # Final QA
+  assert_unique_keys(
+    ai_filings,
+    c(
+      "cik",
+      "ai_report_date"
+    ),
+    "Canonical annual AI filings"
+  )
 
-  assert_unique_keys(ai, c("cik", "year"), "LLM extraction panel")
-  ai
+  
+  canonical_form_summary <- ai_filings[
+    ,
+    .(
+      fiscal_periods = .N
+    ),
+    by = ai_form_type
+  ][
+    order(ai_form_type)
+  ]
+  
+  print(canonical_form_summary)
+  
+  
+  fallback_10ka <- ai_filings[
+    ai_form_type == "10-K/A"
+  ]
+  
+  cat(
+    "\nFiscal periods using 10-K/A because no original 10-K was available:",
+    nrow(fallback_10ka),
+    "\n"
+  )
+  
+  bad_10ka_selection <- fallback_10ka[
+    canonical_candidates[
+      has_10k == TRUE
+    ],
+    on = .(
+      cik,
+      ai_report_date
+    ),
+    nomatch = 0L
+  ]
+  
+  if (nrow(bad_10ka_selection) > 0L) {
+    stop(
+      "Some 10-K/A filings were selected even though an original 10-K existed."
+    )
+  }
+  
+  # Return one canonical filing per CIK + report_date
+  return(ai_filings)
 }
+# ---- Load annual Compustat panel ----------------------------------------------
 
-
-# ---- Load the annual panel ----------------------------------------------------
-if (REBUILD_ANNUAL_PANEL || !file.exists(ANNUAL_PANEL_RDS)) {
-  source("code/main/3. get_panel_data/1. build_compustat_annual_panel.R")
+if (
+  REBUILD_ANNUAL_PANEL ||
+  !file.exists(ANNUAL_PANEL_RDS)
+) {
+  
+  source(
+    "code/main/3. get_panel_data/1. build_compustat_annual_panel.R"
+  )
+  
 } else {
+  
   comp <- readRDS(ANNUAL_PANEL_RDS)
 }
 
 setDT(comp)
 
-missing_annual_cols <- setdiff(ANNUAL_REQUIRED_COLS, names(comp))
-if (length(missing_annual_cols) > 0) {
-  stop("Annual Compustat panel is missing required columns: ", paste(missing_annual_cols, collapse = ", "))
+
+missing_annual_cols <- setdiff(
+  ANNUAL_REQUIRED_COLS,
+  names(comp)
+)
+
+if (length(missing_annual_cols) > 0L) {
+  stop(
+    "Annual Compustat panel is missing required columns: ",
+    paste(missing_annual_cols, collapse = ", ")
+  )
 }
 
-assert_unique_keys(comp, c("cik", "year"), "Annual Compustat panel")
+
+# ---- Standardize Compustat keys -----------------------------------------------
+
+comp[
+  ,
+  `:=`(
+    cik = normalize_cik(cik),
+    fyear = as.integer(fyear),
+    datadate = as.IDate(datadate)
+  )
+]
+
+
+# `year` is explicitly the Compustat fiscal-period calendar year.
+# It is NOT the SEC filing year.
+comp[
+  ,
+  year := as.integer(
+    format(datadate, "%Y")
+  )
+]
+
+
+assert_unique_keys(
+  comp,
+  c("cik", "datadate"),
+  "Annual Compustat panel"
+)
+
+
+# Downstream staggered DiD uses calendar-year time, so the annual panel must
+# contain at most one observation per firm and calendar year.
+assert_unique_keys(
+  comp,
+  c("cik", "year"),
+  "Annual Compustat panel"
+)
 
 
 # ---- Add industry AI exposure -------------------------------------------------
+
 comp_panel <- copy(comp)
-comp_panel[, cik := normalize_cik(cik)]
-comp_panel[, year := as.integer(year)]
 
 if (SKIP_AI_EXPOSURE) {
-  comp_panel[, aiie := NA_real_]
+  
+  comp_panel[
+    ,
+    aiie := NA_real_
+  ]
+  
 } else {
-  ai_exposure <- load_ai_exposure(AI_EXPOSURE_FILE, AI_EXPOSURE_SHEET)
-  comp_panel <- merge(comp_panel, ai_exposure, by = "naics4", all.x = TRUE, sort = FALSE)
+  
+  ai_exposure <- load_ai_exposure(
+    AI_EXPOSURE_FILE,
+    AI_EXPOSURE_SHEET
+  )
+  
+  comp_panel <- merge(
+    comp_panel,
+    ai_exposure,
+    by = "naics4",
+    all.x = TRUE,
+    sort = FALSE
+  )
 }
 
-comp_panel[, ai_rd_intensity := rd_intensity_y * aiie]
-comp_panel[, ai_capx_intensity := capx_intensity_y * aiie]
-comp_panel[, ai_inv_intensity := total_inv_intensity_y * aiie]
-comp_panel[, ai_rd_intensity_w := rd_intensity_y_w * aiie]
-comp_panel[, ai_capx_intensity_w := capx_intensity_y_w * aiie]
-comp_panel[, ai_inv_intensity_w := total_inv_intensity_y_w * aiie]
+
+comp_panel[
+  ,
+  `:=`(
+    ai_rd_intensity = rd_intensity_y * aiie,
+    ai_capx_intensity = capx_intensity_y * aiie,
+    ai_inv_intensity = total_inv_intensity_y * aiie,
+    ai_rd_intensity_w = rd_intensity_y_w * aiie,
+    ai_capx_intensity_w = capx_intensity_y_w * aiie,
+    ai_inv_intensity_w = total_inv_intensity_y_w * aiie
+  )
+]
 
 
-# ---- Add BTOS validation by NAICS2 --------------------------------------------
+# ---- Add BTOS validation ------------------------------------------------------
+
 if (file.exists(BTOS_Q7_NAICS2_SUMMARY_CSV)) {
-  btos_validation <- load_btos_validation(BTOS_Q7_NAICS2_SUMMARY_CSV)
-  comp_panel <- merge(comp_panel, btos_validation, by = "naics2", all.x = TRUE, sort = FALSE)
+  
+  btos_validation <- load_btos_validation(
+    BTOS_Q7_NAICS2_SUMMARY_CSV
+  )
+  
+  comp_panel <- merge(
+    comp_panel,
+    btos_validation,
+    by = "naics2",
+    all.x = TRUE,
+    sort = FALSE
+  )
+  
 } else {
-  comp_panel[, (BTOS_NUMERIC_COLS) := lapply(BTOS_NUMERIC_COLS, function(x) NA_real_)]
-  comp_panel[, (BTOS_INTEGER_COLS) := lapply(BTOS_INTEGER_COLS, function(x) NA_integer_)]
-  comp_panel[, (BTOS_CHARACTER_COLS) := lapply(BTOS_CHARACTER_COLS, function(x) NA_character_)]
+  
+  for (col in BTOS_NUMERIC_COLS) {
+    comp_panel[, (col) := NA_real_]
+  }
+  
+  for (col in BTOS_INTEGER_COLS) {
+    comp_panel[, (col) := NA_integer_]
+  }
+  
+  for (col in BTOS_CHARACTER_COLS) {
+    comp_panel[, (col) := NA_character_]
+  }
+}
+
+
+for (col in BTOS_NUMERIC_COLS) {
+  if (!col %in% names(comp_panel)) {
+    comp_panel[, (col) := NA_real_]
+  }
 }
 
 for (col in BTOS_INTEGER_COLS) {
-  if (!col %in% names(comp_panel)) comp_panel[, (col) := NA_integer_]
+  if (!col %in% names(comp_panel)) {
+    comp_panel[, (col) := NA_integer_]
+  }
 }
-for (col in BTOS_NUMERIC_COLS) {
-  if (!col %in% names(comp_panel)) comp_panel[, (col) := NA_real_]
-}
+
 for (col in BTOS_CHARACTER_COLS) {
-  if (!col %in% names(comp_panel)) comp_panel[, (col) := NA_character_]
+  if (!col %in% names(comp_panel)) {
+    comp_panel[, (col) := NA_character_]
+  }
 }
 
 
-# ---- Load AI scores and merge on cik-year -------------------------------------
-ai_scores <- load_ai_scores(AI_ADOPTION_FILE)
+assert_unique_keys(
+  comp_panel,
+  c("cik", "datadate"),
+  "Compustat panel before EDGAR merge"
+)
 
-assert_unique_keys(comp_panel, c("cik", "year"), "Compustat panel before AI merge")
 
-panel <- merge(comp_panel, ai_scores, by = c("cik", "year"), all.x = TRUE, sort = FALSE)
+# ---- Load AI filings ----------------------------------------------------------
+
+ai_filings <- load_ai_filings(
+  AI_FILING_MASTER_FILE,
+  EDGAR_MANIFEST_MAIN_FILE,
+  EDGAR_MANIFEST_2025_FILE
+)
+
+# ---- Define AI-history universe and treatment dates ----------------------------
+#
+# Treatment timing uses SEC filing_date because this is when the disclosure
+# becomes observable.
+#
+# AI-history coverage is defined at the FIRM level, not the firm-year level.
+# Once a firm has a qualifying AI disclosure, later Compustat outcomes remain
+# usable even if that later fiscal period has no contemporaneously matched
+# ai_score.
+#
+# Allow the preceding report year because a fiscal-year 2014 10-K filed in
+# 2015 can determine treatment before the first 2015 outcome.
+#
+# Very old filings/amendments are excluded from treatment-date construction.
+
+treatment_filings <- ai_filings[
+  ai_report_year >= ANALYSIS_START_YEAR - 1L &
+    ai_report_year <= ANALYSIS_END_YEAR
+]
+
+
+# Firms with at least one scored annual filing relevant to the analysis window.
+# This is deliberately NOT based on whether each Compustat year has a matched
+# ai_score.
+ai_firm_history <- unique(
+  treatment_filings[
+    ,
+    .(
+      cik,
+      has_ai_history = TRUE
+    )
+  ]
+)
+
+
+# First observable qualifying disclosure dates.
+treatment_dates <- treatment_filings[
+  ,
+  .(
+    first_ai_filing_date = min_idate(
+      ai_filing_date[
+        ai_score >= 2L
+      ]
+    ),
+    first_ai3_filing_date = min_idate(
+      ai_filing_date[
+        ai_score == 3L
+      ]
+    )
+  ),
+  by = cik
+]
+
+
+assert_unique_keys(
+  ai_firm_history,
+  "cik",
+  "Firm-level AI history"
+)
+
+assert_unique_keys(
+  treatment_dates,
+  "cik",
+  "Firm-level AI treatment dates"
+)
+
+
+# ---- Merge Compustat and EDGAR ------------------------------------------------
+#
+# Correct fiscal-period match:
+#
+#     Compustat CIK + datadate
+#                  =
+#     SEC CIK + report_date
+#
+# filing_date is retained separately for treatment timing.
+
+ai_filings[
+  ,
+  match_datadate := ai_report_date
+]
+
+
+n_comp_before_merge <- nrow(comp_panel)
+
+
+panel <- merge(
+  comp_panel,
+  ai_filings,
+  by.x = c(
+    "cik",
+    "datadate"
+  ),
+  by.y = c(
+    "cik",
+    "match_datadate"
+  ),
+  all.x = TRUE,
+  sort = FALSE
+)
+
 setDT(panel)
-setorder(panel, cik, year)
 
-if (nrow(panel) != nrow(comp_panel)) {
-  stop("Merged panel row count changed after the cik-year merge.")
+
+if (nrow(panel) != n_comp_before_merge) {
+  stop(
+    "Compustat-EDGAR merge changed the Compustat row count."
+  )
 }
 
 
-# ---- Create AI adoption variables ---------------------------------------------
-# `ai_score` is the raw filing-based score. `ai_adoption_year` is the first year
-# with ai_score >= 2. Firms observed in the AI panel but never treated receive 0.
-panel[, ai_adoption_year := {
-  treated_years <- year[!is.na(ai_score) & ai_score >= 2L]
-  observed_years <- year[!is.na(ai_score)]
+# Attach firm-level treatment dates.
+panel <- merge(
+  panel,
+  treatment_dates,
+  by = "cik",
+  all.x = TRUE,
+  sort = FALSE
+)
 
-  if (length(treated_years) > 0L) {
-    min(treated_years)
-  } else if (length(observed_years) > 0L) {
-    0L
-  } else {
-    NA_integer_
-  }
-}, by = cik]
-
-panel[, ai_adopted := fifelse(
-  is.na(ai_adoption_year),
-  NA_integer_,
-  fifelse(ai_adoption_year > 0L & year >= ai_adoption_year, 1L, 0L)
-)]
-
-# `ai_adoption_3_year` is the first year with ai_score == 3. As above, firms
-# observed in the AI panel but never reaching score 3 receive 0. Score-2-only
-# firms are identified and removed in the score-3 DiD sample, rather than here,
-# so treated firms retain any score-2 observations that precede score 3.
-panel[, ai_adoption_3_year := {
-  treated_3_years <- year[!is.na(ai_score) & ai_score == 3L]
-  observed_years <- year[!is.na(ai_score)]
-
-  if (length(treated_3_years) > 0L) {
-    min(treated_3_years)
-  } else if (length(observed_years) > 0L) {
-    0L
-  } else {
-    NA_integer_
-  }
-}, by = cik]
-
-panel[, ai_adopted3 := fifelse(
-  is.na(ai_adoption_3_year),
-  NA_integer_,
-  fifelse(ai_adoption_3_year > 0L & year >= ai_adoption_3_year, 1L, 0L)
-)]
+setDT(panel)
 
 
-# ---- Build matched and unmatched samples --------------------------------------
-panel_analysis_window <- panel[year >= ANALYSIS_START_YEAR & year <= ANALYSIS_END_YEAR]
+# Attach firm-level AI-history indicator.
+panel <- merge(
+  panel,
+  ai_firm_history,
+  by = "cik",
+  all.x = TRUE,
+  sort = FALSE
+)
+
+setDT(panel)
+
+
+panel[
+  is.na(has_ai_history),
+  has_ai_history := FALSE
+]
+
+
+assert_unique_keys(
+  panel,
+  c("cik", "datadate"),
+  "Merged Compustat + AI panel"
+)
+
+assert_unique_keys(
+  panel,
+  c("cik", "year"),
+  "Merged Compustat + AI annual panel"
+)
+
+
+# Every exact fiscal-period match must genuinely match report_date to datadate.
+if (
+  panel[
+    !is.na(ai_score) &
+    (
+      is.na(ai_report_date) |
+      ai_report_date != datadate
+    ),
+    .N
+  ] > 0L
+) {
+  stop(
+    "Some matched AI scores do not satisfy SEC report_date = Compustat datadate."
+  )
+}
+
+
+panel[
+  ,
+  match_method := fifelse(
+    !is.na(ai_score),
+    "exact_report_date",
+    "unmatched"
+  )
+]
+
+
+setorder(
+  panel,
+  cik,
+  datadate
+)
+
+
+# ---- Create absorbing AI adoption variables -----------------------------------
+#
+# `ai_score` is a time-varying fiscal-period measure and may be missing in later
+# years.
+#
+# `ai_adopted` is the main binary causal treatment. It is absorbing:
+# once the first qualifying disclosure has become observable, every later
+# eligible Compustat outcome remains treated regardless of whether that later
+# year has a matched ai_score.
+#
+# A Compustat period is treated only when its datadate is strictly AFTER the
+# first qualifying SEC filing_date. This prevents a filing made after a fiscal
+# year-end from retroactively treating that fiscal-year outcome.
+#
+# Firms in the relevant EDGAR/AI history but with no qualifying disclosure are
+# coded 0 throughout the observed panel.
+#
+# Firms without relevant AI filing history remain NA because treatment status
+# is not established for them.
+
+
+# Main treatment: ai_score >= 2
+panel[
+  ,
+  ai_adoption_year := {
+    
+    if (!isTRUE(has_ai_history[1L])) {
+      
+      NA_integer_
+      
+    } else {
+      
+      disclosure_date <- first_ai_filing_date[
+        !is.na(first_ai_filing_date)
+      ]
+      
+      if (length(disclosure_date) == 0L) {
+        
+        0L
+        
+      } else {
+        
+        treated_years <- year[
+          datadate > disclosure_date[1L]
+        ]
+        
+        if (length(treated_years) > 0L) {
+          min(treated_years)
+        } else {
+          # Qualifying disclosure exists, but there is no post-disclosure
+          # Compustat outcome inside the observed panel.
+          0L
+        }
+      }
+    }
+  },
+  by = cik
+]
+
+
+panel[
+  ,
+  ai_adopted := fcase(
+    !has_ai_history,
+    NA_integer_,
+    
+    is.na(first_ai_filing_date),
+    0L,
+    
+    datadate > first_ai_filing_date,
+    1L,
+    
+    default = 0L
+  )
+]
+
+
+# Strong-adoption treatment: ai_score == 3
+panel[
+  ,
+  ai_adoption_3_year := {
+    
+    if (!isTRUE(has_ai_history[1L])) {
+      
+      NA_integer_
+      
+    } else {
+      
+      disclosure_date <- first_ai3_filing_date[
+        !is.na(first_ai3_filing_date)
+      ]
+      
+      if (length(disclosure_date) == 0L) {
+        
+        0L
+        
+      } else {
+        
+        treated_years <- year[
+          datadate > disclosure_date[1L]
+        ]
+        
+        if (length(treated_years) > 0L) {
+          min(treated_years)
+        } else {
+          0L
+        }
+      }
+    }
+  },
+  by = cik
+]
+
+
+panel[
+  ,
+  ai_adopted3 := fcase(
+    !has_ai_history,
+    NA_integer_,
+    
+    is.na(first_ai3_filing_date),
+    0L,
+    
+    datadate > first_ai3_filing_date,
+    1L,
+    
+    default = 0L
+  )
+]
+
+
+# ---- Treatment QA --------------------------------------------------------------
+#
+# These checks enforce the causal timing rules and make the script fail rather
+# than silently producing an invalid staggered-treatment panel.
+
+
+# 1. Firms outside the AI-history universe must have undefined treatment.
+if (
+  panel[
+    !has_ai_history &
+    (
+      !is.na(ai_adopted) |
+      !is.na(ai_adoption_year) |
+      !is.na(ai_adopted3) |
+      !is.na(ai_adoption_3_year)
+    ),
+    .N
+  ] > 0L
+) {
+  stop(
+    "Treatment variables are defined for firms without relevant AI filing history."
+  )
+}
+
+
+# 2. Main treatment cannot begin on or before the disclosure date.
+if (
+  panel[
+    ai_adopted == 1L &
+    (
+      is.na(first_ai_filing_date) |
+      datadate <= first_ai_filing_date
+    ),
+    .N
+  ] > 0L
+) {
+  stop(
+    "Main AI treatment is active before the first qualifying filing becomes observable."
+  )
+}
+
+
+# 3. Every post-disclosure period must remain treated.
+if (
+  panel[
+    has_ai_history &
+    !is.na(first_ai_filing_date) &
+    datadate > first_ai_filing_date &
+    ai_adopted != 1L,
+    .N
+  ] > 0L
+) {
+  stop(
+    "Main AI treatment is not absorbing after the first qualifying filing."
+  )
+}
+
+
+# 4. Strong-adoption treatment cannot begin on or before its disclosure date.
+if (
+  panel[
+    ai_adopted3 == 1L &
+    (
+      is.na(first_ai3_filing_date) |
+      datadate <= first_ai3_filing_date
+    ),
+    .N
+  ] > 0L
+) {
+  stop(
+    "Strong AI treatment is active before the first score-3 filing becomes observable."
+  )
+}
+
+
+# 5. Every post-score-3 disclosure period must remain strongly treated.
+if (
+  panel[
+    has_ai_history &
+    !is.na(first_ai3_filing_date) &
+    datadate > first_ai3_filing_date &
+    ai_adopted3 != 1L,
+    .N
+  ] > 0L
+) {
+  stop(
+    "Strong AI treatment is not absorbing after the first score-3 filing."
+  )
+}
+
+
+# 6. No firm may switch from treated back to untreated.
+
+main_reversals <- panel[
+  has_ai_history == TRUE,
+  .(
+    reversal = any(
+      diff(ai_adopted[order(datadate)]) < 0L,
+      na.rm = TRUE
+    )
+  ),
+  by = cik
+][
+  reversal == TRUE
+]
+
+if (nrow(main_reversals) > 0L) {
+  stop(
+    "Found ",
+    nrow(main_reversals),
+    " firms that switch from main AI treatment back to untreated."
+  )
+}
+
+
+strong_reversals <- panel[
+  has_ai_history == TRUE,
+  .(
+    reversal = any(
+      diff(ai_adopted3[order(datadate)]) < 0L,
+      na.rm = TRUE
+    )
+  ),
+  by = cik
+][
+  reversal == TRUE
+]
+
+if (nrow(strong_reversals) > 0L) {
+  stop(
+    "Found ",
+    nrow(strong_reversals),
+    " firms that switch from score-3 treatment back to untreated."
+  )
+}
+
+
+# 7. Cohort year must equal the first treated annual outcome year.
+main_cohort_check <- panel[
+  ai_adopted == 1L,
+  .(
+    first_treated_year = min(year)
+  ),
+  by = .(
+    cik,
+    ai_adoption_year
+  )
+][
+  ai_adoption_year != first_treated_year
+]
+
+
+if (nrow(main_cohort_check) > 0L) {
+  stop(
+    "ai_adoption_year does not equal the first treated outcome year for some firms."
+  )
+}
+
+
+strong_cohort_check <- panel[
+  ai_adopted3 == 1L,
+  .(
+    first_treated_year = min(year)
+  ),
+  by = .(
+    cik,
+    ai_adoption_3_year
+  )
+][
+  ai_adoption_3_year != first_treated_year
+]
+
+
+if (nrow(strong_cohort_check) > 0L) {
+  stop(
+    "ai_adoption_3_year does not equal the first strongly treated outcome year for some firms."
+  )
+}
+
+
+# 8. Firms with relevant history but no qualifying disclosure must remain
+# untreated throughout the observed panel.
+if (
+  panel[
+    has_ai_history &
+    is.na(first_ai_filing_date) &
+    (
+      ai_adoption_year != 0L |
+      ai_adopted != 0L
+    ),
+    .N
+  ] > 0L
+) {
+  stop(
+    "Never-treated firms have inconsistent main treatment coding."
+  )
+}
+
+
+if (
+  panel[
+    has_ai_history &
+    is.na(first_ai3_filing_date) &
+    (
+      ai_adoption_3_year != 0L |
+      ai_adopted3 != 0L
+    ),
+    .N
+  ] > 0L
+) {
+  stop(
+    "Never-score-3 firms have inconsistent strong-treatment coding."
+  )
+}
+
+
+cat(
+  "\nTreatment QA passed:",
+  "main and score-3 treatment are absorbing and correctly timed.\n"
+)
+
+
+# ---- Build matched and unmatched panels ---------------------------------------
+
+panel_analysis_window <- panel[ year >= ANALYSIS_START_YEAR &
+                                  year <= ANALYSIS_END_YEAR]
+
+
 panel_ai <- panel_analysis_window[!is.na(ai_score)]
+
+
 unmatched <- panel_analysis_window[is.na(ai_score)]
 
-assert_unique_keys(panel, c("cik", "year"), "Merged Compustat + AI panel")
-assert_unique_keys(panel_ai, c("cik", "year"), "Matched Compustat + AI panel")
+
+assert_unique_keys(panel_ai, 
+                   c("cik", "datadate"),
+                   "Matched Compustat + AI panel")
+
+
+# ---- Matching QA --------------------------------------------------------------
+
+analysis_rows <- nrow(panel_analysis_window)
+
+matched_rows <- nrow(panel_ai)
+
+unmatched_rows <- nrow(unmatched)
+
+match_rate <- if (analysis_rows > 0L) {
+  100 * matched_rows / analysis_rows
+} else {
+  NA_real_
+}
+
+
+coverage_by_year <- panel_analysis_window[
+  ,
+  .(
+    compustat_rows = .N,
+    matched_rows = sum(!is.na(ai_score)),
+    coverage = mean(!is.na(ai_score))
+  ),
+  by = year
+][
+  order(year)
+]
+
+
+cat("\nBuilt merged Compustat + AI panel.\n")
+
+cat("Matching rule: CIK + Compustat datadate = CIK + SEC report_date\n")
+
+cat("Compustat rows:",
+    format(analysis_rows, big.mark = ","),
+    "\n")
+
+cat("Matched fiscal periods:",
+    format(matched_rows, big.mark = ","),
+    "\n")
+
+cat("Unmatched fiscal periods:",
+    format(unmatched_rows, big.mark = ","),
+    "\n")
+
+cat("Fiscal-period coverage:",
+    sprintf("%.1f%%", match_rate),
+    "\n")
+
+cat("\nCoverage by fiscal-period year:\n")
+
+print(coverage_by_year)
+
+
+# Final-year completeness QA.
+#
+# Merely observing some filings in ANALYSIS_END_YEAR + 1 does not prove that the
+# final report year is complete. Check both the maximum filing year and whether
+# exact report-date coverage collapses relative to the preceding fiscal year.
+
+max_filing_year <- max(
+  ai_filings$ai_filing_year,
+  na.rm = TRUE
+)
+
+if (
+  max_filing_year <
+  ANALYSIS_END_YEAR + 1L
+) {
+  
+  warning(
+    paste0(
+      "EDGAR scored filings end in filing year ",
+      max_filing_year,
+      ". Fiscal year ",
+      ANALYSIS_END_YEAR,
+      " is likely incomplete because many ",
+      ANALYSIS_END_YEAR,
+      " 10-Ks are filed in ",
+      ANALYSIS_END_YEAR + 1L,
+      "."
+    )
+  )
+}
+
+
+final_year_coverage <- coverage_by_year[
+  year == ANALYSIS_END_YEAR,
+  coverage
+]
+
+previous_year_coverage <- coverage_by_year[
+  year == ANALYSIS_END_YEAR - 1L,
+  coverage
+]
+
+
+if (
+  length(final_year_coverage) == 1L &&
+  length(previous_year_coverage) == 1L &&
+  is.finite(final_year_coverage) &&
+  is.finite(previous_year_coverage) &&
+  previous_year_coverage > 0 &&
+  final_year_coverage < 0.5 * previous_year_coverage
+) {
+  
+  warning(
+    paste0(
+      "Fiscal-period AI-score coverage falls sharply from ",
+      sprintf("%.1f%%", 100 * previous_year_coverage),
+      " in ",
+      ANALYSIS_END_YEAR - 1L,
+      " to ",
+      sprintf("%.1f%%", 100 * final_year_coverage),
+      " in ",
+      ANALYSIS_END_YEAR,
+      ". Treat the final-year contemporaneous ai_score as incomplete. ",
+      "This does not invalidate post-treatment outcomes when treatment was ",
+      "established by an earlier qualifying filing."
+    )
+  )
+}
 
 
 # ---- Save outputs -------------------------------------------------------------
+
 if (SAVE_MERGED_OUTPUTS) {
-  saveRDS(panel, OUTPUT_MERGED_PANEL_RDS)
+  
+  saveRDS(panel,OUTPUT_MERGED_PANEL_RDS)
   fwrite(panel, OUTPUT_MERGED_PANEL_CSV)
+  
   saveRDS(panel_ai, OUTPUT_MATCHED_PANEL_RDS)
   fwrite(panel_ai, OUTPUT_MATCHED_PANEL_CSV)
+  
   fwrite(unmatched, OUTPUT_UNMATCHED_CSV)
-}
-
-
-# ---- Console output -----------------------------------------------------------
-analysis_rows <- nrow(panel_analysis_window)
-matched_rows <- nrow(panel_ai)
-unmatched_rows <- nrow(unmatched)
-matched_rate <- if (analysis_rows > 0) 100 * matched_rows / analysis_rows else NA_real_
-
-cat("\nBuilt merged Compustat + AI panel.\n")
-cat("Annual Compustat rows:", format(nrow(comp), big.mark = ","), "\n")
-cat("Analysis-window rows:", format(analysis_rows, big.mark = ","), "\n")
-cat("Rows with AI score match:", format(matched_rows, big.mark = ","), "\n")
-cat("Rows without AI score match:", format(unmatched_rows, big.mark = ","), "\n")
-cat("AI match rate in analysis window:", sprintf("%.1f%%", matched_rate), "\n")
-
-if (SKIP_AI_EXPOSURE) {
-  cat("AI exposure merge skipped: TRUE\n")
-}
-
-if (SAVE_MERGED_OUTPUTS) {
-  cat("Saved merged panel to:", OUTPUT_MERGED_PANEL_RDS, "and", OUTPUT_MERGED_PANEL_CSV, "\n")
-  cat("Saved matched panel to:", OUTPUT_MATCHED_PANEL_RDS, "and", OUTPUT_MATCHED_PANEL_CSV, "\n")
-  cat("Saved unmatched rows to:", OUTPUT_UNMATCHED_CSV, "\n")
+  
+  cat("\nSaved merged panel to:",
+      OUTPUT_MERGED_PANEL_RDS,
+      "and",
+      OUTPUT_MERGED_PANEL_CSV,
+      "\n")
+  
+  cat("Saved matched panel to:",
+      OUTPUT_MATCHED_PANEL_RDS,
+      "and",
+      OUTPUT_MATCHED_PANEL_CSV,
+      "\n")
+  
+  cat("Saved unmatched fiscal periods to:",
+      OUTPUT_UNMATCHED_CSV,
+      "\n")
 }
