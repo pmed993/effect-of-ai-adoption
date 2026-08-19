@@ -5,10 +5,11 @@
 # ------------------------------------------------------------------------------
 # This script uses the saved post-validation final analysis panel to:
 # 1. build the original staggered-adoption sample (ai_score >= 2) and a second
-#    sample that treats firms when they first reach ai_score == 3, retains
-#    score-1-only firms as controls, and excludes score-2-only firms;
-# 2. estimate four transparent control specifications with cohort-specific,
-#    two-period att_gt() comparisons;
+#    sample that treats firms when strong AI adoption first becomes observable
+#    according to ai_adoption_3_year, while firms not yet strongly treated and
+#    firms never reaching strong adoption remain eligible controls;
+# 2. estimate three transparent control specifications using the standard
+#    Callaway-Sant'Anna multiperiod att_gt() estimator;
 # 3. report both treatments in publication-ready Panel A/Panel B tables; and
 # 4. estimate dynamic effects only for one configurable preferred specification.
 # ------------------------------------------------------------------------------
@@ -39,31 +40,23 @@ DID_COVARIATE_TIMING_CSV <- file.path(
   DID_OUTPUT_DIR,
   "did_pre_treatment_covariate_audit.csv"
 )
-DID_COHORT_BASELINE_QA_CSV <- file.path(
-  DID_OUTPUT_DIR,
-  "did_cohort_specific_baseline_qa.csv"
-)
+
 DID_BALANCED_SAMPLE_LOSS_CSV <- file.path(
   DID_OUTPUT_DIR,
   "did_balanced_panel_sample_loss.csv"
 )
-DID_ATT_COMPARISON_CSV <- file.path(
-  DID_OUTPUT_DIR,
-  "did_corrected_vs_previous_att.csv"
-)
-DID_MODEL_WARNINGS_CSV <- file.path(
-  DID_OUTPUT_DIR,
-  "did_model_warnings.csv"
-)
+
 DID_PUBLICATION_CSV <- file.path(DID_OUTPUT_DIR, "did_publication_tables.csv")
 DID_PUBLICATION_MD <- file.path(DID_OUTPUT_DIR, "did_publication_tables.md")
 
 SAVE_DID_OUTPUTS <- TRUE
 
-# Complete covariate support begins in 2015 after loading the required Compustat
-# lookback. Treatment cohorts therefore begin in 2016 so every treated firm can
-# contribute a genuine g-1 baseline period.
+# The analysis panel begins in 2015. Because treatment is assigned only after
+# a qualifying AI disclosure becomes observable through the filing date, 2015
+# serves as the earliest pre-treatment/baseline year and 2016 is the first
+# admissible treatment cohort.
 MIN_TREATED_COHORT <- 2016L
+
 DID_EST_METHOD <- "dr"
 CONTROL_GROUP <- "notyettreated"
 DID_BASE_PERIOD <- "varying"
@@ -74,15 +67,7 @@ DID_3_COHORT_VAR <- "ai_adoption_3_year"
 # preferred specification changes after the final model review.
 BEST_DID_SPEC_NAME <- "main_controls_naics2"
 
-# did::att_gt() guarantees earlier-period covariates in a balanced panel, but a
-# globally balanced 2015-2025 panel discards a large share of this sample. The
-# main implementation below therefore constructs each ATT(g,t) as its own--
-# balanced two-period panel. For every post-treatment cell, the earlier period
-# and every covariate are fixed to g-1 for both cohort-g firms and their eligible
-# comparison firms. This retains the panel DR estimator while avoiding both
-# global balancing loss and the period-specific covariates used by att_gt()'s
-# unbalanced/repeated-cross-section path.
-PAIR_ALLOW_UNBALANCED_PANEL <- FALSE
+ALLOW_UNBALANCED_PANEL <- FALSE
 
 # Multiplier-bootstrap iterations for standard errors and uniform bands.
 DID_BITERS <- 1000L
@@ -90,21 +75,33 @@ DID_BOOTSTRAP_SEED <- 12345L
 
 DID_OUTCOMES <- c(
   "log_emp",
-  "log_market_cap",
   "log_labor_productivity",
-  "log_sale"
+  "log_sale",
+  "log_market_cap",
+  "log_xopr",
+  "operating_profit_w"
 )
 
-# Parsimonious firm-level controls used in the conditional specifications.
-# These are intentionally not pre-lagged in the source panel. The estimator
-# explicitly copies each cohort's g-1 values into both rows of every relevant
-# treated/comparison two-period panel.
+# # Firm-level controls used in the conditional specifications.
+# With panel = TRUE and allow_unbalanced_panel = FALSE, did::att_gt()
+# uses the earlier-period value of time-varying covariates in each 2x2
+# comparison. For post-treatment ATT(g,t), this corresponds to g-1.
 FIRM_DID_CONTROLS <- c(
   "log_at",
   "roa",
-  "cash_ratio"
+  "cash_ratio",
+  "rd_reporter",
+  "firm_age",
+  "capx_intensity_y"
 )
 
+PROFITABILITY_DID_CONTROLS <- c(
+  "log_at",
+  "cash_ratio",
+  "rd_reporter",
+  "firm_age",
+  "capx_intensity_y"
+)
 # The preferred main conditional specification additionally controls for
 # two-digit NAICS industry categories.
 MAIN_DID_CONTROLS <- c(
@@ -112,9 +109,9 @@ MAIN_DID_CONTROLS <- c(
   "naics2_f"
 )
 
-if (PAIR_ALLOW_UNBALANCED_PANEL) {
+if (ALLOW_UNBALANCED_PANEL) {
   stop(
-    "PAIR_ALLOW_UNBALANCED_PANEL must remain FALSE. Each cohort-time cell ",
+    "ALLOW_UNBALANCED_PANEL must remain FALSE. Each cohort-time cell ",
     "must be balanced across its baseline and target periods."
   )
 }
@@ -129,53 +126,62 @@ if (DID_BASE_PERIOD != "varying") {
 
 if (any(grepl("_l[0-9]+$", FIRM_DID_CONTROLS))) {
   stop(
-    "FIRM_DID_CONTROLS must name the source variables, not pre-lagged ",
-    "variables. Cohort-specific g-1 values are constructed explicitly."
+    "FIRM_DID_CONTROLS must contain the source variables, not manually ",
+    "lagged variables. did::att_gt() handles the relevant earlier-period ",
+    "covariate values internally."
   )
 }
 
 DID_SPECIFICATIONS <- tibble(
-  spec_order = 1:4,
+  spec_order = 1:3,
   
   spec_name = c(
     "unconditional",
     "naics2",
-    "main_controls_naics2",
-    "main_controls_naics2_aiie"
+    "main_controls_naics2"
   ),
+  
   spec_label = c(
     "Unconditional",
     "Industry controls",
-    "Firm + industry controls",
-    "Firm + industry controls + AIIE"
+    "Firm + industry controls"
   ),
+  
   column_label = paste0(
-    "(", 1:4, ") ",
+    "(", 1:3, ") ",
     c(
       "Unconditional",
       "Industry controls",
-      "Firm + industry controls",
-      "Firm + industry controls + AIIE"
+      "Firm + industry controls"
     )
   ),
-  naics2_controls = c("No", "Yes", "Yes", "Yes"),
-  firm_controls = c("No", "No", "Yes", "Yes"),
-  aiie_control = c("No", "No", "No", "Yes"),
+  
+  naics2_controls = c(
+    "No",
+    "Yes",
+    "Yes"
+  ),
+  
+  firm_controls = c(
+    "No",
+    "No",
+    "Yes"
+  ),
+  
   controls = list(
     character(),
     c("naics2_f"),
-    MAIN_DID_CONTROLS,
-    c(MAIN_DID_CONTROLS, "aiie")
+    MAIN_DID_CONTROLS
   )
 )
 
 # Catch accidental mismatches between names, labels and control lists.
 stopifnot(
-  nrow(DID_SPECIFICATIONS) == 4L,
-  length(DID_SPECIFICATIONS$spec_name) == 4L,
-  length(DID_SPECIFICATIONS$spec_label) == 4L,
-  length(DID_SPECIFICATIONS$column_label) == 4L,
-  length(DID_SPECIFICATIONS$controls) == 4L
+  nrow(DID_SPECIFICATIONS) == 3L,
+  length(DID_SPECIFICATIONS$spec_name) == 3L,
+  length(DID_SPECIFICATIONS$spec_label) == 3L,
+  length(DID_SPECIFICATIONS$column_label) == 3L,
+  length(DID_SPECIFICATIONS$controls) == 3L
 )
 
 if (!BEST_DID_SPEC_NAME %in% DID_SPECIFICATIONS$spec_name) {
@@ -184,9 +190,11 @@ if (!BEST_DID_SPEC_NAME %in% DID_SPECIFICATIONS$spec_name) {
 
 OUTCOME_LABELS <- c(
   log_emp = "Employment (log)",
-  log_market_cap = "Market value (log)",
   log_labor_productivity = "Labour productivity (log)",
-  log_sale = "Sales (log)"
+  log_sale = "Sales (log)",
+  log_market_cap = "Market value (log)",
+  log_xopr = "Operating Costs (log)",
+  operating_profit_w = "Operating profit (OIBDP/assets)" # oibdp / at
 )
 
 # ---- Helpers -----------------------------------------------------------------
@@ -212,30 +220,6 @@ build_xformla <- function(controls) {
   }
 }
 
-add_ai_adoption_3_year <- function(data) {
-  data |>
-    mutate(
-      cik = as.character(cik),
-      year = as.integer(year),
-      ai_score = as.integer(ai_score)
-    ) |>
-    group_by(cik) |>
-    mutate(
-      ai_adoption_3_year = {
-        treated_3_years <- year[!is.na(ai_score) & ai_score == 3L]
-        observed_years <- year[!is.na(ai_score)]
-
-        if (length(treated_3_years) > 0L) {
-          min(treated_3_years)
-        } else if (length(observed_years) > 0L) {
-          0L
-        } else {
-          NA_integer_
-        }
-      }
-    ) |>
-    ungroup()
-}
 
 build_did_sample <- function(data, cohort_var) {
   required_vars <- c("cik", "year", cohort_var)
@@ -267,35 +251,20 @@ build_did_sample <- function(data, cohort_var) {
 }
 
 build_did_3_sample <- function(data) {
-  required_vars <- c("cik", "year", "ai_score")
+  required_vars <- c("cik", "year", DID_3_COHORT_VAR)
   missing_vars <- setdiff(required_vars, names(data))
+  
   if (length(missing_vars) > 0L) {
     stop(
       "Variables required to build the score-3 DiD sample are missing: ",
       paste(missing_vars, collapse = ", ")
     )
   }
-
+  
   data |>
-    add_ai_adoption_3_year() |>
-    group_by(cik) |>
-    mutate(
-      score_3_treated_firm = any(ai_score == 3L, na.rm = TRUE),
-      score_1_control_firm = all(!is.na(ai_score) & ai_score == 1L)
-    ) |>
-    filter(score_3_treated_firm | score_1_control_firm) |>
-    ungroup() |>
-    select(-score_3_treated_firm, -score_1_control_firm) |>
     build_did_sample(cohort_var = DID_3_COHORT_VAR)
 }
 
-baseline_control_names <- function(controls) {
-  if (length(controls) == 0L) {
-    character()
-  } else {
-    paste0(controls, "_cohort_baseline")
-  }
-}
 
 scalar_or_na <- function(value) {
   if (length(value) == 0L || !is.finite(value[[1]])) {
@@ -305,382 +274,6 @@ scalar_or_na <- function(value) {
   }
 }
 
-run_balanced_reference <- function(
-    sample,
-    outcome,
-    controls,
-    cohort_var) {
-  input_n_obs <- nrow(sample)
-  input_n_firms <- n_distinct(sample$firm_id)
-
-  reference_model <- suppressWarnings(
-    att_gt(
-      yname = outcome,
-      tname = "year",
-      idname = "firm_id",
-      gname = cohort_var,
-      xformla = build_xformla(controls),
-      data = sample,
-      panel = TRUE,
-      allow_unbalanced_panel = FALSE,
-      control_group = CONTROL_GROUP,
-      base_period = DID_BASE_PERIOD,
-      est_method = DID_EST_METHOD,
-      bstrap = FALSE,
-      cband = FALSE,
-      clustervars = "firm_id",
-      faster_mode = TRUE
-    )
-  )
-
-  reference_sample <- reference_model$DIDparams$data
-  reference_id <- reference_model$DIDparams$idname
-  reference_aggregate <- aggte(
-    reference_model,
-    type = "group",
-    na.rm = TRUE,
-    bstrap = FALSE,
-    cband = FALSE
-  )
-
-  balanced_n_obs <- nrow(reference_sample)
-  balanced_n_firms <- n_distinct(reference_sample[[reference_id]])
-
-  list(
-    model = reference_model,
-    overall_att = as.numeric(reference_aggregate$overall.att),
-    overall_se = as.numeric(reference_aggregate$overall.se),
-    sample_loss = tibble(
-      input_n_obs = input_n_obs,
-      balanced_n_obs = balanced_n_obs,
-      observations_lost = input_n_obs - balanced_n_obs,
-      observation_loss_pct = 100 * (input_n_obs - balanced_n_obs) / input_n_obs,
-      input_n_firms = input_n_firms,
-      balanced_n_firms = balanced_n_firms,
-      firms_lost = input_n_firms - balanced_n_firms,
-      firm_loss_pct = 100 * (input_n_firms - balanced_n_firms) / input_n_firms
-    )
-  )
-}
-
-run_cohort_time_att <- function(
-    sample,
-    outcome,
-    controls,
-    cohort_var,
-    cohort,
-    target_year) {
-  post_treatment <- target_year >= cohort
-  baseline_year <- if (post_treatment) cohort - 1L else target_year - 1L
-  synthetic_cohort_var <- ".cell_treatment_year"
-  baseline_controls <- baseline_control_names(controls)
-
-  baseline_lookup <- sample |>
-    filter(year == baseline_year) |>
-    select(firm_id, all_of(controls)) |>
-    distinct(firm_id, .keep_all = TRUE)
-
-  if (length(controls) > 0L) {
-    baseline_lookup <- baseline_lookup |>
-      rename_with(
-        ~ paste0(.x, "_cohort_baseline"),
-        all_of(controls)
-      ) |>
-      filter(if_all(all_of(baseline_controls), ~ !is.na(.x)))
-  }
-
-  eligible_firms <- sample |>
-    distinct(firm_id, .data[[cohort_var]]) |>
-    filter(
-      .data[[cohort_var]] == cohort |
-        .data[[cohort_var]] == 0L |
-        (.data[[cohort_var]] > target_year & .data[[cohort_var]] != cohort)
-    ) |>
-    inner_join(baseline_lookup, by = "firm_id")
-
-  pair_candidates <- sample |>
-    filter(year %in% c(baseline_year, target_year)) |>
-    semi_join(eligible_firms, by = "firm_id") |>
-    select(cik, firm_id, year, all_of(cohort_var), all_of(outcome)) |>
-    inner_join(eligible_firms, by = c("firm_id", cohort_var)) |>
-    filter(!is.na(.data[[outcome]])) |>
-    distinct(firm_id, year, .keep_all = TRUE)
-
-  balanced_firms <- pair_candidates |>
-    count(firm_id, name = "n_periods") |>
-    filter(n_periods == 2L) |>
-    select(firm_id)
-
-  pair_sample <- pair_candidates |>
-    semi_join(balanced_firms, by = "firm_id") |>
-    mutate(
-      "{synthetic_cohort_var}" := if_else(
-        .data[[cohort_var]] == cohort,
-        as.integer(target_year),
-        0L
-      )
-    ) |>
-    arrange(firm_id, year)
-
-  if (length(controls) > 0L) {
-    pair_sample[baseline_controls] <- lapply(
-      pair_sample[baseline_controls],
-      function(value) {
-        if (is.factor(value)) droplevels(value) else value
-      }
-    )
-  }
-
-  treated_firms <- pair_sample |>
-    filter(.data[[cohort_var]] == cohort) |>
-    distinct(firm_id)
-  comparison_firms <- pair_sample |>
-    filter(.data[[cohort_var]] != cohort) |>
-    distinct(firm_id)
-
-  if (nrow(treated_firms) < 1L || nrow(comparison_firms) < 1L) {
-    stop(
-      "Cohort-time cell g=", cohort, ", t=", target_year,
-      " has no treated or comparison firms after pair balancing."
-    )
-  }
-
-  captured_warnings <- character()
-  cell_model <- withCallingHandlers(
-    att_gt(
-      yname = outcome,
-      tname = "year",
-      idname = "firm_id",
-      gname = synthetic_cohort_var,
-      xformla = build_xformla(baseline_controls),
-      data = pair_sample,
-      panel = TRUE,
-      allow_unbalanced_panel = PAIR_ALLOW_UNBALANCED_PANEL,
-      control_group = "nevertreated",
-      base_period = "varying",
-      est_method = DID_EST_METHOD,
-      bstrap = FALSE,
-      cband = FALSE,
-      clustervars = "firm_id",
-      faster_mode = TRUE
-    ),
-    warning = function(warning_condition) {
-      warning_text <- conditionMessage(warning_condition)
-      if (!grepl("No pre-treatment periods available", warning_text, fixed = TRUE)) {
-        captured_warnings <<- c(captured_warnings, warning_text)
-      }
-      invokeRestart("muffleWarning")
-    }
-  )
-
-  cell_index <- which(
-    cell_model$group == target_year & cell_model$t == target_year
-  )
-  if (length(cell_index) != 1L) {
-    stop(
-      "Expected one att_gt() estimate for g=", cohort,
-      ", t=", target_year, "; found ", length(cell_index), "."
-    )
-  }
-
-  cell_ids <- cell_model$DIDparams$data |>
-    distinct(firm_id) |>
-    pull(firm_id)
-  influence_function <- as.numeric(cell_model$inffunc[, cell_index])
-  if (length(cell_ids) != length(influence_function)) {
-    stop("Influence-function rows do not match panel IDs in a cohort-time cell.")
-  }
-
-  fixed_within_firm <- if (length(baseline_controls) == 0L) {
-    TRUE
-  } else {
-    pair_sample |>
-      group_by(firm_id) |>
-      summarise(
-        across(all_of(baseline_controls), ~ n_distinct(.x) == 1L),
-        .groups = "drop"
-      ) |>
-      select(-firm_id) |>
-      unlist(use.names = FALSE) |>
-      all()
-  }
-
-  treated_baseline_year <- if (nrow(treated_firms) > 0L) baseline_year else NA_integer_
-  comparison_baseline_year <- if (nrow(comparison_firms) > 0L) baseline_year else NA_integer_
-
-  qa <- tibble(
-    cohort = as.integer(cohort),
-    target_year = as.integer(target_year),
-    cell_type = if_else(post_treatment, "post-treatment", "pre-treatment"),
-    required_baseline_year = as.integer(baseline_year),
-    treated_baseline_year = as.integer(treated_baseline_year),
-    comparison_baseline_year = as.integer(comparison_baseline_year),
-    treated_and_controls_same_baseline =
-      treated_baseline_year == comparison_baseline_year,
-    baseline_matches_g_minus_1 = if_else(
-      post_treatment,
-      baseline_year == cohort - 1L,
-      NA
-    ),
-    covariates_fixed_within_firm = fixed_within_firm,
-    any_post_treatment_covariate_source = if_else(
-      post_treatment & length(controls) > 0L,
-      baseline_year >= cohort,
-      FALSE
-    ),
-    allow_unbalanced_panel = PAIR_ALLOW_UNBALANCED_PANEL,
-    n_pair_observations = nrow(pair_sample),
-    n_pair_firms = n_distinct(pair_sample$firm_id),
-    n_treated_firms = nrow(treated_firms),
-    n_comparison_firms = nrow(comparison_firms),
-    n_unpaired_firms_removed =
-      n_distinct(pair_candidates$firm_id) - nrow(balanced_firms),
-    att_is_finite = is.finite(cell_model$att[[cell_index]])
-  )
-
-  list(
-    cohort = as.integer(cohort),
-    target_year = as.integer(target_year),
-    att = as.numeric(cell_model$att[[cell_index]]),
-    se = as.numeric(cell_model$se[[cell_index]]),
-    influence_function = influence_function,
-    ids = cell_ids,
-    treated_ids = treated_firms$firm_id,
-    used_firm_years = pair_sample |>
-      distinct(firm_id, year),
-    qa = qa,
-    warnings = unique(captured_warnings),
-    did_params = cell_model$DIDparams
-  )
-}
-
-assemble_cohort_specific_mp <- function(
-    cell_results,
-    sample,
-    cohort_var,
-    bootstrap_seed) {
-  master_ids <- sort(unique(unlist(map(cell_results, "ids"))))
-  n_master <- length(master_ids)
-
-  influence_columns <- map(
-    cell_results,
-    function(cell_result) {
-      influence_column <- numeric(n_master)
-      matched_rows <- match(cell_result$ids, master_ids)
-      influence_column[matched_rows] <-
-        cell_result$influence_function * n_master / length(cell_result$ids)
-      influence_column
-    }
-  )
-  combined_influence_function <- do.call(cbind, influence_columns)
-
-  treated_membership <- map_dfr(
-    cell_results,
-    function(cell_result) {
-      if (cell_result$target_year < cell_result$cohort) {
-        return(tibble(firm_id = integer(), cohort = integer()))
-      }
-      tibble(
-        firm_id = cell_result$treated_ids,
-        cohort = cell_result$cohort
-      )
-    }
-  ) |>
-    distinct(firm_id, cohort)
-
-  conflicting_membership <- treated_membership |>
-    count(firm_id) |>
-    filter(n > 1L)
-  if (nrow(conflicting_membership) > 0L) {
-    stop("A firm was assigned to more than one treatment cohort during assembly.")
-  }
-
-  aggregation_data <- tibble(firm_id = master_ids) |>
-    left_join(treated_membership, by = "firm_id") |>
-    mutate(
-      cohort = replace_na(cohort, 0L),
-      # aggte() reads one row per panel unit at the first value in tlist.
-      year = min(map_dbl(cell_results, "target_year")),
-      .w = 1
-    ) |>
-    rename("{cohort_var}" := cohort)
-
-  group <- map_dbl(cell_results, "cohort")
-  target_year <- map_dbl(cell_results, "target_year")
-  att <- map_dbl(cell_results, "att")
-  analytical_variance <-
-    crossprod(combined_influence_function) / n_master
-  analytical_se <- sqrt(diag(analytical_variance) / n_master)
-
-  pre_treatment_cells <-
-    group > target_year & is.finite(att) & is.finite(analytical_se)
-  wald_statistic <- NA_real_
-  wald_p_value <- NA_real_
-  if (sum(pre_treatment_cells) > 0L) {
-    pre_att <- att[pre_treatment_cells]
-    pre_variance <-
-      analytical_variance[pre_treatment_cells, pre_treatment_cells, drop = FALSE] /
-      n_master
-    inverse_pre_variance <- tryCatch(
-      solve(pre_variance),
-      error = function(error_condition) MASS::ginv(pre_variance)
-    )
-    wald_statistic <- as.numeric(
-      t(pre_att) %*% inverse_pre_variance %*% pre_att
-    )
-    wald_p_value <- pchisq(
-      wald_statistic,
-      df = sum(pre_treatment_cells),
-      lower.tail = FALSE
-    )
-  }
-
-  did_params <- cell_results[[1]]$did_params
-  did_params$data <- aggregation_data
-  did_params$gname <- cohort_var
-  did_params$tname <- "year"
-  did_params$idname <- "firm_id"
-  did_params$panel <- TRUE
-  did_params$allow_unbalanced_panel <- FALSE
-  did_params$faster_mode <- FALSE
-  did_params$tlist <- sort(unique(target_year))
-  did_params$glist <- sort(unique(group))
-  did_params$bstrap <- TRUE
-  did_params$biters <- DID_BITERS
-  did_params$cband <- TRUE
-  did_params$alp <- 0.05
-  did_params$clustervars <- "firm_id"
-  did_params$cluster_vector <- NULL
-  did_params$cluster_vector_var <- NULL
-
-  set.seed(bootstrap_seed)
-  combined_model <- did:::MP(
-    group = group,
-    t = target_year,
-    att = att,
-    V_analytical = analytical_variance,
-    se = analytical_se,
-    c = qnorm(0.975),
-    inffunc = combined_influence_function,
-    n = n_master,
-    W = wald_statistic,
-    Wpval = wald_p_value,
-    alp = 0.05,
-    DIDparams = did_params
-  )
-
-  used_firm_years <- cell_results |>
-    map("used_firm_years") |>
-    bind_rows() |>
-    distinct(firm_id, year)
-
-  list(
-    model = combined_model,
-    n_firms = n_master,
-    n_obs = nrow(used_firm_years),
-    used_firm_years = used_firm_years
-  )
-}
 
 run_cs_did <- function(
     data,
@@ -691,304 +284,442 @@ run_cs_did <- function(
     spec_label,
     bootstrap_seed,
     cohort_var,
-    compute_dynamic) {
-  outcome_label <- if (outcome %in% names(OUTCOME_LABELS)) {
-    unname(OUTCOME_LABELS[[outcome]])
+    compute_dynamic
+) {
+  
+  outcome_label <- if (
+    outcome %in% names(OUTCOME_LABELS)
+  ) {
+    unname(
+      OUTCOME_LABELS[[outcome]]
+    )
   } else {
     outcome
   }
-
-  sample_vars <- unique(c(
-    "cik",
-    "firm_id",
-    "year",
-    cohort_var,
-    outcome,
-    controls
-  ))
-  missing_vars <- setdiff(sample_vars, names(data))
+  
+  
+  # ---------------------------------------------------------------------------
+  # Required variables
+  # ---------------------------------------------------------------------------
+  
+  sample_vars <- unique(
+    c(
+      "cik",
+      "firm_id",
+      "year",
+      cohort_var,
+      outcome,
+      controls
+    )
+  )
+  
+  missing_vars <- setdiff(
+    sample_vars,
+    names(data)
+  )
+  
   if (length(missing_vars) > 0L) {
     stop(
       "DiD variables not found in the analysis panel: ",
-      paste(missing_vars, collapse = ", ")
+      paste(
+        missing_vars,
+        collapse = ", "
+      )
     )
   }
-
-  sample <- data |>
-    select(all_of(sample_vars)) |>
-    filter(if_all(all_of(sample_vars), ~ !is.na(.x))) |>
-    distinct(firm_id, year, .keep_all = TRUE)
-
-  balanced_reference <- run_balanced_reference(
-    sample = sample,
-    outcome = outcome,
-    controls = controls,
-    cohort_var = cohort_var
-  )
-
-  cohorts <- sample |>
-    distinct(.data[[cohort_var]]) |>
-    filter(.data[[cohort_var]] > 0L) |>
-    arrange(.data[[cohort_var]]) |>
-    pull(.data[[cohort_var]])
-  target_years <- sort(unique(sample$year))
-  target_years <- target_years[target_years > min(target_years)]
-  cell_grid <- crossing(
-    cohort = as.integer(cohorts),
-    target_year = as.integer(target_years)
-  )
-
-  cell_results <- map2(
-    cell_grid$cohort,
-    cell_grid$target_year,
-    ~ run_cohort_time_att(
-      sample = sample,
-      outcome = outcome,
-      controls = controls,
-      cohort_var = cohort_var,
-      cohort = .x,
-      target_year = .y
-    )
-  )
-
-  assembled <- assemble_cohort_specific_mp(
-    cell_results = cell_results,
-    sample = sample,
-    cohort_var = cohort_var,
-    bootstrap_seed = bootstrap_seed
-  )
-  cs_model <- assembled$model
-
-  cohort_baseline_qa_tbl <- cell_results |>
-    map("qa") |>
-    bind_rows() |>
-    mutate(
-      spec_order = .env$spec_order,
-      spec_name = .env$spec_name,
-      spec_label = .env$spec_label,
-      outcome = .env$outcome,
-      cohort_var = .env$cohort_var,
-      .before = 1L
-    )
-
-  failed_post_qa <- cohort_baseline_qa_tbl |>
-    filter(cell_type == "post-treatment") |>
-    filter(
-      required_baseline_year != cohort - 1L |
-        treated_baseline_year != cohort - 1L |
-        comparison_baseline_year != cohort - 1L |
-        !treated_and_controls_same_baseline |
-        !baseline_matches_g_minus_1 |
-        !covariates_fixed_within_firm |
-        any_post_treatment_covariate_source |
-        allow_unbalanced_panel
-    )
-  if (nrow(failed_post_qa) > 0L) {
+  
+  
+  # ---------------------------------------------------------------------------
+  # Estimation input
+  #
+  # Do NOT manually freeze covariates here.
+  #
+  # With panel = TRUE and allow_unbalanced_panel = FALSE, did::att_gt()
+  # uses the earlier-period covariate value in each 2x2 comparison.
+  # For post-treatment ATT(g,t), this is g-1.
+  # ---------------------------------------------------------------------------
+  
+  duplicate_firm_years <- data |>
+    count(firm_id, year) |>
+    filter(n > 1L)
+  
+  if (nrow(duplicate_firm_years) > 0L) {
     stop(
-      "Cohort-specific baseline QA failed for ", nrow(failed_post_qa),
-      " post-treatment ATT(g,t) cells."
+      "Duplicate firm-year observations found in the DiD sample. ",
+      "Resolve these upstream rather than silently dropping duplicates."
     )
   }
-
-  set.seed(bootstrap_seed)
-  overall_att <- aggte(
+  
+  sample <- data |>
+    select(all_of(sample_vars))
+  
+  
+  input_n_obs <- nrow(sample)
+  input_n_firms <- n_distinct(
+    sample$firm_id
+  )
+  
+  
+  # ---------------------------------------------------------------------------
+  # Standard Callaway-Sant'Anna estimator
+  # ---------------------------------------------------------------------------
+  
+  set.seed(
+    bootstrap_seed
+  )
+  
+  cs_model <- did::att_gt(
+    yname = outcome,
+    tname = "year",
+    idname = "firm_id",
+    gname = cohort_var,
+    
+    xformla = build_xformla(
+      controls
+    ),
+    
+    data = sample,
+    
+    panel = TRUE,
+    allow_unbalanced_panel = ALLOW_UNBALANCED_PANEL,
+    
+    control_group = CONTROL_GROUP,
+    base_period = DID_BASE_PERIOD,
+    
+    est_method = DID_EST_METHOD,
+    
+    bstrap = TRUE,
+    cband = TRUE,
+    biters = DID_BITERS,
+    
+    clustervars = "firm_id",
+    
+    faster_mode = TRUE
+  )
+  
+  
+  # ---------------------------------------------------------------------------
+  # Actual estimation sample used by att_gt()
+  # ---------------------------------------------------------------------------
+  
+  estimation_sample <- cs_model$DIDparams$data
+  
+  estimation_n_obs <- nrow(
+    estimation_sample
+  )
+  
+  estimation_n_firms <- n_distinct(
+    estimation_sample$firm_id
+  )
+  
+  
+  # ---------------------------------------------------------------------------
+  # Group-aggregated overall ATT
+  # ---------------------------------------------------------------------------
+  
+  set.seed(
+    bootstrap_seed
+  )
+  
+  overall_att <- did::aggte(
     cs_model,
     type = "group",
     na.rm = TRUE,
+    
     bstrap = TRUE,
     biters = DID_BITERS,
     cband = TRUE,
+    
     clustervars = "firm_id"
   )
-
+  
+  
+  # ---------------------------------------------------------------------------
+  # Parallel-trends Wald test supplied by att_gt()
+  # ---------------------------------------------------------------------------
+  
   pre_treatment_cells <-
     cs_model$group > cs_model$t &
     is.finite(cs_model$att) &
     is.finite(cs_model$se) &
     cs_model$se > 0
-
-  wald_statistic <- scalar_or_na(cs_model$W)
-  wald_p_value <- scalar_or_na(cs_model$Wpval)
+  
+  wald_statistic <- scalar_or_na(
+    cs_model$W
+  )
+  
+  wald_p_value <- scalar_or_na(
+    cs_model$Wpval
+  )
+  
+  
   wald_test_tbl <- tibble(
     spec_order = spec_order,
     spec_name = spec_name,
     spec_label = spec_label,
+    
     outcome = outcome,
-    Outcome = sub(" \\(log\\)$", "", outcome_label),
+    
+    Outcome = sub(
+      " \\(log\\)$",
+      "",
+      outcome_label
+    ),
+    
     `Wald statistic` = wald_statistic,
-    df = sum(pre_treatment_cells),
+    
+    df = sum(
+      pre_treatment_cells
+    ),
+    
     `p-value` = wald_p_value,
+    
     Assessment = case_when(
-      is.na(wald_p_value) ~ "Not available",
-      wald_p_value < 0.05 ~ "Reject",
-      TRUE ~ "Do not reject"
+      is.na(wald_p_value) ~
+        "Not available",
+      
+      wald_p_value < 0.05 ~
+        "Reject",
+      
+      TRUE ~
+        "Do not reject"
     )
   )
-
+  
+  
+  # ---------------------------------------------------------------------------
+  # Overall results
+  # ---------------------------------------------------------------------------
+  
   overall_tbl <- tibble(
     spec_order = spec_order,
     spec_name = spec_name,
     spec_label = spec_label,
+    
     outcome = outcome,
     outcome_label = outcome_label,
-    controls = if (length(controls) == 0L) "None (~1)" else paste(controls, collapse = ", "),
+    
+    controls = if (
+      length(controls) == 0L
+    ) {
+      "None (~1)"
+    } else {
+      paste(
+        controls,
+        collapse = ", "
+      )
+    },
+    
     covariate_reference_period = if_else(
       length(controls) == 0L,
       "No covariates",
-      "cohort-specific g-1 for every post-treatment ATT(g,t)"
+      "Earlier-period values; g-1 for post-treatment ATT(g,t)"
     ),
+    
     base_period = DID_BASE_PERIOD,
-    n_obs = assembled$n_obs,
-    n_firms = assembled$n_firms,
-    estimate = as.numeric(overall_att$overall.att),
-    std_error = as.numeric(overall_att$overall.se),
-    p_value = 2 * pnorm(-abs(overall_att$overall.att / overall_att$overall.se)),
-    ci_low = overall_att$overall.att - 1.96 * overall_att$overall.se,
-    ci_high = overall_att$overall.att + 1.96 * overall_att$overall.se
+    
+    n_obs = estimation_n_obs,
+    n_firms = estimation_n_firms,
+    
+    estimate = as.numeric(
+      overall_att$overall.att
+    ),
+    
+    std_error = as.numeric(
+      overall_att$overall.se
+    ),
+    
+    p_value = 2 * pnorm(
+      -abs(
+        overall_att$overall.att /
+          overall_att$overall.se
+      )
+    ),
+    
+    ci_low =
+      overall_att$overall.att -
+      1.96 * overall_att$overall.se,
+    
+    ci_high =
+      overall_att$overall.att +
+      1.96 * overall_att$overall.se
   )
-
+  
+  
+  # ---------------------------------------------------------------------------
+  # Dynamic / event-study estimates
+  # ---------------------------------------------------------------------------
+  
   dynamic_tbl <- tibble()
+  
   if (compute_dynamic) {
-    set.seed(bootstrap_seed)
-    dynamic_att <- aggte(
+    
+    set.seed(
+      bootstrap_seed
+    )
+    
+    dynamic_att <- did::aggte(
       cs_model,
       type = "dynamic",
-      na.rm = TRUE,
+      
       min_e = -4,
       max_e = 6,
+      
+      na.rm = TRUE,
+      
       bstrap = TRUE,
       biters = DID_BITERS,
       cband = TRUE,
+      
       clustervars = "firm_id"
     )
+    
+    
     dynamic_tbl <- tibble(
       spec_order = spec_order,
       spec_name = spec_name,
       spec_label = spec_label,
+      
       outcome = outcome,
       outcome_label = outcome_label,
-      n_obs = assembled$n_obs,
-      n_firms = assembled$n_firms,
+      
+      n_obs = estimation_n_obs,
+      n_firms = estimation_n_firms,
+      
       event_time = dynamic_att$egt,
+      
       estimate = dynamic_att$att.egt,
+      
       std_error = dynamic_att$se.egt,
-      ci_low = dynamic_att$att.egt - dynamic_att$crit.val * dynamic_att$se.egt,
-      ci_high = dynamic_att$att.egt + dynamic_att$crit.val * dynamic_att$se.egt
+      
+      ci_low =
+        dynamic_att$att.egt -
+        dynamic_att$crit.val.egt *
+        dynamic_att$se.egt,
+      
+      ci_high =
+        dynamic_att$att.egt +
+        dynamic_att$crit.val.egt *
+        dynamic_att$se.egt
     ) |>
-      arrange(event_time)
+      arrange(
+        event_time
+      )
   }
-
+  
+  
+  # ---------------------------------------------------------------------------
+  # Sample-loss audit
+  # ---------------------------------------------------------------------------
+  
+  sample_loss_tbl <- tibble(
+    spec_order = spec_order,
+    spec_name = spec_name,
+    spec_label = spec_label,
+    
+    outcome = outcome,
+    cohort_var = cohort_var,
+    
+    input_n_obs = input_n_obs,
+    estimation_n_obs = estimation_n_obs,
+    
+    observations_lost =
+      input_n_obs -
+      estimation_n_obs,
+    
+    observation_loss_pct =
+      100 *
+      (input_n_obs - estimation_n_obs) /
+      input_n_obs,
+    
+    input_n_firms =
+      input_n_firms,
+    
+    estimation_n_firms =
+      estimation_n_firms,
+    
+    firms_lost =
+      input_n_firms -
+      estimation_n_firms,
+    
+    firm_loss_pct =
+      100 *
+      (input_n_firms - estimation_n_firms) /
+      input_n_firms
+  )
+  
+  
+  # ---------------------------------------------------------------------------
+  # Methodology audit
+  # ---------------------------------------------------------------------------
+  
   covariate_timing_tbl <- tibble(
     spec_order = spec_order,
     spec_name = spec_name,
     spec_label = spec_label,
+    
     outcome = outcome,
     cohort_var = cohort_var,
+    
     panel = TRUE,
-    allow_unbalanced_panel = PAIR_ALLOW_UNBALANCED_PANEL,
+    allow_unbalanced_panel = FALSE,
+    
+    control_group = CONTROL_GROUP,
     base_period = DID_BASE_PERIOD,
-    covariate_reference_period = if_else(
-      length(controls) == 0L,
-      "No covariates",
-      "cohort-specific g-1 for every post-treatment ATT(g,t)"
-    ),
-    firm_controls = if_else(
-      any(controls %in% FIRM_DID_CONTROLS),
-      paste(intersect(controls, FIRM_DID_CONTROLS), collapse = ", "),
-      "None"
-    ),
-    naics2_control = "naics2_f" %in% controls,
-    aiie_control = "aiie" %in% controls,
-    n_post_treatment_cells = sum(cohort_baseline_qa_tbl$cell_type == "post-treatment"),
-    n_post_treatment_cells_passing_qa = sum(
-      cohort_baseline_qa_tbl$cell_type == "post-treatment" &
-        cohort_baseline_qa_tbl$baseline_matches_g_minus_1 &
-        cohort_baseline_qa_tbl$treated_and_controls_same_baseline &
-        cohort_baseline_qa_tbl$covariates_fixed_within_firm &
-        !cohort_baseline_qa_tbl$any_post_treatment_covariate_source
-    ),
-    n_post_treatment_cells_estimable = sum(
-      cohort_baseline_qa_tbl$cell_type == "post-treatment" &
-        cohort_baseline_qa_tbl$att_is_finite
-    ),
-    aggte_group_succeeded =
-      is.finite(overall_att$overall.att) & is.finite(overall_att$overall.se),
-    aggte_dynamic_succeeded = if (compute_dynamic) {
-      nrow(dynamic_tbl) > 0L & all(is.finite(dynamic_tbl$estimate))
-    } else {
-      TRUE
-    }
+    
+    estimator = "did::att_gt()",
+    
+    estimation_method =
+      DID_EST_METHOD,
+    
+    covariate_reference_period =
+      if_else(
+        length(controls) == 0L,
+        "No covariates",
+        "Earlier period in each 2x2 comparison; g-1 for post-treatment ATT(g,t)"
+      ),
+    
+    firm_controls =
+      if_else(
+        any(
+          controls %in%
+            FIRM_DID_CONTROLS
+        ),
+        
+        paste(
+          intersect(
+            controls,
+            FIRM_DID_CONTROLS
+          ),
+          collapse = ", "
+        ),
+        
+        "None"
+      ),
+    
+    naics2_control =
+      "naics2_f" %in%
+      controls
   )
-
-  balance_loss_tbl <- balanced_reference$sample_loss |>
-    mutate(
-      spec_order = .env$spec_order,
-      spec_name = .env$spec_name,
-      spec_label = .env$spec_label,
-      outcome = .env$outcome,
-      cohort_var = .env$cohort_var,
-      .before = 1L
-    )
-
-  comparison_tbl <- tibble(
-    spec_order = spec_order,
-    spec_name = spec_name,
-    spec_label = spec_label,
-    outcome = outcome,
-    cohort_var = cohort_var,
-    previous_specification = "global balanced panel",
-    previous_n_obs = balanced_reference$sample_loss$balanced_n_obs,
-    previous_n_firms = balanced_reference$sample_loss$balanced_n_firms,
-    previous_att = balanced_reference$overall_att,
-    previous_std_error = balanced_reference$overall_se,
-    corrected_specification = "cohort-specific balanced g-1 comparisons",
-    corrected_n_obs = assembled$n_obs,
-    corrected_n_firms = assembled$n_firms,
-    corrected_att = as.numeric(overall_att$overall.att),
-    corrected_std_error = as.numeric(overall_att$overall.se),
-    att_difference = as.numeric(overall_att$overall.att) - balanced_reference$overall_att
-  )
-
-  warning_tbl <- bind_rows(
-    tibble(
-      spec_order = integer(),
-      spec_name = character(),
-      spec_label = character(),
-      outcome = character(),
-      cohort_var = character(),
-      cohort = integer(),
-      target_year = integer(),
-      warning = character()
-    ),
-    map_dfr(
-      cell_results,
-      function(cell_result) {
-        if (length(cell_result$warnings) == 0L) {
-          return(tibble())
-        }
-        tibble(
-          spec_order = spec_order,
-          spec_name = spec_name,
-          spec_label = spec_label,
-          outcome = outcome,
-          cohort_var = cohort_var,
-          cohort = cell_result$cohort,
-          target_year = cell_result$target_year,
-          warning = cell_result$warnings
-        )
-      }
-    )
-  )
-
+  
+  
   list(
-    covariate_timing_tbl = covariate_timing_tbl,
-    cohort_baseline_qa_tbl = cohort_baseline_qa_tbl,
-    balance_loss_tbl = balance_loss_tbl,
-    comparison_tbl = comparison_tbl,
-    warning_tbl = warning_tbl,
-    wald_test_tbl = wald_test_tbl,
-    overall_tbl = overall_tbl,
-    dynamic_tbl = dynamic_tbl
+    model = cs_model,
+    
+    covariate_timing_tbl =
+      covariate_timing_tbl,
+    
+    balance_loss_tbl =
+      sample_loss_tbl,
+    
+    wald_test_tbl =
+      wald_test_tbl,
+    
+    overall_tbl =
+      overall_tbl,
+    
+    dynamic_tbl =
+      dynamic_tbl
   )
 }
 
@@ -1068,7 +799,7 @@ build_control_rows <- function(row_offset) {
       transmute(
         row_order = row_offset,
         row_type = "control",
-        row_label = "NAICS2 controls",
+        row_label = "Industry controls",
         column_label,
         value = naics2_controls
       ),
@@ -1079,16 +810,8 @@ build_control_rows <- function(row_offset) {
         row_label = "Firm controls",
         column_label,
         value = firm_controls
-      ),
-    DID_SPECIFICATIONS |>
-      transmute(
-        row_order = row_offset + 2L,
-        row_type = "control",
-        row_label = "AIIE",
-        column_label,
-        value = aiie_control
-      )
-  )
+        )
+    )
 }
 
 build_publication_table <- function(att_2, att_3, outcome_name) {
@@ -1171,12 +894,12 @@ write_publication_markdown <- function(publication_tables, path) {
     paste0(
       "Notes: Estimates are group-aggregated Callaway-Sant'Anna ATT estimates. ",
       "Parentheses contain firm-clustered multiplier-bootstrap standard errors. ",
-      "Specification (2) includes two-digit NAICS indicators; specification ",
-      "(3) additionally includes firm size, ROA, and the cash ratio measured ",
-      "at the cohort-specific last pre-treatment year (g-1); specification (4) ",
-      "additionally includes AIIE. NAICS2 is modeled as a separate categorical ",
-      "control. No post-treatment firm characteristics enter the conditional ",
-      "ATT(g,t) estimates. * p < 0.10; ** p < 0.05; *** p < 0.01."
+      "Specification (2) includes two-digit NAICS indicators. Specification (3) ",
+      "additionally includes pre-treatment firm size, cash ratio, R&D reporting ",
+      "status, firm age, and capital-expenditure intensity; ROA is additionally ",
+      "included for outcomes other than operating profitability. ",
+      "Time-varying covariates are measured at the relevant earlier comparison ",
+      "period. * p < 0.10; ** p < 0.05; *** p < 0.01."
     ),
     paste0("Dynamic estimates use the configured preferred model: ", best_spec_label, ".")
   )
@@ -1194,6 +917,14 @@ if (!file.exists(ANALYSIS_PANEL_RDS)) {
 
 panel_ai <- readRDS(ANALYSIS_PANEL_RDS)
 
+if (!DID_3_COHORT_VAR %in% names(panel_ai)) {
+  stop(
+    "The final analysis panel does not contain ",
+    DID_3_COHORT_VAR,
+    ". Strong-adoption cohorts must be constructed upstream from filing observability."
+  )
+}
+
 # ---- Build model grid ---------------------------------------------------------
 model_grid <- crossing(
   outcome = DID_OUTCOMES,
@@ -1202,9 +933,27 @@ model_grid <- crossing(
   left_join(DID_SPECIFICATIONS, by = "spec_order") |>
   arrange(match(outcome, DID_OUTCOMES), spec_order) |>
   mutate(
+    controls = pmap(
+      list(outcome, spec_name, controls),
+      function(outcome, spec_name, controls) {
+        
+        if (
+          outcome == "operating_profit_w" &&
+          spec_name == "main_controls_naics2"
+        ) {
+          c(
+            PROFITABILITY_DID_CONTROLS,
+            "naics2_f"
+          )
+        } else {
+          controls
+        }
+      }
+    ),
     bootstrap_seed = DID_BOOTSTRAP_SEED + row_number() - 1L,
     compute_dynamic = spec_name == BEST_DID_SPEC_NAME
   )
+
 
 order_model_table <- function(data) {
   ordered <- data |>
@@ -1222,13 +971,30 @@ order_model_table <- function(data) {
   select(ordered, -outcome_order, -spec_sort_order)
 }
 
-estimate_did_bundle <- function(data, cohort_var) {
+estimate_did_bundle <- function(
+    data,
+    cohort_var
+) {
+  
   cohort_counts <- data |>
-    distinct(cik, .data[[cohort_var]]) |>
-    count(.data[[cohort_var]], name = "n_firms") |>
-    arrange(.data[[cohort_var]]) |>
-    transmute(cohort_year = .data[[cohort_var]], n_firms)
-
+    distinct(
+      cik,
+      .data[[cohort_var]]
+    ) |>
+    count(
+      .data[[cohort_var]],
+      name = "n_firms"
+    ) |>
+    arrange(
+      .data[[cohort_var]]
+    ) |>
+    transmute(
+      cohort_year =
+        .data[[cohort_var]],
+      n_firms
+    )
+  
+  
   model_results <- pmap(
     select(
       model_grid,
@@ -1240,85 +1006,95 @@ estimate_did_bundle <- function(data, cohort_var) {
       bootstrap_seed,
       compute_dynamic
     ),
+    
     function(
-        outcome,
-        controls,
-        spec_order,
-        spec_name,
-        spec_label,
-        bootstrap_seed,
-        compute_dynamic) {
+    outcome,
+    controls,
+    spec_order,
+    spec_name,
+    spec_label,
+    bootstrap_seed,
+    compute_dynamic
+    ) {
+      
       run_cs_did(
         data = data,
         outcome = outcome,
         controls = controls,
+        
         spec_order = spec_order,
         spec_name = spec_name,
         spec_label = spec_label,
-        bootstrap_seed = bootstrap_seed,
-        cohort_var = cohort_var,
-        compute_dynamic = compute_dynamic
+        
+        bootstrap_seed =
+          bootstrap_seed,
+        
+        cohort_var =
+          cohort_var,
+        
+        compute_dynamic =
+          compute_dynamic
       )
     }
   )
-
+  
+  
   att_table <- model_results |>
     map("overall_tbl") |>
     bind_rows() |>
     order_model_table()
-
+  
+  
   event_study_table <- model_results |>
     map("dynamic_tbl") |>
     bind_rows() |>
     order_model_table()
-
+  
+  
   wald_test_table <- model_results |>
     map("wald_test_tbl") |>
     bind_rows() |>
     order_model_table()
-
+  
+  
   covariate_timing_table <- model_results |>
     map("covariate_timing_tbl") |>
     bind_rows() |>
     order_model_table()
-
-  cohort_baseline_qa_table <- model_results |>
-    map("cohort_baseline_qa_tbl") |>
-    bind_rows() |>
-    arrange(
-      match(outcome, DID_OUTCOMES),
-      spec_order,
-      cohort,
-      target_year
-    )
-
+  
+  
   balance_loss_table <- model_results |>
     map("balance_loss_tbl") |>
     bind_rows() |>
     order_model_table()
-
-  att_comparison_table <- model_results |>
-    map("comparison_tbl") |>
-    bind_rows() |>
-    order_model_table()
-
-  model_warning_table <- model_results |>
-    map("warning_tbl") |>
-    bind_rows()
-
+  
+  
   list(
-    cohort_counts = cohort_counts,
-    att_table = att_table,
-    event_study_table = event_study_table,
-    wald_test_table = wald_test_table,
-    covariate_timing_table = covariate_timing_table,
-    cohort_baseline_qa_table = cohort_baseline_qa_table,
-    balance_loss_table = balance_loss_table,
-    att_comparison_table = att_comparison_table,
-    model_warning_table = model_warning_table
+    cohort_counts =
+      cohort_counts,
+    
+    att_table =
+      att_table,
+    
+    event_study_table =
+      event_study_table,
+    
+    wald_test_table =
+      wald_test_table,
+    
+    covariate_timing_table =
+      covariate_timing_table,
+    
+    balance_loss_table =
+      balance_loss_table,
+    
+    models =
+      map(
+        model_results,
+        "model"
+      )
   )
 }
-
 prepare_did_sample <- function(data) {
   data |>
     mutate(
@@ -1332,7 +1108,9 @@ did_bundle_2 <- panel_ai |>
   prepare_did_sample() |>
   estimate_did_bundle(cohort_var = DID_2_COHORT_VAR)
 
-# Stricter treatment: first ai_score == 3; score-2-only firms are excluded.
+# Strong-adoption treatment: treatment begins when score-3 adoption becomes
+# observable according to ai_adoption_3_year. Never-strong and not-yet-strong
+# firms remain eligible controls, including score-2-only firms.
 did_bundle_3 <- panel_ai |>
   build_did_3_sample() |>
   prepare_did_sample() |>
@@ -1385,33 +1163,9 @@ covariate_timing_table <- bind_rows(
 ) |>
   arrange(treatment_order, match(outcome, DID_OUTCOMES), spec_order)
 
-cohort_baseline_qa_table <- bind_rows(
-  tag_treatment(did_bundle_2$cohort_baseline_qa_table, treatment_2),
-  tag_treatment(did_bundle_3$cohort_baseline_qa_table, treatment_3)
-) |>
-  arrange(
-    treatment_order,
-    match(outcome, DID_OUTCOMES),
-    spec_order,
-    cohort,
-    target_year
-  )
-
 balance_loss_table <- bind_rows(
   tag_treatment(did_bundle_2$balance_loss_table, treatment_2),
   tag_treatment(did_bundle_3$balance_loss_table, treatment_3)
-) |>
-  arrange(treatment_order, match(outcome, DID_OUTCOMES), spec_order)
-
-att_comparison_table <- bind_rows(
-  tag_treatment(did_bundle_2$att_comparison_table, treatment_2),
-  tag_treatment(did_bundle_3$att_comparison_table, treatment_3)
-) |>
-  arrange(treatment_order, match(outcome, DID_OUTCOMES), spec_order)
-
-model_warning_table <- bind_rows(
-  tag_treatment(did_bundle_2$model_warning_table, treatment_2),
-  tag_treatment(did_bundle_3$model_warning_table, treatment_3)
 ) |>
   arrange(treatment_order, match(outcome, DID_OUTCOMES), spec_order)
 
@@ -1433,17 +1187,21 @@ publication_tables <- map_dfr(
 did_results <- list(
   specifications = DID_SPECIFICATIONS,
   preferred_event_study_specification = BEST_DID_SPEC_NAME,
+  
   covariate_timing = list(
     panel = TRUE,
-    allow_unbalanced_panel = PAIR_ALLOW_UNBALANCED_PANEL,
+    allow_unbalanced_panel = ALLOW_UNBALANCED_PANEL,
     base_period = DID_BASE_PERIOD,
+    control_group = CONTROL_GROUP,
     firm_controls = FIRM_DID_CONTROLS,
     interpretation = paste0(
-      "Every post-treatment ATT(g,t) is estimated as a balanced two-period ",
-      "att_gt() comparison. Covariates for treated and comparison firms are ",
-      "copied from cohort-specific year g-1 and held fixed across both rows."
+      "Models are estimated using the standard did::att_gt() balanced-panel ",
+      "implementation. Time-varying covariates are taken from the earlier ",
+      "period of each 2x2 comparison; for post-treatment ATT(g,t), ",
+      "this corresponds to g-1."
     )
   ),
+  
   treatment_definitions = TREATMENT_DEFINITIONS,
   cohort_counts = cohort_counts,
   att_table = att_table,
@@ -1451,10 +1209,12 @@ did_results <- list(
   event_study_table = event_study_table,
   wald_test_table = wald_test_table,
   covariate_timing_table = covariate_timing_table,
-  cohort_baseline_qa_table = cohort_baseline_qa_table,
   balance_loss_table = balance_loss_table,
-  att_comparison_table = att_comparison_table,
-  model_warning_table = model_warning_table
+  
+  models = list(
+    main_treatment = did_bundle_2$models,
+    strong_treatment = did_bundle_3$models
+  )
 )
 
 
@@ -1563,10 +1323,7 @@ if (SAVE_DID_OUTPUTS) {
   write_csv(wald_test_table, DID_WALD_CSV)
   write_csv(cohort_counts, DID_COHORT_COUNTS_CSV)
   write_csv(covariate_timing_table, DID_COVARIATE_TIMING_CSV)
-  write_csv(cohort_baseline_qa_table, DID_COHORT_BASELINE_QA_CSV)
   write_csv(balance_loss_table, DID_BALANCED_SAMPLE_LOSS_CSV)
-  write_csv(att_comparison_table, DID_ATT_COMPARISON_CSV)
-  write_csv(model_warning_table, DID_MODEL_WARNINGS_CSV)
   write_csv(publication_tables, DID_PUBLICATION_CSV)
   write_publication_markdown(publication_tables, DID_PUBLICATION_MD)
   saveRDS(did_results, DID_RESULTS_RDS)
@@ -1599,8 +1356,8 @@ walk(
 if (SAVE_DID_OUTPUTS) {
   cat("\nSaved consolidated DiD outputs to:\n", DID_OUTPUT_DIR, "\n")
   cat("Saved pre-treatment covariate audit to:\n", DID_COVARIATE_TIMING_CSV, "\n")
-  cat("Saved cohort-specific baseline QA to:\n", DID_COHORT_BASELINE_QA_CSV, "\n")
   cat("Saved global-balance sample-loss audit to:\n", DID_BALANCED_SAMPLE_LOSS_CSV, "\n")
-  cat("Saved corrected-versus-previous ATT comparison to:\n", DID_ATT_COMPARISON_CSV, "\n")
   cat("Saved preferred-specification dynamic plots to:\n", DID_DYNAMIC_PLOT_DIR, "\n")
 }
+
+

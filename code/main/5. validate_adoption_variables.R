@@ -1,13 +1,21 @@
 #!/usr/bin/env Rscript
 
 # ------------------------------------------------------------------------------
-# Validate filing-based AI adoption variables
+# Validate filing-based AI adoption variable
 # ------------------------------------------------------------------------------
-# This script uses the matched Compustat + AI panel to:
-# 1. validate 2022 filing-based AI adoption against the 2023 Annual Business
-#    Survey (ABS) at the NAICS2 level;
-# 2. validate mean AI scores against BTOS Question 7 at the NAICS2 level; and
-# 3. describe the filtered final analysis sample used downstream.
+# This script uses the FINAL CAUSAL ANALYSIS PANEL to:
+# 1. validate the filing-based AI adoption treatment share against the
+#    Census Annual Business Survey (ABS) at the NAICS2 level;
+# 2. validate the filing-based AI adoption treatment share against BTOS
+#    Question 7 at the NAICS2 level; and
+# 3. describe the final analysis sample used downstream.
+#
+# Filing-based adoption is measured using the same absorbing binary treatment
+# variable used in the causal analysis:
+#
+#     ai_adopted = 1
+#
+# Once a firm becomes treated, it remains treated in subsequent periods.
 # ------------------------------------------------------------------------------
 
 source("code/config/global_settings.R")
@@ -17,7 +25,7 @@ library(ggplot2)
 
 
 # ---- Settings ----------------------------------------------------------------
-ABS_REFERENCE_YEAR <- c(2020, 2021, 2022) # 2022L
+ABS_REFERENCE_YEAR <- c(2020, 2021, 2022)
 ABS_QDESC <- "B70"
 ABS_QDESC_LABEL <- "TECHADOPT"
 ABS_BUSCHAR <- "T01A04"
@@ -25,7 +33,6 @@ ABS_BUSCHAR <- "T01A04"
 BTOS_VALIDATION_START_YEAR <- 2023L
 BTOS_VALIDATION_END_YEAR <- 2025L
 
-MATCHED_PANEL_RDS <- file.path(INPUT_DIR, "compustat_ai_matched_panel.rds")
 ABS_MCB_DAT <- file.path(INPUT_DIR, "AB2200MCB01.dat")
 
 VALIDATION_OUTPUT_DIR <- file.path(OUTPUT_DIR, "validation_adoption")
@@ -66,50 +73,17 @@ round_numeric_cols <- function(data, digits = 3) {
     mutate(across(where(is.numeric), ~ round(.x, digits)))
 }
 
-build_industry_validation <- function(data, group_cols, external_col) {
-  data |>
-    filter(
-      if_all(
-        all_of(c(group_cols, external_col)),
-        ~ !is.na(.x) & (if (is.character(.x)) .x != "" else TRUE)
-      )
-    ) |>
-    group_by(across(all_of(group_cols))) |>
-    summarise(
-      n = n(),
-      mean_ai_score = safe_mean(ai_score),
-      external_value = safe_mean(.data[[external_col]]),
-      .groups = "drop"
-    ) |>
-    rename(!!external_col := external_value) |>
-    arrange(desc(mean_ai_score))
+safe_first_title <- function(x) {
+  x <- x[!is.na(x) & x != ""]
+  if (length(x) == 0L) NA_character_ else x[1L]
 }
 
-build_validation_overview <- function(
-  data,
-  external_col,
-  sample_label,
-  measure_label,
-  validation_window
-) {
-  tibble::tibble(
-    sample = sample_label,
-    validation_window = validation_window,
-    external_measure = measure_label,
-    corr_mean_ai_score = safe_cor(
-      data$mean_ai_score,
-      data[[external_col]]
-    ),
-    n_industries = nrow(data)
-  ) |>
-    round_numeric_cols()
-}
 
 read_abs_naics2_ai_use <- function(path) {
   if (!file.exists(path)) {
     stop("2023 ABS module file not found: ", path)
   }
-
+  
   # AB2200MCB01.dat is several GB. Read only B70/T01A04 rows instead of
   # loading the complete Census table into memory.
   marker <- paste0("|", ABS_QDESC, "|", ABS_QDESC_LABEL, "|", ABS_BUSCHAR, "|")
@@ -132,14 +106,14 @@ read_abs_naics2_ai_use <- function(path) {
       quoted_path
     )
   }
-
+  
   abs_raw <- data.table::fread(
     cmd = search_command,
     sep = "|",
     colClasses = "character",
     showProgress = FALSE
   )
-
+  
   required_cols <- c(
     "GEOTYPE", "ST", "NAICS2022", "NAICS2022_LABEL",
     "SEX", "ETH_GROUP", "RACE_GROUP", "VET_GROUP",
@@ -154,7 +128,7 @@ read_abs_naics2_ai_use <- function(path) {
       paste(missing_cols, collapse = ", ")
     )
   }
-
+  
   abs_naics2 <- abs_raw |>
     filter(
       GEOTYPE == "01",
@@ -187,33 +161,46 @@ read_abs_naics2_ai_use <- function(path) {
       .groups = "drop"
     ) |>
     arrange(naics2)
-
+  
   duplicate_naics2 <- abs_naics2 |>
     count(naics2) |>
     filter(n > 1L)
   if (nrow(duplicate_naics2) > 0L) {
     stop("The filtered ABS benchmark contains duplicated NAICS2 rows.")
   }
-
+  
   abs_naics2
 }
 
 
-# ---- Load matched panel -------------------------------------------------------
-if (!file.exists(MATCHED_PANEL_RDS)) {
+# ---- Load final causal analysis panel -----------------------------------------
+if (!file.exists(ANALYSIS_PANEL_RDS)) {
   stop(
-    "Matched panel not found: ", MATCHED_PANEL_RDS,
-    ". Build the panel data first."
+    "Final causal analysis panel not found: ",
+    ANALYSIS_PANEL_RDS,
+    ". Run 4. build_or_load_panel_data.R first."
   )
 }
 
-panel_ai <- readRDS(MATCHED_PANEL_RDS) |>
-  mutate(year = as.integer(year)) |>
-  filter(
-    !is.na(year),
-    year >= ANALYSIS_START_YEAR,
-    year <= ANALYSIS_END_YEAR
+panel_ai <- readRDS(
+  ANALYSIS_PANEL_RDS
+) |>
+  mutate(
+    year = as.integer(year),
+    ai_adopted = as.integer(ai_adopted),
+    naics2 = as.character(naics2)
   )
+
+if (!"ai_adopted" %in% names(panel_ai)) {
+  stop("`ai_adopted` is missing from the final causal analysis panel.")
+}
+
+if (anyNA(panel_ai$ai_adopted)) {
+  stop(
+    "The final causal analysis panel contains missing `ai_adopted` values. ",
+    "Rebuild the panel before running validation."
+  )
+}
 
 
 # ---- Validation samples ------------------------------------------------------
@@ -222,15 +209,21 @@ panel_btos_validation <- panel_ai |>
     !is.na(year),
     year >= BTOS_VALIDATION_START_YEAR,
     year <= BTOS_VALIDATION_END_YEAR,
-    !is.na(ai_score)
+    !is.na(ai_adopted),
+    !is.na(naics2),
+    naics2 != "",
+    !is.na(btos_q7_ai_share_validation)
   )
 
 panel_abs_validation <- panel_ai |>
   filter(
     !is.na(year),
     year %in% ABS_REFERENCE_YEAR,
-    !is.na(ai_score)
+    !is.na(ai_adopted),
+    !is.na(naics2),
+    naics2 != ""
   )
+
 
 validation_sample_overview <- tibble::tibble(
   metric = c(
@@ -239,24 +232,31 @@ validation_sample_overview <- tibble::tibble(
     "BTOS firm-years",
     "BTOS unique firms",
     "ABS validation sample",
-    "ABS validation year",
+    "ABS validation window",
     "ABS firm-years",
     "ABS unique firms",
     "ABS NAICS2 sectors represented",
-    "ABS mean AI score"
+    "ABS filing-based adoption share"
   ),
   value = c(
-    "Matched Compustat + AI panel only",
+    "Final causal analysis panel",
     paste0(BTOS_VALIDATION_START_YEAR, "-", BTOS_VALIDATION_END_YEAR),
     format(nrow(panel_btos_validation), big.mark = ","),
     format(dplyr::n_distinct(panel_btos_validation$cik), big.mark = ","),
-    "Matched Compustat + AI panel only",
-    paste0(ABS_REFERENCE_YEAR[1], "-", ABS_REFERENCE_YEAR[length(ABS_REFERENCE_YEAR)]),
-#    ABS_REFERENCE_YEAR,
+    "Final causal analysis panel",
+    paste0(min(ABS_REFERENCE_YEAR), "-", max(ABS_REFERENCE_YEAR)),
     format(nrow(panel_abs_validation), big.mark = ","),
     format(dplyr::n_distinct(panel_abs_validation$cik), big.mark = ","),
-    dplyr::n_distinct(panel_abs_validation$naics2[!is.na(panel_abs_validation$naics2) & panel_abs_validation$naics2 != ""]),
-    round(safe_mean(panel_abs_validation$ai_score), 3)
+    dplyr::n_distinct(
+      panel_abs_validation$naics2[
+        !is.na(panel_abs_validation$naics2) &
+          panel_abs_validation$naics2 != ""
+      ]
+    ),
+    scales::percent(
+      mean(panel_abs_validation$ai_adopted == 1L),
+      accuracy = 0.1
+    )
   )
 )
 
@@ -264,56 +264,84 @@ validation_sample_overview <- tibble::tibble(
 # ---- Census ABS validation at NAICS2 -----------------------------------------
 abs_ai_use_naics2 <- read_abs_naics2_ai_use(ABS_MCB_DAT)
 
+# Match the combined NAICS categories used by the Census table.
 panel_abs_naics2 <- panel_abs_validation |>
-  filter(!is.na(naics2), naics2 != "") |>
-  group_by(naics2, naics2_title) |>
+  mutate(
+    naics2_validation = case_when(
+      naics2 %in% c("31", "32", "33") ~ "31-33",
+      naics2 %in% c("44", "45") ~ "44-45",
+      naics2 %in% c("48", "49") ~ "48-49",
+      TRUE ~ naics2
+    )
+  ) |>
+  group_by(naics2 = naics2_validation) |>
   summarise(
     n = n(),
     n_firms = n_distinct(cik),
-    mean_ai_score = safe_mean(ai_score),
+    filing_adoption_share = mean(ai_adopted == 1L, na.rm = TRUE),
     .groups = "drop"
   )
 
 naics2_abs_validation <- panel_abs_naics2 |>
   inner_join(abs_ai_use_naics2, by = "naics2") |>
   mutate(
-    naics2_title = coalesce(naics2_title, abs_naics2_title)
+    naics2_title = abs_naics2_title
   ) |>
-  arrange(desc(mean_ai_score))
+  arrange(desc(filing_adoption_share))
 
-abs_validation_overview <- build_validation_overview(
-  naics2_abs_validation,
-  external_col = "abs_ai_adoption_share",
-  sample_label = "NAICS2 sectors in the 2020-2022 matched Compustat + AI panel",
-  measure_label = paste0(
+abs_validation_overview <- tibble::tibble(
+  sample = "NAICS2 sectors in the 2020-2022 final causal analysis panel",
+  validation_window = paste0(
+    min(ABS_REFERENCE_YEAR),
+    "-",
+    max(ABS_REFERENCE_YEAR)
+  ),
+  external_measure = paste0(
     "2023 ABS: ", ABS_QDESC, "/", ABS_QDESC_LABEL, ", ", ABS_BUSCHAR,
     " (AI used in processes or methods)"
   ),
-  validation_window = as.character(ABS_REFERENCE_YEAR)
-)
+  corr_ai_adoption_share = safe_cor(
+    naics2_abs_validation$filing_adoption_share,
+    naics2_abs_validation$abs_ai_adoption_share
+  ),
+  n_industries = nrow(naics2_abs_validation)
+) |>
+  round_numeric_cols()
 
 
 # ---- BTOS validation at NAICS2 -----------------------------------------------
-naics2_btos_validation <- build_industry_validation(
-  panel_btos_validation,
-  group_cols = c("naics2", "naics2_title"),
-  external_col = "btos_q7_ai_share_validation"
-)
+naics2_btos_validation <- panel_btos_validation |>
+  group_by(naics2) |>
+  summarise(
+    n = n(),
+    n_firms = n_distinct(cik),
+    naics2_title = safe_first_title(naics2_title),
+    filing_adoption_share = mean(ai_adopted == 1L, na.rm = TRUE),
+    btos_q7_ai_share_validation = safe_mean(
+      btos_q7_ai_share_validation
+    ),
+    .groups = "drop"
+  ) |>
+  arrange(desc(filing_adoption_share))
 
-btos_validation_overview <- build_validation_overview(
-  naics2_btos_validation,
-  external_col = "btos_q7_ai_share_validation",
-  sample_label = "NAICS2 industries in matched Compustat + AI panel",
-  measure_label = "BTOS Q7 mean yes-share (2023-2025)",
+btos_validation_overview <- tibble::tibble(
+  sample = "NAICS2 industries in the final causal analysis panel",
   validation_window = paste0(
     BTOS_VALIDATION_START_YEAR,
     "-",
     BTOS_VALIDATION_END_YEAR
-  )
-)
+  ),
+  external_measure = "BTOS Q7 mean yes-share (2023-2025)",
+  corr_ai_adoption_share = safe_cor(
+    naics2_btos_validation$filing_adoption_share,
+    naics2_btos_validation$btos_q7_ai_share_validation
+  ),
+  n_industries = nrow(naics2_btos_validation)
+) |>
+  round_numeric_cols()
 
 
-# ---- Side-by-side public benchmark figure -----------------------------------
+# ---- Side-by-side public benchmark figure ------------------------------------
 validation_plot_data <- bind_rows(
   naics2_btos_validation |>
     transmute(
@@ -321,7 +349,7 @@ validation_plot_data <- bind_rows(
       naics2,
       naics2_title,
       external_ai_adoption_share = btos_q7_ai_share_validation,
-      mean_ai_score
+      filing_adoption_share
     ),
   naics2_abs_validation |>
     transmute(
@@ -329,7 +357,7 @@ validation_plot_data <- bind_rows(
       naics2,
       naics2_title,
       external_ai_adoption_share = abs_ai_adoption_share,
-      mean_ai_score
+      filing_adoption_share
     )
 ) |>
   mutate(
@@ -339,36 +367,46 @@ validation_plot_data <- bind_rows(
     )
   )
 
+
 validation_plot_labels <- validation_plot_data |>
-  filter(naics2 %in% c("22", "44-45", "51", "54", "56", "61", "62")) |>
+  filter(
+    naics2 %in%
+      c("22", "21", "23", "31-33", "44-45", "51", "52", "54", "56", "61", "62")
+  ) |>
   mutate(
     sector_label = case_when(
       naics2 == "22" ~ "Utilities",
+      naics2 == "21" ~ "Mining",
       naics2 == "44-45" ~ "Retail trade",
       naics2 == "51" ~ "Information",
-      naics2 == "54" ~ "Professional and technical services",
-      naics2 == "56" ~ "Administrative services",
+      naics2 == "54" ~ "Professional & Science",
+      naics2 == "56" ~ "Admin services",
       naics2 == "61" ~ "Education",
-      naics2 == "62" ~ "Health care"
+      naics2 == "62" ~ "Health care",
+      naics2 == "23" ~ "Construction",
+      naics2 == "31-33" ~ "Manufacturing",
+      naics2 == "52" ~ "Finance"
     ),
     label_hjust = case_when(
-      naics2 %in% c("22", "51", "54", "62") ~ 1.05,
+      naics2 %in% c("22", "51", "62") ~ 1.10,
+      naics2 %in% c("54") ~ +1.10,
       TRUE ~ -0.05
     ),
     label_vjust = case_when(
-      naics2 %in% c("22", "56") ~ 1.3,
+      naics2 %in% c("22", "44-45", "54", "56") ~ 1.3,
       TRUE ~ -0.65
     )
   )
 
+
 validation_correlation_labels <- bind_rows(
   tibble::tibble(
     benchmark = "BTOS (2023-2025)",
-    correlation = btos_validation_overview$corr_mean_ai_score
+    correlation = btos_validation_overview$corr_ai_adoption_share
   ),
   tibble::tibble(
     benchmark = "Census ABS (2020-2022)",
-    correlation = abs_validation_overview$corr_mean_ai_score
+    correlation = abs_validation_overview$corr_ai_adoption_share
   )
 ) |>
   mutate(
@@ -382,6 +420,7 @@ validation_correlation_labels <- bind_rows(
     )
   )
 
+
 validation_correlation_table <- bind_rows(
   tibble::tibble(
     benchmark = "BTOS Q7",
@@ -392,22 +431,35 @@ validation_correlation_table <- bind_rows(
     ),
     naics_level = "NAICS2",
     n_sectors = btos_validation_overview$n_industries,
-    corr_mean_ai_score = btos_validation_overview$corr_mean_ai_score
+    corr_ai_adoption_share = btos_validation_overview$corr_ai_adoption_share
   ),
   tibble::tibble(
     benchmark = "Census ABS",
-    reference_period = as.character(ABS_REFERENCE_YEAR),
+    reference_period = paste0(
+      min(ABS_REFERENCE_YEAR),
+      "-",
+      max(ABS_REFERENCE_YEAR)
+    ),
     naics_level = "NAICS2",
     n_sectors = abs_validation_overview$n_industries,
-    corr_mean_ai_score = abs_validation_overview$corr_mean_ai_score
+    corr_ai_adoption_share = abs_validation_overview$corr_ai_adoption_share
   )
 )
 
+
+# Keep the same figure design; only the validated filing measure changes.
 p_validation_side_by_side <- ggplot(
   validation_plot_data,
-  aes(x = external_ai_adoption_share, y = mean_ai_score)
+  aes(
+    x = external_ai_adoption_share,
+    y = filing_adoption_share
+  )
 ) +
-  geom_point(size = VALIDATION_POINT_SIZE, alpha = 0.9, color = "#2C7FB8") +
+  geom_point(
+    size = VALIDATION_POINT_SIZE,
+    alpha = 0.9,
+    color = "#2C7FB8"
+  ) +
   geom_smooth(
     method = "lm",
     formula = y ~ x,
@@ -443,15 +495,17 @@ p_validation_side_by_side <- ggplot(
     expand = expansion(mult = c(0.04, 0.08))
   ) +
   scale_y_continuous(
-    breaks = c(1, 1.5, 2, 2.5, 3),
+    labels = scales::percent_format(accuracy = 1),
+    breaks = scales::pretty_breaks(n = 5),
     expand = expansion(mult = c(0.03, 0.06))
   ) +
   labs(
     x = "External AI adoption share",
-    y = "Mean filing-based AI score (1-3)",
+    y = "Filing-based AI adoption share",
     caption = paste0(
+      "Filing-based adoption uses the absorbing treatment definition (ai_adopted = 1). ",
       "Census ABS: ", ABS_QDESC, "/", ABS_QDESC_LABEL, ", ", ABS_BUSCHAR,
-      "; 2023 collection, reference year (2020-2022)"
+      "; 2023 collection, reference period 2020-2022."
     )
   ) +
   theme_minimal(base_size = VALIDATION_PLOT_BASE_SIZE) +
@@ -466,9 +520,9 @@ p_validation_side_by_side <- ggplot(
   )
 
 
-
-# ---- Final analysis panel ----------------------------------------------------
-panel_analysis <- build_final_analysis_panel(panel_ai)
+# ---- Final analysis panel -----------------------------------------------------
+# The validation input is already the final causal analysis panel.
+panel_analysis <- panel_ai
 
 analysis_sample_overview <- tibble::tibble(
   metric = c(
@@ -476,16 +530,20 @@ analysis_sample_overview <- tibble::tibble(
     "Firm-years",
     "Unique firms",
     "Years covered",
-    "Share of matched panel retained",
+    "Treatment definition",
     "Excluded NAICS2 sectors",
     "Included exchanges"
   ),
   value = c(
-    "Main non-financial, non-utility sectors on major exchanges",
+    "Main causal analysis panel",
     format(nrow(panel_analysis), big.mark = ","),
     format(dplyr::n_distinct(panel_analysis$cik), big.mark = ","),
-    paste0(min(panel_analysis$year, na.rm = TRUE), "-", max(panel_analysis$year, na.rm = TRUE)),
-    sprintf("%.1f%%", 100 * nrow(panel_analysis) / nrow(panel_ai)),
+    paste0(
+      min(panel_analysis$year, na.rm = TRUE),
+      "-",
+      max(panel_analysis$year, na.rm = TRUE)
+    ),
+    "Absorbing treatment: ai_adopted = 1 from first treatment onward",
     paste(FINAL_ANALYSIS_EXCLUDED_NAICS2, collapse = ", "),
     paste(FINAL_ANALYSIS_INCLUDED_EXCHG, collapse = ", ")
   )
@@ -494,18 +552,28 @@ analysis_sample_overview <- tibble::tibble(
 
 # ---- Save figures -------------------------------------------------------------
 if (SAVE_VALIDATION_FIGURES) {
-  dir.create(VALIDATION_FIGURES_DIR, recursive = TRUE, showWarnings = FALSE)
-
+  dir.create(
+    VALIDATION_FIGURES_DIR,
+    recursive = TRUE,
+    showWarnings = FALSE
+  )
+  
   ggsave(
-    file.path(VALIDATION_FIGURES_DIR, "validation_abs_btos_naics2.png"),
+    file.path(
+      VALIDATION_FIGURES_DIR,
+      "validation_abs_btos_naics2.png"
+    ),
     p_validation_side_by_side,
     width = VALIDATION_SIDE_BY_SIDE_WIDTH,
     height = VALIDATION_SIDE_BY_SIDE_HEIGHT,
     dpi = 300
   )
-
+  
   ggsave(
-    file.path(VALIDATION_FIGURES_DIR, "validation.png"),
+    file.path(
+      VALIDATION_FIGURES_DIR,
+      "validation.png"
+    ),
     p_validation_side_by_side,
     width = VALIDATION_SIDE_BY_SIDE_WIDTH,
     height = VALIDATION_SIDE_BY_SIDE_HEIGHT,
@@ -529,21 +597,68 @@ validation_bundle <- list(
 )
 
 if (SAVE_VALIDATION_BUNDLE) {
-  dir.create(VALIDATION_OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
-  saveRDS(validation_bundle, VALIDATION_BUNDLE_RDS)
+  dir.create(
+    VALIDATION_OUTPUT_DIR,
+    recursive = TRUE,
+    showWarnings = FALSE
+  )
+  
+  saveRDS(
+    validation_bundle,
+    VALIDATION_BUNDLE_RDS
+  )
 }
 
 
 # ---- Console output -----------------------------------------------------------
-cat("\nValidated AI adoption measures.\n")
-cat("ABS validation sample rows:", format(nrow(panel_abs_validation), big.mark = ","), "\n")
-cat("BTOS validation sample rows:", format(nrow(panel_btos_validation), big.mark = ","), "\n")
-cat("Final analysis sample rows:", format(nrow(panel_analysis), big.mark = ","), "\n")
-cat("ABS NAICS2 sectors:", nrow(naics2_abs_validation), "\n")
-cat("ABS correlation (mean AI score):", abs_validation_overview$corr_mean_ai_score, "\n")
-cat("BTOS NAICS2 sectors:", nrow(naics2_btos_validation), "\n")
-cat("BTOS correlation (mean AI score):", btos_validation_overview$corr_mean_ai_score, "\n")
+cat("\nValidated absorbing AI adoption treatment measure.\n")
+
+cat(
+  "ABS validation sample rows:",
+  format(nrow(panel_abs_validation), big.mark = ","),
+  "\n"
+)
+
+cat(
+  "BTOS validation sample rows:",
+  format(nrow(panel_btos_validation), big.mark = ","),
+  "\n"
+)
+
+cat(
+  "Final analysis sample rows:",
+  format(nrow(panel_analysis), big.mark = ","),
+  "\n"
+)
+
+cat(
+  "ABS NAICS2 sectors:",
+  nrow(naics2_abs_validation),
+  "\n"
+)
+
+cat(
+  "ABS correlation (AI adoption share):",
+  abs_validation_overview$corr_ai_adoption_share,
+  "\n"
+)
+
+cat(
+  "BTOS NAICS2 sectors:",
+  nrow(naics2_btos_validation),
+  "\n"
+)
+
+cat(
+  "BTOS correlation (AI adoption share):",
+  btos_validation_overview$corr_ai_adoption_share,
+  "\n"
+)
 
 if (SAVE_VALIDATION_BUNDLE) {
-  cat("Saved validation bundle to:", VALIDATION_BUNDLE_RDS, "\n")
+  cat(
+    "Saved validation bundle to:",
+    VALIDATION_BUNDLE_RDS,
+    "\n"
+  )
 }

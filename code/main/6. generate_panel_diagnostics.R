@@ -1,31 +1,54 @@
 #!/usr/bin/env Rscript
 
 # ------------------------------------------------------------------------------
-# Key diagnostics for the final analysis panel
+# 6. Generate panel diagnostics
 # ------------------------------------------------------------------------------
-# This script uses the saved merged and final analysis panel files to:
-# 1. summarise panel coverage, EDGAR match rates, and AI-score retention;
-# 2. describe score and treatment patterns over time;
-# 3. summarise NAICS coverage; and
-# 4. assess whether the treatment path is usable for staggered DiD.
+#
+# Purpose:
+#   Produce a small, clear set of diagnostics for the final research panel.
+#
+# Three samples are kept conceptually separate:
+#
+#   1. panel_scope
+#      Final eligible Compustat sample after year / exchange / industry filters.
+#
+#   2. panel_analysis
+#      Main causal panel used downstream.
+#      Treatment is absorbing and later observations are retained even when the
+#      contemporaneous ai_score is missing.
+#
+#   3. panel_score
+#      Subset of panel_analysis with an observed contemporaneous ai_score.
+#      Used only for score / intensity diagnostics.
+#
+# This script intentionally avoids legacy CIK-year matching diagnostics and
+# never mixes missing-score observations into score-distribution denominators.
 # ------------------------------------------------------------------------------
 
 source("code/config/global_settings.R")
 
 library(dplyr)
 library(ggplot2)
-library(patchwork)
 library(scales)
 
 
-# ---- Settings ----------------------------------------------------------------
-AI_SCORE_TREATED_THRESHOLD <- 2L
+# ---- Paths --------------------------------------------------------------------
 
-MERGED_PANEL_RDS <- file.path(INPUT_DIR, "compustat_ai_panel.rds")
-EDGAR_PANEL_CSV <- file.path(INPUT_DIR, "llm_score", "llm_extraction_firm_year_panel.csv")
+MERGED_PANEL_RDS <- file.path(
+  INPUT_DIR,
+  "compustat_ai_panel.rds"
+)
 
-PANEL_DIAGNOSTICS_OUTPUT_DIR <- file.path(OUTPUT_DIR, "diagnostics")
-PANEL_DIAGNOSTICS_FIGURES_DIR <- file.path(OUTPUT_DIR, "figures")
+PANEL_DIAGNOSTICS_OUTPUT_DIR <- file.path(
+  OUTPUT_DIR,
+  "diagnostics"
+)
+
+PANEL_DIAGNOSTICS_FIGURES_DIR <- file.path(
+  OUTPUT_DIR,
+  "figures"
+)
+
 PANEL_DIAGNOSTICS_BUNDLE_RDS <- file.path(
   PANEL_DIAGNOSTICS_OUTPUT_DIR,
   "panel_diagnostics_bundle.rds"
@@ -34,259 +57,661 @@ PANEL_DIAGNOSTICS_BUNDLE_RDS <- file.path(
 SAVE_PANEL_DIAGNOSTICS <- TRUE
 SAVE_PANEL_DIAGNOSTICS_FIGURES <- TRUE
 
-# ---- Helpers -----------------------------------------------------------------
-safe_mean <- function(x) {
-  if (all(is.na(x))) NA_real_ else mean(x, na.rm = TRUE)
-}
+
+# ---- Helpers ------------------------------------------------------------------
 
 round_numeric_cols <- function(data, digits = 3) {
   data |>
-    mutate(across(where(is.numeric), ~ round(.x, digits)))
-}
-
-normalize_cik <- function(x) {
-  out <- suppressWarnings(as.numeric(x))
-  ifelse(is.na(out), NA_character_, as.character(as.integer(out)))
-}
-
-compress_path <- function(x) {
-  x <- x[!is.na(x)]
-  if (length(x) == 0) return(integer())
-  keep <- c(TRUE, x[-1] != x[-length(x)])
-  x[keep]
-}
-
-format_path <- function(x) {
-  path <- compress_path(x)
-  if (length(path) == 0) return(NA_character_)
-  paste(path, collapse = " -> ")
-}
-
-classify_score_path <- function(x) {
-  path <- compress_path(x)
-  if (length(path) == 0) return("no_score")
-  if (length(path) == 1) return(paste0("constant_", path[1]))
-
-  diffs <- diff(path)
-  if (all(diffs > 0)) return("upward_only")
-  if (all(diffs < 0)) return("downward_only")
-  "mixed_reversal"
-}
-
-classify_binary_path <- function(x) {
-  path <- compress_path(x)
-  if (length(path) == 0) return("no_score")
-  if (identical(path, 0L)) return("never_treated")
-  if (identical(path, 1L)) return("always_treated")
-  if (identical(path, c(0L, 1L))) return("clean_adopter")
-  if (identical(path, c(1L, 0L))) return("treated_then_untreated")
-  "multiple_switches"
-}
-
-transition_count <- function(x) {
-  path <- compress_path(x)
-  max(length(path) - 1L, 0L)
-}
-
-summarise_naics_level <- function(data, code_col, title_cols = character()) {
-  data |>
-    filter(!is.na(.data[[code_col]]), .data[[code_col]] != "") |>
-    group_by(across(all_of(c(code_col, title_cols)))) |>
-    summarise(
-      n_firm_years = n(),
-      n_firms = n_distinct(cik),
-      year_min = min(year, na.rm = TRUE),
-      year_max = max(year, na.rm = TRUE),
-      .groups = "drop"
-    ) |>
-    mutate(share_firm_years = n_firm_years / sum(n_firm_years)) |>
-    arrange(desc(n_firm_years), .data[[code_col]]) |>
-    round_numeric_cols()
+    mutate(
+      across(
+        where(is.numeric),
+        ~ round(.x, digits)
+      )
+    )
 }
 
 
-# ---- Load saved panels -------------------------------------------------------
+# ---- Load data ----------------------------------------------------------------
+
 if (!file.exists(MERGED_PANEL_RDS)) {
-  stop("Merged panel not found: ", MERGED_PANEL_RDS)
+  stop(
+    "Merged panel not found: ",
+    MERGED_PANEL_RDS,
+    ". Run the panel-building scripts first."
+  )
 }
+
 if (!file.exists(ANALYSIS_PANEL_RDS)) {
   stop(
-    "Final analysis panel not found: ", ANALYSIS_PANEL_RDS,
+    "Final analysis panel not found: ",
+    ANALYSIS_PANEL_RDS,
     ". Run 4. build_or_load_panel_data.R first."
   )
 }
 
-panel_all <- readRDS(MERGED_PANEL_RDS)
-panel_analysis <- readRDS(ANALYSIS_PANEL_RDS)
+panel_all <- readRDS(
+  MERGED_PANEL_RDS
+)
+
+panel_analysis <- readRDS(
+  ANALYSIS_PANEL_RDS
+)
 
 
-# ---- Prepare analysis panels --------------------------------------------------
-panel_window <- panel_all |>
-  mutate(
-    cik = as.character(cik),
-    year = as.integer(year),
-    ai_score = as.integer(ai_score),
-    ai_adopted = as.integer(ai_adopted)
-  ) |>
-  filter(
-    !is.na(cik), cik != "", !is.na(year),
-    year >= ANALYSIS_START_YEAR,
-    year <= ANALYSIS_END_YEAR
-  ) |>
-  arrange(cik, year)
+# ---- Standardise required variables -------------------------------------------
 
-panel_diag <- panel_analysis |>
-  mutate(
-    cik = as.character(cik),
-    year = as.integer(year),
-    ai_score = as.integer(ai_score),
-    ai_score_treated = as.integer(ai_score >= AI_SCORE_TREATED_THRESHOLD),
-    ai_adopted = as.integer(ai_adopted),
-    ai_adoption_year = as.integer(ai_adoption_year)
-  ) |>
-  filter(
-    !is.na(cik), cik != "", !is.na(year), !is.na(ai_adopted),
-    year >= ANALYSIS_START_YEAR,
-    year <= ANALYSIS_END_YEAR
-  ) |>
-  arrange(cik, year)
+required_scope_cols <- c(
+  "cik",
+  "year",
+  "datadate",
+  "ai_score",
+  "has_ai_history",
+  "ai_adopted",
+  "ai_adoption_year"
+)
 
-panel_filtered_compustat <- build_final_analysis_panel(panel_window) |>
-  mutate(
-    cik = as.character(cik),
-    year = as.integer(year),
-    ai_score = as.integer(ai_score)
-  ) |>
-  filter(
-    !is.na(cik), cik != "", !is.na(year),
-    year >= ANALYSIS_START_YEAR,
-    year <= ANALYSIS_END_YEAR
-  ) |>
-  arrange(cik, year)
+missing_scope_cols <- setdiff(
+  required_scope_cols,
+  names(panel_all)
+)
 
-if (!file.exists(EDGAR_PANEL_CSV)) {
-  stop("EDGAR panel not found: ", EDGAR_PANEL_CSV)
+if (length(missing_scope_cols) > 0L) {
+  stop(
+    "Merged panel is missing required columns: ",
+    paste(missing_scope_cols, collapse = ", ")
+  )
 }
 
-edgar_year_min <- min(panel_filtered_compustat$year, na.rm = TRUE)
-edgar_year_max <- max(panel_filtered_compustat$year, na.rm = TRUE)
+required_analysis_cols <- c(
+  "cik",
+  "year",
+  "datadate",
+  "ai_score",
+  "has_ai_history",
+  
+  # Main treatment
+  "first_ai_filing_date",
+  "ai_adopted",
+  "ai_adoption_year",
+  
+  # Strong treatment
+  "first_ai3_filing_date",
+  "ai_adopted3",
+  "ai_adoption_3_year"
+)
 
-edgar_filtered <- fread(EDGAR_PANEL_CSV, select = c("cik", "year")) |>
-  tibble::as_tibble() |>
+missing_analysis_cols <- setdiff(
+  required_analysis_cols,
+  names(panel_analysis)
+)
+
+if (length(missing_analysis_cols) > 0L) {
+  stop(
+    "Final analysis panel is missing required columns: ",
+    paste(missing_analysis_cols, collapse = ", ")
+  )
+}
+
+
+panel_all <- panel_all |>
   mutate(
-    cik = normalize_cik(cik),
-    year = as.integer(year)
+    cik = as.character(cik),
+    year = as.integer(year),
+    datadate = as.Date(datadate),
+    
+    ai_score = as.integer(ai_score),
+    
+    # Main treatment
+    first_ai_filing_date = as.Date(first_ai_filing_date),
+    ai_adopted = as.integer(ai_adopted),
+    ai_adoption_year = as.integer(ai_adoption_year),
+    
+    # Strong treatment
+    first_ai3_filing_date = as.Date(first_ai3_filing_date),
+    ai_adopted3 = as.integer(ai_adopted3),
+    ai_adoption_3_year = as.integer(ai_adoption_3_year),
+    
+    has_ai_history = as.logical(has_ai_history)
+  )
+
+
+panel_analysis <- panel_analysis |>
+  mutate(
+    cik = as.character(cik),
+    year = as.integer(year),
+    datadate = as.Date(datadate),
+    
+    ai_score = as.integer(ai_score),
+    
+    # Main treatment
+    first_ai_filing_date = as.Date(first_ai_filing_date),
+    ai_adopted = as.integer(ai_adopted),
+    ai_adoption_year = as.integer(ai_adoption_year),
+    
+    # Strong treatment
+    first_ai3_filing_date = as.Date(first_ai3_filing_date),
+    ai_adopted3 = as.integer(ai_adopted3),
+    ai_adoption_3_year = as.integer(ai_adoption_3_year),
+    
+    has_ai_history = as.logical(has_ai_history)
+  ) |>
+  arrange(
+    cik,
+    datadate
+  )
+
+# ---- Final eligible Compustat scope -------------------------------------------
+
+panel_scope <- build_final_analysis_panel(
+  panel_all
+) |>
+  arrange(
+    cik,
+    datadate
+  )
+
+
+# ---- Observed-score subset -----------------------------------------------------
+
+panel_score <- panel_analysis |>
+  filter(
+    !is.na(ai_score)
+  )
+
+
+# ---- Core QA ------------------------------------------------------------------
+
+# Unique annual observation per firm / fiscal period.
+duplicate_scope <- panel_scope |>
+  count(
+    cik,
+    datadate,
+    name = "n"
   ) |>
   filter(
-    !is.na(cik),
-    cik != "",
-    !is.na(year),
-    year >= edgar_year_min,
-    year <= edgar_year_max
-  ) |>
-  semi_join(
-    panel_filtered_compustat |>
-      distinct(cik),
-    by = "cik"
-  ) |>
-  arrange(cik, year)
-
-filtered_compustat_match_rate <- mean(!is.na(panel_filtered_compustat$ai_score))
-
-
-# ---- Merge process overview ---------------------------------------------------
-merge_process_overview <- tibble::tibble(
-  sample = c("Compustat", "EDGAR", "Matched", "Match rate"),
-  n_observations = c(
-    scales::comma(nrow(panel_filtered_compustat)),
-    scales::comma(nrow(edgar_filtered)),
-    scales::comma(nrow(panel_diag)),
-    ""
-  ),
-  unique_firms = c(
-    scales::comma(dplyr::n_distinct(panel_filtered_compustat$cik)),
-    scales::comma(dplyr::n_distinct(edgar_filtered$cik)),
-    scales::comma(dplyr::n_distinct(panel_diag$cik)),
-    ""
-  ),
-  match_rate = c(
-    NA_character_,
-    NA_character_,
-    NA_character_,
-    scales::percent(filtered_compustat_match_rate, accuracy = 0.1)
+    n > 1L
   )
-)
 
-
-# ---- Basic panel diagnostics --------------------------------------------------
-panel_overview <- tibble::tibble(
-  metric = c(
-    "Merged firm-years",
-    "Merged firms",
-    "Compustat firm-years",
-    "Compustat firms",
-    "Matched firm-years",
-    "Matched firms",
-    "Years covered",
-    "Dropped firm-years",
-    "Share kept",
-    "Final sample restrictions",
-    "Match rate",
-    "Treatment rule",
-    "Treated share",
-    "Average AI score"
-  ),
-  value = c(
-    scales::comma(nrow(panel_window)),
-    scales::comma(dplyr::n_distinct(panel_window$cik)),
-    scales::comma(nrow(panel_filtered_compustat)),
-    scales::comma(dplyr::n_distinct(panel_filtered_compustat$cik)),
-    scales::comma(nrow(panel_diag)),
-    scales::comma(dplyr::n_distinct(panel_diag$cik)),
-    paste0(min(panel_diag$year, na.rm = TRUE), "-", max(panel_diag$year, na.rm = TRUE)),
-    scales::comma(nrow(panel_window) - nrow(panel_diag)),
-    scales::percent(nrow(panel_diag) / nrow(panel_window), accuracy = 0.1),
-    paste0(
-      "Exclude NAICS2 ", paste(FINAL_ANALYSIS_EXCLUDED_NAICS2, collapse = ", "),
-      "; keep exchg ", paste(FINAL_ANALYSIS_INCLUDED_EXCHG, collapse = ", ")
-    ),
-    scales::percent(filtered_compustat_match_rate, accuracy = 0.1),
-    paste0("ai_score >= ", AI_SCORE_TREATED_THRESHOLD),
-    scales::percent(mean(panel_diag$ai_adopted == 1L, na.rm = TRUE), accuracy = 0.1),
-    round(mean(panel_diag$ai_score, na.rm = TRUE), 3)
-  )
-)
-
-score_distribution_overall <- panel_diag |>
-  count(ai_score, name = "n_firm_years") |>
-  mutate(
-    share_firm_years = n_firm_years / sum(n_firm_years),
-    ai_score_label = dplyr::case_when(
-      ai_score == 1L ~ "No disclosed current implementation",
-      ai_score == 2L ~ "Emerging / bounded implementation",
-      ai_score == 3L ~ "Established / integrated implementation",
-      TRUE ~ "Other"
-    )
+duplicate_analysis <- panel_analysis |>
+  count(
+    cik,
+    datadate,
+    name = "n"
   ) |>
-  select(ai_score, ai_score_label, everything()) |>
-  round_numeric_cols()
+  filter(
+    n > 1L
+  )
 
-treated_share_by_year <- panel_diag |>
-  group_by(year) |>
+if (nrow(duplicate_scope) > 0L) {
+  stop(
+    "Eligible panel contains duplicate CIK-datadate observations."
+  )
+}
+
+if (nrow(duplicate_analysis) > 0L) {
+  stop(
+    "Final causal panel contains duplicate CIK-datadate observations."
+  )
+}
+
+
+# Causal panel should only contain firms with known AI history and treatment.
+if (anyNA(panel_analysis$has_ai_history) || 
+    any(panel_analysis$has_ai_history != TRUE)) {
+  stop(
+    "Final causal panel contains missing or FALSE has_ai_history values."
+  )
+}
+
+if (anyNA(panel_analysis$ai_adopted)) {
+  stop(
+    "Final causal panel contains missing ai_adopted values."
+  )
+}
+
+
+# Observed AI scores must be 1, 2 or 3.
+if (nrow(panel_score) > 0L && any(!panel_score$ai_score %in% 1:3)) {
+  stop(
+    "Observed AI scores outside the allowed values 1, 2, 3."
+  )
+}
+
+
+if (any(!panel_analysis$ai_adopted %in% c(0L, 1L))) {
+  stop(
+    "ai_adopted contains values other than 0 and 1."
+  )
+}
+
+if (any(!panel_analysis$ai_adopted3 %in% c(0L, 1L))) {
+  stop(
+    "ai_adopted3 contains values other than 0 and 1."
+  )
+}
+
+# Main treatment must be absorbing: no 1 -> 0 reversals.
+treatment_reversals <- panel_analysis |>
+  arrange(
+    cik,
+    datadate
+  ) |>
+  group_by(
+    cik
+  ) |>
   summarise(
-    n_firm_years = n(),
-    share_treated = mean(ai_adopted == 1L, na.rm = TRUE),
-    mean_ai_score = mean(ai_score, na.rm = TRUE),
-    share_score_1 = mean(ai_score == 1L, na.rm = TRUE),
-    share_score_2 = mean(ai_score == 2L, na.rm = TRUE),
-    share_score_3 = mean(ai_score == 3L, na.rm = TRUE),
+    reversal = any(
+      diff(ai_adopted) < 0L,
+      na.rm = TRUE
+    ),
     .groups = "drop"
   ) |>
+  filter(
+    reversal
+  )
+
+if (nrow(treatment_reversals) > 0L) {
+  stop(
+    "Found ",
+    nrow(treatment_reversals),
+    " firms with treatment reversals (1 -> 0)."
+  )
+}
+
+if (anyNA(panel_analysis$ai_adopted3)) {
+  stop(
+    "Final causal panel contains missing ai_adopted3 values."
+  )
+}
+
+
+strong_treatment_reversals <- panel_analysis |>
+  arrange(
+    cik,
+    datadate
+  ) |>
+  group_by(
+    cik
+  ) |>
+  summarise(
+    reversal = any(
+      diff(ai_adopted3) < 0L,
+      na.rm = TRUE
+    ),
+    .groups = "drop"
+  ) |>
+  filter(
+    reversal
+  )
+
+if (nrow(strong_treatment_reversals) > 0L) {
+  stop(
+    "Found ",
+    nrow(strong_treatment_reversals),
+    " firms with strong-treatment reversals (1 -> 0)."
+  )
+}
+
+
+strong_without_main <- panel_analysis |>
+  filter(
+    ai_adopted3 == 1L,
+    ai_adopted != 1L
+  )
+
+if (nrow(strong_without_main) > 0L) {
+  stop(
+    "Found ",
+    nrow(strong_without_main),
+    " observations where strong treatment = 1 but main treatment != 1."
+  )
+}
+
+
+invalid_strong_timing <- panel_analysis |>
+  filter(
+    !is.na(first_ai_filing_date),
+    !is.na(first_ai3_filing_date),
+    first_ai3_filing_date < first_ai_filing_date
+  ) |>
+  distinct(
+    cik,
+    first_ai_filing_date,
+    first_ai3_filing_date
+  )
+
+if (nrow(invalid_strong_timing) > 0L) {
+  stop(
+    "Found firms whose first score-3 filing predates their first score>=2 filing."
+  )
+}
+
+# Adoption year must equal the first year in which treatment is observed.
+
+adoption_year_qa <- panel_analysis |>
+  group_by(cik) |>
+  summarise(
+    stored_adoption_year = first(ai_adoption_year),
+    
+    implied_adoption_year = if (
+      any(ai_adopted == 1L)
+    ) {
+      min(year[ai_adopted == 1L])
+    } else {
+      0L
+    },
+    
+    .groups = "drop"
+  ) |>
+  filter(
+    stored_adoption_year != implied_adoption_year
+  )
+
+if (nrow(adoption_year_qa) > 0L) {
+  stop(
+    "Found ",
+    nrow(adoption_year_qa),
+    " firms where ai_adoption_year does not match the first treated year."
+  )
+}
+
+
+# Strong-adoption year must equal the first year in which strong treatment
+# is observed.
+
+strong_adoption_year_qa <- panel_analysis |>
+  group_by(cik) |>
+  summarise(
+    stored_strong_adoption_year = first(ai_adoption_3_year),
+    
+    implied_strong_adoption_year = if (
+      any(ai_adopted3 == 1L)
+    ) {
+      min(year[ai_adopted3 == 1L])
+    } else {
+      0L
+    },
+    
+    .groups = "drop"
+  ) |>
+  filter(
+    stored_strong_adoption_year != implied_strong_adoption_year
+  )
+
+if (nrow(strong_adoption_year_qa) > 0L) {
+  stop(
+    "Found ",
+    nrow(strong_adoption_year_qa),
+    " firms where ai_adoption_3_year does not match the first strong-treated year."
+  )
+}
+
+# ---- Panel overview ------------------------------------------------------------
+
+n_scope_periods <- nrow(
+  panel_scope
+)
+
+n_scope_firms <- n_distinct(
+  panel_scope$cik
+)
+
+n_history_firms <- panel_scope |>
+  distinct(
+    cik,
+    has_ai_history
+  ) |>
+  summarise(
+    n = sum(
+      has_ai_history == TRUE,
+      na.rm = TRUE
+    )
+  ) |>
+  pull(
+    n
+  )
+
+n_causal_periods <- nrow(
+  panel_analysis
+)
+
+n_causal_firms <- n_distinct(
+  panel_analysis$cik
+)
+
+n_scored_periods <- nrow(
+  panel_score
+)
+
+n_score_missing_causal <- sum(
+  is.na(panel_analysis$ai_score)
+)
+
+panel_overview <- tibble::tibble(
+  metric = c(
+    "Eligible Compustat fiscal periods",
+    "Eligible Compustat firms",
+    "Firms with observed AI history",
+    "Causal analysis fiscal periods",
+    "Causal analysis firms",
+    "Periods with contemporaneous AI score",
+    "Causal periods without contemporaneous AI score",
+    "AI-score coverage in eligible sample",
+    "Causal-panel retention rate",
+    "Years covered",
+    "Treatment definition",
+    "Overall treated share"
+  ),
+  value = c(
+    scales::comma(n_scope_periods),
+    scales::comma(n_scope_firms),
+    scales::comma(n_history_firms),
+    scales::comma(n_causal_periods),
+    scales::comma(n_causal_firms),
+    scales::comma(n_scored_periods),
+    scales::comma(n_score_missing_causal),
+    scales::percent(
+      mean(!is.na(panel_scope$ai_score)),
+      accuracy = 0.1
+    ),
+    scales::percent(
+      n_causal_periods / n_scope_periods,
+      accuracy = 0.1
+    ),
+    paste0(
+      min(panel_analysis$year, na.rm = TRUE),
+      "-",
+      max(panel_analysis$year, na.rm = TRUE)
+    ),
+    "First qualifying filing with ai_score >= 2; absorbing thereafter",
+    scales::percent(
+      mean(panel_analysis$ai_adopted == 1L),
+      accuracy = 0.1
+    )
+  )
+)
+
+
+# ---- Coverage and treatment by year -------------------------------------------
+
+scope_by_year <- panel_scope |>
+  group_by(
+    year
+  ) |>
+  summarise(
+    eligible_periods = n(),
+    periods_with_score = sum(
+      !is.na(ai_score)
+    ),
+    periods_without_score = sum(
+      is.na(ai_score)
+    ),
+    score_coverage = mean(
+      !is.na(ai_score)
+    ),
+    .groups = "drop"
+  )
+
+
+causal_by_year <- panel_analysis |>
+  group_by(
+    year
+  ) |>
+  summarise(
+    causal_observations = n(),
+    causal_firms = n_distinct(cik),
+    treated_observations = sum(
+      ai_adopted == 1L
+    ),
+    untreated_observations = sum(
+      ai_adopted == 0L
+    ),
+    treated_share = mean(
+      ai_adopted == 1L
+    ),
+    causal_rows_with_score = sum(
+      !is.na(ai_score)
+    ),
+    causal_rows_without_score = sum(
+      is.na(ai_score)
+    ),
+    .groups = "drop"
+  )
+
+
+score_by_year <- panel_score |>
+  group_by(
+    year
+  ) |>
+  summarise(
+    scored_observations = n(),
+    mean_ai_score = mean(
+      ai_score
+    ),
+    share_score_1 = mean(
+      ai_score == 1L
+    ),
+    share_score_2 = mean(
+      ai_score == 2L
+    ),
+    share_score_3 = mean(
+      ai_score == 3L
+    ),
+    .groups = "drop"
+  )
+
+
+panel_by_year <- scope_by_year |>
+  full_join(
+    causal_by_year,
+    by = "year"
+  ) |>
+  left_join(
+    score_by_year,
+    by = "year"
+  ) |>
+  arrange(
+    year
+  ) |>
   round_numeric_cols()
 
-score_distribution_by_year <- panel_diag |>
-  count(year, ai_score, name = "n_firm_years") |>
-  group_by(year) |>
+
+# ---- Treatment summary --------------------------------------------------------
+
+firm_treatment_summary <- panel_analysis |>
+  group_by(
+    cik
+  ) |>
+  summarise(
+    first_year = min(
+      year,
+      na.rm = TRUE
+    ),
+    last_year = max(
+      year,
+      na.rm = TRUE
+    ),
+    ai_adoption_year = first(
+      ai_adoption_year
+    ),
+    ever_treated = any(
+      ai_adopted == 1L
+    ),
+    first_treated_year = if (
+      any(ai_adopted == 1L)
+    ) {
+      min(
+        year[ai_adopted == 1L]
+      )
+    } else {
+      NA_integer_
+    },
+    .groups = "drop"
+  )
+
+
+treatment_status_summary <- firm_treatment_summary |>
+  mutate(
+    treatment_status = if_else(
+      ever_treated,
+      "Ever treated",
+      "Never treated"
+    )
+  ) |>
+  count(
+    treatment_status,
+    name = "n_firms"
+  ) |>
+  mutate(
+    share_firms = n_firms / sum(n_firms)
+  ) |>
+  round_numeric_cols()
+
+
+treatment_cohorts <- firm_treatment_summary |>
+  filter(
+    ever_treated,
+    !is.na(first_treated_year)
+  ) |>
+  count(
+    first_treated_year,
+    name = "n_firms"
+  ) |>
+  arrange(
+    first_treated_year
+  )
+
+
+# ---- Score distributions ------------------------------------------------------
+
+score_distribution_overall <- panel_score |> 
+  count(
+    ai_score,
+    name = "n_firm_years"
+  ) |>
+  mutate(
+    share_firm_years = n_firm_years / sum(n_firm_years),
+    score_label = case_when(
+      ai_score == 1L ~ "1: No disclosed current implementation",
+      ai_score == 2L ~ "2: Emerging / bounded implementation",
+      ai_score == 3L ~ "3: Established / integrated implementation"
+    )
+  ) |>
+  arrange(
+    ai_score
+  ) |>
+  round_numeric_cols()
+
+
+score_distribution_by_year <- panel_score |>
+  count(
+    year,
+    ai_score,
+    name = "n_firm_years"
+  ) |>
+  group_by(
+    year
+  ) |>
   mutate(
     share_firm_years = n_firm_years / sum(n_firm_years),
     score_label = factor(
@@ -294,227 +719,134 @@ score_distribution_by_year <- panel_diag |>
       levels = c(1, 2, 3),
       labels = c(
         "1: No disclosed current implementation",
-        "2: Emerging/bounded implementation",
-        "3: Established/integrated implementation"
+        "2: Emerging / bounded implementation",
+        "3: Established / integrated implementation"
       )
-    ),
-    label_colour = if_else(ai_score == 1L, "dark", "light")
+    )
   ) |>
   ungroup()
 
 
-# ---- Industry coverage --------------------------------------------------------
-naics_overview <- tibble::tibble(
-  metric = c(
-    "Unique NAICS2 sectors",
-    "Unique NAICS3 subsectors",
-    "Unique NAICS4 groups",
-    "Firm-years with missing NAICS2 title",
-    "Firm-years with missing NAICS3 title",
-    "Firm-years with missing NAICS4 code"
-  ),
-  value = c(
-    scales::comma(dplyr::n_distinct(panel_diag$naics2[!is.na(panel_diag$naics2) & panel_diag$naics2 != ""])),
-    scales::comma(dplyr::n_distinct(panel_diag$naics3[!is.na(panel_diag$naics3) & panel_diag$naics3 != ""])),
-    scales::comma(dplyr::n_distinct(panel_diag$naics4[!is.na(panel_diag$naics4) & panel_diag$naics4 != ""])),
-    scales::comma(sum(!is.na(panel_diag$naics2) & panel_diag$naics2 != "" & is.na(panel_diag$naics2_title))),
-    scales::comma(sum(!is.na(panel_diag$naics3) & panel_diag$naics3 != "" & is.na(panel_diag$naics3_title))),
-    scales::comma(sum(is.na(panel_diag$naics4) | panel_diag$naics4 == ""))
-  )
-)
+# ---- NAICS2 summary ------------------------------------------------------------
 
-naics2_summary <- summarise_naics_level(
-  panel_diag,
-  code_col = "naics2",
-  title_cols = "naics2_title"
-)
-
-naics3_summary <- summarise_naics_level(
-  panel_diag,
-  code_col = "naics3",
-  title_cols = "naics3_title"
-)
-
-naics4_summary <- summarise_naics_level(
-  panel_diag,
-  code_col = "naics4"
-)
-
-
-# ---- Firm treatment paths -----------------------------------------------------
-firm_paths <- panel_diag |>
-  group_by(cik) |>
+naics2_summary <- panel_analysis |>
+  filter(
+    !is.na(naics2),
+    naics2 != ""
+  ) |>
+  group_by(
+    naics2
+  ) |>
   summarise(
-    first_year = min(year, na.rm = TRUE),
-    last_year = max(year, na.rm = TRUE),
-    n_years = n(),
-    score_path = format_path(ai_score),
-    score_path_type = classify_score_path(ai_score),
-    n_score_transitions = transition_count(ai_score),
-    binary_path = format_path(ai_adopted),
-    binary_path_type = classify_binary_path(ai_adopted),
-    n_binary_transitions = transition_count(ai_adopted),
-    .groups = "drop"
-  ) |>
-  arrange(cik)
-
-ever_treated_summary <- panel_diag |>
-  group_by(cik) |>
-  summarise(
-    ever_treated = any(ai_adopted == 1L, na.rm = TRUE),
-    .groups = "drop"
-  ) |>
-  mutate(
-    treatment_status = if_else(ever_treated, "Ever treated", "Never treated")
-  ) |>
-  count(treatment_status, name = "n_firms") |>
-  mutate(share_firms = n_firms / sum(n_firms)) |>
-  arrange(match(treatment_status, c("Ever treated", "Never treated"))) |>
-  round_numeric_cols()
-
-score_path_counts <- firm_paths |>
-  count(score_path, score_path_type, sort = TRUE, name = "n_firms") |>
-  mutate(share_firms = n_firms / sum(n_firms)) |>
-  round_numeric_cols()
-
-top_score_paths <- score_path_counts |>
-  slice_head(n = 20)
-
-score_consistency_summary <- firm_paths |>
-  count(score_path_type, sort = TRUE, name = "n_firms") |>
-  mutate(share_firms = n_firms / sum(n_firms)) |>
-  round_numeric_cols()
-
-binary_path_summary <- firm_paths |>
-  count(binary_path_type, sort = TRUE, name = "n_firms") |>
-  mutate(share_firms = n_firms / sum(n_firms)) |>
-  round_numeric_cols()
-
-did_readiness_summary <- tibble::tibble(
-  metric = c(
-    "Never treated firms",
-    "Clean adopters (0 -> 1 only)",
-    "Always treated firms",
-    "Treated then untreated",
-    "Multiple binary switches",
-    "Potentially usable for staggered DiD",
-    "Share potentially usable for staggered DiD"
-  ),
-  value = c(
-    scales::comma(sum(firm_paths$binary_path_type == "never_treated", na.rm = TRUE)),
-    scales::comma(sum(firm_paths$binary_path_type == "clean_adopter", na.rm = TRUE)),
-    scales::comma(sum(firm_paths$binary_path_type == "always_treated", na.rm = TRUE)),
-    scales::comma(sum(firm_paths$binary_path_type == "treated_then_untreated", na.rm = TRUE)),
-    scales::comma(sum(firm_paths$binary_path_type == "multiple_switches", na.rm = TRUE)),
-    scales::comma(sum(firm_paths$binary_path_type %in% c("never_treated", "clean_adopter"), na.rm = TRUE)),
-    scales::percent(
-      mean(firm_paths$binary_path_type %in% c("never_treated", "clean_adopter"), na.rm = TRUE),
-      accuracy = 0.1
-    )
-  )
-)
-
-
-# ---- Plots -------------------------------------------------------------------
-p_treated_share_by_year <- ggplot(treated_share_by_year, aes(x = year, y = share_treated)) +
-  geom_line(color = "#2C7FB8", linewidth = 1) +
-  geom_point(color = "#2C7FB8", size = 2) +
-  scale_y_continuous(
-    labels = scales::percent_format(accuracy = 1),
-    limits = c(0, 1),
-    breaks = seq(0, 1, by = 0.2),
-    expand = c(0, 0)
-  ) +
-  scale_x_continuous(
-    breaks = seq(
-      min(treated_share_by_year$year),
-      max(treated_share_by_year$year),
-      by = 1
+    n_firm_years = n(),
+    n_firms = n_distinct(cik),
+    treated_share = mean(
+      ai_adopted == 1L
     ),
-    labels = function(x) sprintf("%.0f", x),
-    expand = expansion(mult = c(0.015, 0.015))
-  ) +
-  labs(
-    title = NULL,
-    x = "Year",
-    y = "Share treated"
-  ) +
-  theme_minimal(base_size = 12)
+    score_coverage = mean(
+      !is.na(ai_score)
+    ),
+    .groups = "drop"
+  ) |>
+  arrange(
+    desc(n_firm_years)
+  ) |>
+  round_numeric_cols()
 
-p_mean_ai_score_by_year <- ggplot(treated_share_by_year, aes(x = year, y = mean_ai_score)) +
-  geom_line(color = "#E15759", linewidth = 1) +
-  geom_point(color = "#E15759", size = 2) +
-  scale_y_continuous(breaks = c(1, 2, 3)) +
+
+# ---- Plots --------------------------------------------------------------------
+
+p_treated_share_by_year <- ggplot(
+  causal_by_year,
+  aes(
+    x = year,
+    y = treated_share
+  )
+) +
+  geom_line(
+    linewidth = 1
+  ) +
+  geom_point(
+    size = 2
+  ) +
   scale_x_continuous(
     breaks = seq(
-      min(treated_share_by_year$year),
-      max(treated_share_by_year$year),
+      min(causal_by_year$year),
+      max(causal_by_year$year),
       by = 1
     ),
     labels = function(x) sprintf("%.0f", x)
   ) +
-  coord_cartesian(ylim = c(1, 3)) +
+  scale_y_continuous(
+    labels = scales::percent_format(
+      accuracy = 1
+    ),
+    limits = c(0, 1),
+    expand = c(0, 0)
+  ) +
   labs(
-    title = NULL,
+    x = "Year",
+    y = "Share treated"
+  ) +
+  theme_minimal(
+    base_size = 12
+  )
+
+
+p_mean_ai_score_by_year <- ggplot(
+  score_by_year,
+  aes(
+    x = year,
+    y = mean_ai_score
+  )
+) +
+  geom_line(
+    linewidth = 1
+  ) +
+  geom_point(
+    size = 2
+  ) +
+  scale_x_continuous(
+    breaks = seq(
+      min(score_by_year$year),
+      max(score_by_year$year),
+      by = 1
+    ),
+    labels = function(x) sprintf("%.0f", x)
+  ) +
+  scale_y_continuous(
+    breaks = c(1, 1.5, 2, 2.5, 3)
+  ) +
+  coord_cartesian(
+    ylim = c(1, 3)
+  ) +
+  labs(
     x = "Year",
     y = "Mean AI score"
   ) +
-  theme_minimal(base_size = 12)
-
-p_panel_trends_side_by_side <- (
-  p_treated_share_by_year +
-    labs(title = "Treated share")
-) + (
-  p_mean_ai_score_by_year +
-    labs(title = "AI score")
-) +
-  plot_layout(ncol = 2) &
-  theme(
-    plot.title = element_text(size = 15, face = "plain"),
-    axis.title = element_text(size = 15),
-    axis.text = element_text(size = 13)
+  theme_minimal(
+    base_size = 12
   )
 
-p_score_mix_by_year <- ggplot(
-  score_distribution_by_year,
-  aes(x = year, y = share_firm_years, fill = factor(ai_score))
-) +
-  geom_col(width = 0.75) +
-  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
-  scale_fill_brewer(palette = "RdYlBu", direction = -1, name = "AI score") +
-  labs(
-    x = "Year",
-    y = "Share of firm-years"
-  ) +
-  theme_minimal(base_size = 12)
 
-p_ai_intensity <- ggplot(
+p_ai_score_mix_by_year <- ggplot(
   score_distribution_by_year,
-  aes(x = year, y = share_firm_years, fill = score_label)
+  aes(
+    x = year,
+    y = share_firm_years,
+    fill = score_label
+  )
 ) +
-  geom_col(width = 0.78, colour = "white", linewidth = 0.25) +
-  geom_text(
-    aes(
-      label = if_else(
-        share_firm_years >= 0.04,
-        scales::percent(share_firm_years, accuracy = 1),
-        ""
-      ),
-      colour = label_colour
-    ),
-    position = position_stack(vjust = 0.5),
-    size = 3.2,
-    fontface = "bold",
-    show.legend = FALSE
-  ) +
-  scale_colour_manual(
-    values = c("dark" = "#374151", "light" = "white")
+  geom_col(
+    width = 0.78,
+    colour = "white",
+    linewidth = 0.25
   ) +
   scale_fill_manual(
     values = c(
       "1: No disclosed current implementation" = "#CBD5DF",
-      "2: Emerging/bounded implementation" = "#5B9ABD",
-      "3: Established/integrated implementation" = "#1F4E79"
+      "2: Emerging / bounded implementation" = "#5B9ABD",
+      "3: Established / integrated implementation" = "#1F4E79"
     ),
     labels = c(
       "1  No disclosed current implementation",
@@ -528,122 +860,150 @@ p_ai_intensity <- ggplot(
       max(score_distribution_by_year$year),
       by = 1
     ),
-    labels = function(x) sprintf("%.0f", x),
-    expand = expansion(mult = c(0.015, 0.015))
+    labels = function(x) sprintf("%.0f", x)
   ) +
   scale_y_continuous(
-    labels = scales::percent_format(accuracy = 1),
-    breaks = seq(0, 1, by = 0.2),
+    labels = scales::percent_format(
+      accuracy = 1
+    ),
     limits = c(0, 1),
     expand = c(0, 0)
   ) +
   labs(
     x = "Year",
-    y = "Share of firm-year observations",
+    y = "Share of scored firm-years",
     fill = NULL
   ) +
-  theme_minimal(base_size = 12) +
+  theme_minimal(
+    base_size = 12
+  ) +
   theme(
     panel.grid.minor = element_blank(),
     panel.grid.major.x = element_blank(),
-    panel.grid.major.y = element_line(colour = "grey88", linewidth = 0.4),
-    axis.title.x = element_text(size = 12, margin = margin(t = 8)),
-    axis.title.y = element_text(size = 12, margin = margin(r = 8)),
-    axis.text = element_text(colour = "grey25", size = 10.5),
-    legend.position = "bottom",
-    legend.direction = "horizontal",
-    legend.text = element_text(size = 10),
-    legend.margin = margin(t = 7),
-    plot.margin = margin(10, 15, 5, 10)
+    legend.position = "bottom"
   )
 
-p_ai_adoption_summary <-
-  p_mean_ai_score_by_year /
-  p_ai_intensity +
-  plot_layout(heights = c(1.4, 1))
 
+# ---- Save figures -------------------------------------------------------------
 
-# ---- Save figures ------------------------------------------------------------
 if (SAVE_PANEL_DIAGNOSTICS_FIGURES) {
-  dir.create(PANEL_DIAGNOSTICS_FIGURES_DIR, recursive = TRUE, showWarnings = FALSE)
-
+  
+  dir.create(
+    PANEL_DIAGNOSTICS_FIGURES_DIR,
+    recursive = TRUE,
+    showWarnings = FALSE
+  )
+  
   ggsave(
-    file.path(PANEL_DIAGNOSTICS_FIGURES_DIR, "p_score_mix_by_year.png"),
-    p_score_mix_by_year,
+    file.path(
+      PANEL_DIAGNOSTICS_FIGURES_DIR,
+      "p_treated_share_by_year.png"
+    ),
+    p_treated_share_by_year,
     width = 8,
     height = 5,
     dpi = 300
   )
-
-  ggsave(
-    file.path(PANEL_DIAGNOSTICS_FIGURES_DIR, "p_panel_trends_side_by_side.png"),
-    p_panel_trends_side_by_side,
-    width = 9,
-    height = 6,
-    dpi = 300
-  )
-
-  ggsave(
-    file.path(PANEL_DIAGNOSTICS_FIGURES_DIR, "p_panel_trend_share.png"),
-    p_treated_share_by_year,
-    width = 10,
-    height = 5.5,
-    units = "in",
-    dpi = 300
-  )
-
+  
   ggsave(
     file.path(
       PANEL_DIAGNOSTICS_FIGURES_DIR,
-      "p_panel_trends_side_by_side_NEW.png"
+      "p_mean_ai_score_by_year.png"
     ),
-    p_ai_adoption_summary,
-    width = 10,
+    p_mean_ai_score_by_year,
+    width = 8,
+    height = 5,
+    dpi = 300
+  )
+  
+  ggsave(
+    file.path(
+      PANEL_DIAGNOSTICS_FIGURES_DIR,
+      "p_ai_score_mix_by_year.png"
+    ),
+    p_ai_score_mix_by_year,
+    width = 9,
     height = 5.5,
-    units = "in",
     dpi = 300
   )
 }
 
 
-# ---- Save bundle --------------------------------------------------------------
-panel_diagnostics <- list(
+# ---- Save diagnostics bundle --------------------------------------------------
+
+  panel_diagnostics <- list(
   panel_overview = panel_overview,
-  merge_process_overview = merge_process_overview,
+  panel_by_year = panel_by_year,
+  treatment_status_summary = treatment_status_summary,
+  treatment_cohorts = treatment_cohorts,
   score_distribution_overall = score_distribution_overall,
-  treated_share_by_year = treated_share_by_year,
   score_distribution_by_year = score_distribution_by_year,
-  naics_overview = naics_overview,
   naics2_summary = naics2_summary,
-  naics3_summary = naics3_summary,
-  naics4_summary = naics4_summary,
-  ever_treated_summary = ever_treated_summary,
-  firm_paths = firm_paths,
-  score_path_counts = score_path_counts,
-  top_score_paths = top_score_paths,
-  score_consistency_summary = score_consistency_summary,
-  binary_path_summary = binary_path_summary,
-  did_readiness_summary = did_readiness_summary,
+  treatment_reversals = treatment_reversals,
   p_treated_share_by_year = p_treated_share_by_year,
   p_mean_ai_score_by_year = p_mean_ai_score_by_year,
-  p_score_mix_by_year = p_score_mix_by_year,
-  p_panel_trends_side_by_side = p_panel_trends_side_by_side,
-  p_ai_intensity = p_ai_intensity,
-  p_ai_adoption_summary = p_ai_adoption_summary
+  p_ai_score_mix_by_year = p_ai_score_mix_by_year
 )
 
 if (SAVE_PANEL_DIAGNOSTICS) {
-  dir.create(PANEL_DIAGNOSTICS_OUTPUT_DIR, recursive = TRUE, showWarnings = FALSE)
-  saveRDS(panel_diagnostics, PANEL_DIAGNOSTICS_BUNDLE_RDS)
+  
+  dir.create(
+    PANEL_DIAGNOSTICS_OUTPUT_DIR,
+    recursive = TRUE,
+    showWarnings = FALSE
+  )
+  
+  saveRDS(
+    panel_diagnostics,
+    PANEL_DIAGNOSTICS_BUNDLE_RDS
+  )
 }
 
 
 # ---- Console output -----------------------------------------------------------
-cat("\nGenerated panel diagnostics.\n")
-cat("Merged panel rows:", scales::comma(nrow(panel_window)), "\n")
-cat("Final analysis panel rows:", scales::comma(nrow(panel_diag)), "\n")
-cat("Final analysis firms:", scales::comma(dplyr::n_distinct(panel_diag$cik)), "\n")
+
+cat(
+  "\nPanel diagnostics completed.\n\n"
+)
+
+print(
+  panel_overview
+)
+
+cat(
+  "\nPanel by year:\n"
+)
+
+print(
+  panel_by_year
+)
+
+cat(
+  "\nTreatment status:\n"
+)
+
+print(
+  treatment_status_summary
+)
+
+cat(
+  "\nTreatment cohorts:\n"
+)
+
+print(
+  treatment_cohorts
+)
+
+cat(
+  "\nTreatment reversals:",
+  nrow(treatment_reversals),
+  "\n"
+)
 
 if (SAVE_PANEL_DIAGNOSTICS) {
-  cat("Saved diagnostics bundle to:", PANEL_DIAGNOSTICS_BUNDLE_RDS, "\n")
+  cat(
+    "\nSaved diagnostics bundle to:",
+    PANEL_DIAGNOSTICS_BUNDLE_RDS,
+    "\n"
+  )
 }

@@ -305,6 +305,18 @@ if (nrow(invalid_lag_values) > 0L) {
   )
 }
 
+invalid_lag_years <- panel_ai |>
+  filter(
+    lag_is_consecutive %in% TRUE,
+    lag_source_fyear != fyear - 1L
+  )
+
+if (nrow(invalid_lag_years) > 0L) {
+  stop(
+    "Found consecutive-lag rows where lag_source_fyear != fyear - 1."
+  )
+}
+
 
 # ---- Build the first-adoption risk set ----------------------------------------
 excluded_left_censored_firms <- panel_ai |>
@@ -340,6 +352,48 @@ risk_panel_before_lag_filter <- panel_ai |>
 invalid_risk_lag_rows <- sum(
   !(risk_panel_before_lag_filter$lag_is_consecutive %in% TRUE)
 )
+
+
+# Audit lagged panel and lost ciks
+event_lag_audit <- risk_panel_before_lag_filter |>
+  filter(first_adopt == 1L) |>
+  summarise(
+    adoption_events_before_lag_filter = n(),
+    events_with_consecutive_lag = sum(lag_is_consecutive %in% TRUE),
+    events_lost_due_to_lag = sum(!(lag_is_consecutive %in% TRUE))
+  )
+
+print(event_lag_audit)
+
+lost_event_firms <- risk_panel_before_lag_filter |>
+  filter(
+    first_adopt == 1L,
+    !(lag_is_consecutive %in% TRUE)
+  ) |>
+  distinct(cik)
+
+
+event_lag_audit <- risk_panel_before_lag_filter |>
+  filter(first_adopt == 1L) |>
+  summarise(
+    adoption_events_before_lag_filter = n(),
+    events_with_consecutive_lag = sum(lag_is_consecutive %in% TRUE),
+    events_lost_due_to_lag = sum(!(lag_is_consecutive %in% TRUE)),
+    share_events_retained = events_with_consecutive_lag /
+      adoption_events_before_lag_filter
+  )
+
+lost_event_qa <- det_panel |>
+  filter(cik %in% lost_event_firms$cik) |>
+  group_by(cik) |>
+  summarise(
+    n_rows = n(),
+    n_events = sum(first_adopt == 1L),
+    .groups = "drop"
+  )
+
+lost_event_qa
+
 
 det_panel <- risk_panel_before_lag_filter |>
   filter(lag_is_consecutive %in% TRUE) |>
@@ -517,7 +571,7 @@ det_sample_overview <- tibble(
   ),
   value = c(
     "One-variable LPMs and pre-specified joint LPM",
-    "First detected AI adoption in year t",
+    "First AI-adoption treatment year",
     "Immediately preceding consecutive fiscal year (t-1)",
     "Calendar year and NAICS3",
     "One-way clustered by firm (CIK)",
