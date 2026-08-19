@@ -15,7 +15,7 @@ ANALYSIS_PANEL_RDS <- file.path(INPUT_DIR, "compustat_ai_analysis_panel.rds")
 ANALYSIS_START_YEAR <- 2015L
 ANALYSIS_END_YEAR <- 2025L
 
-FINAL_ANALYSIS_EXCLUDED_NAICS2 <- c() #c("22", "52", "53", "99")
+#FINAL_ANALYSIS_EXCLUDED_NAICS2 <- c() c("22", "52", "53", "99")
 FINAL_ANALYSIS_INCLUDED_EXCHG <- c(11L, 12L, 14L, 17L, 21L)
 
 build_final_analysis_panel <- function(data) {
@@ -29,7 +29,6 @@ build_final_analysis_panel <- function(data) {
       !is.na(year),
       year >= ANALYSIS_START_YEAR,
       year <= ANALYSIS_END_YEAR,
-      !naics2 %in% FINAL_ANALYSIS_EXCLUDED_NAICS2,
       exchg %in% FINAL_ANALYSIS_INCLUDED_EXCHG
     )
 }
