@@ -1886,7 +1886,7 @@ def _score_rubric() -> str:
         "Score 2 - Emerging or bounded implementation: A specific AI application is "
         "in active development, testing, or pilot, or is in limited production use.\n"
         "Score 3 - Established and integrated implementation: Current production or "
-        "operational use is explicit AND AI is deployed at meaningful scale or embedded "
+        "operational use is explicit and AI is deployed at meaningful scale or embedded "
         "in a core product, service, function, or process.\n\n"
         "AI-enabled products or services currently provided by the firm count.\n\n"
         "If the evidence is ambiguous, choose the lower score.\n"
