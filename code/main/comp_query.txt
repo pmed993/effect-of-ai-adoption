@@ -42,7 +42,9 @@ SELECT
     f.sale,
     f.emp,
     f.xlr,
-    f.oibdp
+    f.oibdp,
+    f.xopr
+    
 
 FROM comp.funda AS f
 
