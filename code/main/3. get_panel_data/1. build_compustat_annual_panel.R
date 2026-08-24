@@ -318,13 +318,16 @@ comp[, tobins_q := fifelse(
   NA_real_
 )]
 
-comp[, operating_profit := fifelse(
-  !is.na(oibdp) & !is.na(at),
+comp[, operating_profitability := fifelse(
+  is.finite(oibdp) & is.finite(at) & at > 0,
   oibdp / at,
   NA_real_
 )]
 
-comp[, operating_profit_w := winsorize_vec(operating_profit)]
+# Do not winsorize this outcome here. The pooled 1st/99th-percentile bounds
+# must be estimated after the project's year and exchange eligibility filters
+# are applied. `4. build_or_load_panel_data.R` performs that transformation
+# once and applies the same bounds to every treatment group, cohort, and year.
 
 comp[, `:=`(
   capx_intensity_l1 = fifelse(

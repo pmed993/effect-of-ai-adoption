@@ -9,12 +9,11 @@
 #   3. Loads filing-level AI scores and SEC filing metadata.
 #   4. Matches each 10-K to the Compustat fiscal period it reports using:
 #
-#          CIK + Compustat datadate
-#                      =
-#          CIK + SEC report_date
+#      a. exact CIK + report-date matching; then
+#      b. a unique nearest report date within +/-7 business days.
 #
 #   5. Retains SEC filing_date separately for treatment timing.
-#   6. Creates `panel`, `panel_ai`, and `unmatched`.
+#   6. Creates `panel`, `panel_ai`, `unmatched`, and a match audit.
 #
 # `ai_score = 1` means an observed filing was classified as no disclosed
 # current AI adoption. An unmatched Compustat observation remains NA.
@@ -36,6 +35,21 @@ REBUILD_ANNUAL_PANEL <- isTRUE(
 SKIP_AI_EXPOSURE <- isTRUE(
   get0("SKIP_AI_EXPOSURE", ifnotfound = FALSE)
 )
+
+NEAREST_REPORT_MAX_BUSINESS_DAYS <- as.integer(
+  get0(
+    "NEAREST_REPORT_MAX_BUSINESS_DAYS",
+    ifnotfound = 7L
+  )
+)
+
+if (
+  length(NEAREST_REPORT_MAX_BUSINESS_DAYS) != 1L ||
+  is.na(NEAREST_REPORT_MAX_BUSINESS_DAYS) ||
+  NEAREST_REPORT_MAX_BUSINESS_DAYS < 0L
+) {
+  stop("NEAREST_REPORT_MAX_BUSINESS_DAYS must be one non-negative integer.")
+}
 
 
 AI_EXPOSURE_FILE <- get0(
@@ -133,6 +147,14 @@ OUTPUT_UNMATCHED_CSV <- get0(
   )
 )
 
+OUTPUT_MATCH_AUDIT_CSV <- get0(
+  "OUTPUT_MATCH_AUDIT_CSV",
+  ifnotfound = file.path(
+    INPUT_DIR,
+    "compustat_ai_match_audit.csv"
+  )
+)
+
 
 # ---- Required columns ---------------------------------------------------------
 
@@ -220,6 +242,48 @@ min_idate <- function(x) {
   
   min(x)
 }
+
+
+# Signed weekday distance from `from_date` to `to_date`.
+#
+# A positive value means the SEC report date is later than the Compustat date;
+# a negative value means it is earlier. The calculation excludes Saturdays and
+# Sundays. Public holidays are not subtracted, making the eligibility rule
+# weakly more conservative at the edge of the window without adding a calendar
+# dependency.
+business_day_gap_one <- function(from_date, to_date) {
+
+  from_date <- as.Date(from_date)
+  to_date <- as.Date(to_date)
+
+  if (is.na(from_date) || is.na(to_date)) {
+    return(NA_integer_)
+  }
+
+  if (from_date == to_date) {
+    return(0L)
+  }
+
+  direction <- if (to_date > from_date) 1L else -1L
+  lower_date <- min(from_date, to_date)
+  upper_date <- max(from_date, to_date)
+
+  dates_between <- seq.Date(
+    lower_date + 1,
+    upper_date,
+    by = "day"
+  )
+
+  weekday_number <- as.POSIXlt(dates_between)$wday
+  direction * sum(weekday_number %in% 1:5)
+}
+
+
+business_day_gap <- Vectorize(
+  business_day_gap_one,
+  vectorize.args = c("from_date", "to_date"),
+  USE.NAMES = FALSE
+)
 
 
 # ---- Load AIIE ---------------------------------------------------------------
@@ -969,11 +1033,15 @@ assert_unique_keys(
 
 # ---- Merge Compustat and EDGAR ------------------------------------------------
 #
-# Correct fiscal-period match:
+# Matching hierarchy:
 #
-#     Compustat CIK + datadate
-#                  =
-#     SEC CIK + report_date
+#   1. Exact CIK + fiscal report date.
+#   2. For a still-unmatched Compustat period, the unique nearest SEC report
+#      date for the same CIK within +/- NEAREST_REPORT_MAX_BUSINESS_DAYS.
+#
+# Exact matches always take precedence. A filing already used by an exact match
+# is unavailable to the fallback, and no fallback filing may be assigned to more
+# than one Compustat period. Equidistant nearest candidates remain unmatched.
 #
 # filing_date is retained separately for treatment timing.
 
@@ -986,8 +1054,20 @@ ai_filings[
 n_comp_before_merge <- nrow(comp_panel)
 
 
-panel <- merge(
-  comp_panel,
+comp_match_keys <- unique(
+  comp_panel[
+    ,
+    .(
+      cik,
+      datadate
+    )
+  ]
+)
+
+
+# Stage 1: exact fiscal-report-date matches.
+exact_matches <- merge(
+  comp_match_keys,
   ai_filings,
   by.x = c(
     "cik",
@@ -996,6 +1076,252 @@ panel <- merge(
   by.y = c(
     "cik",
     "match_datadate"
+  ),
+  all = FALSE,
+  sort = FALSE
+)
+
+setDT(exact_matches)
+
+exact_matches[
+  ,
+  `:=`(
+    match_method = "exact_report_date",
+    report_date_gap_days = 0L,
+    report_date_gap_business_days = 0L
+  )
+]
+
+assert_unique_keys(
+  exact_matches,
+  c("cik", "datadate"),
+  "Exact Compustat-EDGAR matches"
+)
+
+
+# Stage 2: build fallback candidates only for unmatched Compustat periods and
+# unused filings. The 14-calendar-day prefilter is deliberately wider than the
+# seven-weekday eligibility window and avoids an unnecessary CIK-level cross
+# product before the business-day calculation.
+unmatched_match_keys <- comp_match_keys[
+  !exact_matches,
+  on = .(
+    cik,
+    datadate
+  )
+]
+
+used_exact_filings <- unique(
+  exact_matches[
+    ,
+    .(
+      cik,
+      ai_report_date
+    )
+  ]
+)
+
+available_fallback_filings <- ai_filings[
+  !used_exact_filings,
+  on = .(
+    cik,
+    ai_report_date
+  )
+]
+
+fallback_candidates <- merge(
+  unmatched_match_keys,
+  available_fallback_filings,
+  by = "cik",
+  all = FALSE,
+  allow.cartesian = TRUE,
+  sort = FALSE
+)
+
+setDT(fallback_candidates)
+
+fallback_candidates[
+  ,
+  report_date_gap_days := as.integer(
+    ai_report_date - datadate
+  )
+]
+
+fallback_candidates <- fallback_candidates[
+  !is.na(report_date_gap_days) &
+    abs(report_date_gap_days) <= 14L
+]
+
+if (nrow(fallback_candidates) > 0L) {
+
+  fallback_candidates[
+    ,
+    report_date_gap_business_days := as.integer(
+      business_day_gap(
+        datadate,
+        ai_report_date
+      )
+    )
+  ]
+
+  fallback_candidates <- fallback_candidates[
+    !is.na(report_date_gap_business_days) &
+      abs(report_date_gap_business_days) <=
+        NEAREST_REPORT_MAX_BUSINESS_DAYS
+  ]
+}
+
+
+# Candidate-level QA retained for the saved match audit.
+if (nrow(fallback_candidates) > 0L) {
+
+  fallback_candidates[
+    ,
+    absolute_report_date_gap_days := abs(report_date_gap_days)
+  ]
+
+  fallback_candidate_stats <- fallback_candidates[
+    ,
+    .(
+      fallback_eligible_candidates = .N,
+      fallback_min_absolute_gap_days = min(
+        absolute_report_date_gap_days
+      ),
+      fallback_nearest_candidates = sum(
+        absolute_report_date_gap_days ==
+          min(absolute_report_date_gap_days)
+      )
+    ),
+    by = .(
+      cik,
+      datadate
+    )
+  ]
+
+  nearest_fallback_matches <- fallback_candidates[
+    fallback_candidate_stats,
+    on = .(
+      cik,
+      datadate,
+      absolute_report_date_gap_days =
+        fallback_min_absolute_gap_days
+    ),
+    nomatch = 0L
+  ][
+    fallback_nearest_candidates == 1L
+  ]
+
+} else {
+
+  fallback_candidate_stats <- data.table(
+    cik = character(),
+    datadate = as.IDate(character()),
+    fallback_eligible_candidates = integer(),
+    fallback_min_absolute_gap_days = integer(),
+    fallback_nearest_candidates = integer()
+  )
+
+  nearest_fallback_matches <- fallback_candidates
+}
+
+
+# Enforce one-to-one filing use. In the unlikely event that the same filing is
+# the unique nearest candidate for multiple Compustat periods, all conflicting
+# assignments remain unmatched for manual review.
+if (nrow(nearest_fallback_matches) > 0L) {
+
+  fallback_filing_use <- nearest_fallback_matches[
+    ,
+    .N,
+    by = .(
+      cik,
+      ai_report_date
+    )
+  ]
+
+  reused_fallback_filings <- fallback_filing_use[N > 1L]
+
+  nearest_fallback_matches <- nearest_fallback_matches[
+    !reused_fallback_filings,
+    on = .(
+      cik,
+      ai_report_date
+    )
+  ]
+
+} else {
+
+  reused_fallback_filings <- data.table(
+    cik = character(),
+    ai_report_date = as.IDate(character()),
+    N = integer()
+  )
+}
+
+
+nearest_fallback_matches[
+  ,
+  match_method := paste0(
+    "unique_nearest_report_date_",
+    NEAREST_REPORT_MAX_BUSINESS_DAYS,
+    "bd"
+  )
+]
+
+
+# `match_datadate` is the filing's own report date and is no longer needed once
+# each filing has been mapped to the Compustat `datadate` key.
+if ("match_datadate" %in% names(exact_matches)) {
+  exact_matches[, match_datadate := NULL]
+}
+
+if ("match_datadate" %in% names(nearest_fallback_matches)) {
+  nearest_fallback_matches[, match_datadate := NULL]
+}
+
+fallback_internal_cols <- intersect(
+  c(
+    "absolute_report_date_gap_days",
+    "fallback_eligible_candidates",
+    "fallback_min_absolute_gap_days",
+    "fallback_nearest_candidates"
+  ),
+  names(nearest_fallback_matches)
+)
+
+if (length(fallback_internal_cols) > 0L) {
+  nearest_fallback_matches[, (fallback_internal_cols) := NULL]
+}
+
+
+matched_filing_map <- rbindlist(
+  list(
+    exact_matches,
+    nearest_fallback_matches
+  ),
+  use.names = TRUE,
+  fill = TRUE
+)
+
+assert_unique_keys(
+  matched_filing_map,
+  c("cik", "datadate"),
+  "Final Compustat-EDGAR filing map"
+)
+
+assert_unique_keys(
+  matched_filing_map,
+  c("cik", "ai_report_date"),
+  "Final Compustat-EDGAR filing map"
+)
+
+
+panel <- merge(
+  comp_panel,
+  matched_filing_map,
+  by = c(
+    "cik",
+    "datadate"
   ),
   all.x = TRUE,
   sort = FALSE
@@ -1009,6 +1335,11 @@ if (nrow(panel) != n_comp_before_merge) {
     "Compustat-EDGAR merge changed the Compustat row count."
   )
 }
+
+panel[
+  is.na(match_method),
+  match_method := "unmatched"
+]
 
 
 # Attach firm-level treatment dates.
@@ -1054,31 +1385,71 @@ assert_unique_keys(
 )
 
 
-# Every exact fiscal-period match must genuinely match report_date to datadate.
+# Every exact match must have identical fiscal-period dates.
 if (
   panel[
-    !is.na(ai_score) &
-    (
-      is.na(ai_report_date) |
-      ai_report_date != datadate
-    ),
+    match_method == "exact_report_date" &
+      (
+        is.na(ai_report_date) |
+        ai_report_date != datadate |
+        report_date_gap_days != 0L |
+        report_date_gap_business_days != 0L
+      ),
     .N
   ] > 0L
 ) {
-  stop(
-    "Some matched AI scores do not satisfy SEC report_date = Compustat datadate."
-  )
+  stop("Exact report-date match QA failed.")
 }
 
 
-panel[
-  ,
-  match_method := fifelse(
-    !is.na(ai_score),
-    "exact_report_date",
-    "unmatched"
-  )
-]
+fallback_match_method <- paste0(
+  "unique_nearest_report_date_",
+  NEAREST_REPORT_MAX_BUSINESS_DAYS,
+  "bd"
+)
+
+# Every fallback match must be non-exact, inside the configured signed
+# business-day interval, and internally consistent with the stored date gap.
+if (
+  panel[
+    match_method == fallback_match_method &
+      (
+        is.na(ai_report_date) |
+        ai_report_date == datadate |
+        is.na(report_date_gap_business_days) |
+        report_date_gap_business_days <
+          -NEAREST_REPORT_MAX_BUSINESS_DAYS |
+        report_date_gap_business_days >
+          NEAREST_REPORT_MAX_BUSINESS_DAYS |
+        report_date_gap_days !=
+          as.integer(ai_report_date - datadate)
+      ),
+    .N
+  ] > 0L
+) {
+  stop("Nearest-report-date fallback QA failed.")
+}
+
+
+# A matched score must have an approved match method; an unmatched period must
+# not retain filing metadata.
+if (
+  panel[
+    !is.na(ai_score) &
+      !match_method %in% c(
+        "exact_report_date",
+        fallback_match_method
+      ),
+    .N
+  ] > 0L ||
+  panel[
+    match_method == "unmatched" &
+      !is.na(ai_report_date),
+    .N
+  ] > 0L
+) {
+  stop("Matched/unmatched method QA failed.")
+}
 
 
 setorder(
@@ -1486,9 +1857,95 @@ coverage_by_year <- panel_analysis_window[
 ]
 
 
+coverage_by_match_method <- panel_analysis_window[
+  ,
+  .(
+    fiscal_periods = .N
+  ),
+  by = match_method
+][
+  order(match_method)
+]
+
+
+# One row per Compustat fiscal period, including why an unmatched period was not
+# eligible for the nearest-date fallback. Exact matches were not evaluated for
+# fallback candidates and therefore retain NA candidate counts.
+match_audit <- panel_analysis_window[
+  ,
+  .(
+    cik,
+    datadate,
+    year,
+    ai_report_date,
+    ai_filing_date,
+    accession_number,
+    ai_form_type,
+    ai_score,
+    match_method,
+    report_date_gap_days,
+    report_date_gap_business_days
+  )
+]
+
+match_audit <- merge(
+  match_audit,
+  fallback_candidate_stats,
+  by = c(
+    "cik",
+    "datadate"
+  ),
+  all.x = TRUE,
+  sort = FALSE
+)
+
+setDT(match_audit)
+
+match_audit[
+  match_method == "unmatched" &
+    is.na(fallback_eligible_candidates),
+  `:=`(
+    fallback_eligible_candidates = 0L,
+    fallback_nearest_candidates = 0L
+  )
+]
+
+match_audit[
+  ,
+  match_audit_status := fcase(
+    match_method == "exact_report_date",
+    "matched_exact",
+    match_method == fallback_match_method,
+    "matched_unique_nearest",
+    fallback_eligible_candidates == 0L,
+    "unmatched_no_candidate_within_window",
+    fallback_nearest_candidates > 1L,
+    "unmatched_ambiguous_nearest",
+    default = "unmatched_filing_reuse_conflict"
+  )
+]
+
+setorder(
+  match_audit,
+  cik,
+  datadate
+)
+
+assert_unique_keys(
+  match_audit,
+  c("cik", "datadate"),
+  "Compustat-EDGAR match audit"
+)
+
+
 cat("\nBuilt merged Compustat + AI panel.\n")
 
-cat("Matching rule: CIK + Compustat datadate = CIK + SEC report_date\n")
+cat(
+  "Matching rule: exact CIK + report date, then unique nearest report date",
+  "within +/-",
+  NEAREST_REPORT_MAX_BUSINESS_DAYS,
+  "business days\n"
+)
 
 cat("Compustat rows:",
     format(analysis_rows, big.mark = ","),
@@ -1509,6 +1966,10 @@ cat("Fiscal-period coverage:",
 cat("\nCoverage by fiscal-period year:\n")
 
 print(coverage_by_year)
+
+cat("\nFiscal periods by match method:\n")
+
+print(coverage_by_match_method)
 
 
 # Final-year completeness QA.
@@ -1592,6 +2053,8 @@ if (SAVE_MERGED_OUTPUTS) {
   fwrite(panel_ai, OUTPUT_MATCHED_PANEL_CSV)
   
   fwrite(unmatched, OUTPUT_UNMATCHED_CSV)
+
+  fwrite(match_audit, OUTPUT_MATCH_AUDIT_CSV)
   
   cat("\nSaved merged panel to:",
       OUTPUT_MERGED_PANEL_RDS,
@@ -1607,5 +2070,9 @@ if (SAVE_MERGED_OUTPUTS) {
   
   cat("Saved unmatched fiscal periods to:",
       OUTPUT_UNMATCHED_CSV,
+      "\n")
+
+  cat("Saved Compustat-EDGAR match audit to:",
+      OUTPUT_MATCH_AUDIT_CSV,
       "\n")
 }

@@ -65,8 +65,8 @@ var_labels <- c(
   rd_intensity_l1_filled = "R&D intensity (t-1)",
   rd_reporter_l1 = "R&D reporter (t-1)",
   log_labor_productivity_l1 = "Labour productivity (log, t-1)",
-  firm_age_l1 = "Firm age (years, t-1)",
-  aiie = "Industry AI exposure"
+  firm_age_l1 = "Firm age (years, t-1)"
+#  aiie = "Industry AI exposure"
 )
 
 # Pre-specify the joint model here. The same variables are each estimated once
@@ -85,8 +85,8 @@ univariate_column_labels <- c(
   rd_intensity_l1_filled = "R&D intensity",
   rd_reporter_l1 = "R&D reporter",
   log_labor_productivity_l1 = "Labour productivity",
-  firm_age_l1 = "Firm age",
-  aiie = "AI exposure"
+  firm_age_l1 = "Firm age"
+#  aiie = "AI exposure"
 )
 
 
@@ -355,15 +355,6 @@ invalid_risk_lag_rows <- sum(
 
 
 # Audit lagged panel and lost ciks
-event_lag_audit <- risk_panel_before_lag_filter |>
-  filter(first_adopt == 1L) |>
-  summarise(
-    adoption_events_before_lag_filter = n(),
-    events_with_consecutive_lag = sum(lag_is_consecutive %in% TRUE),
-    events_lost_due_to_lag = sum(!(lag_is_consecutive %in% TRUE))
-  )
-
-print(event_lag_audit)
 
 lost_event_firms <- risk_panel_before_lag_filter |>
   filter(
@@ -383,29 +374,50 @@ event_lag_audit <- risk_panel_before_lag_filter |>
       adoption_events_before_lag_filter
   )
 
-lost_event_qa <- det_panel |>
-  filter(cik %in% lost_event_firms$cik) |>
-  group_by(cik) |>
-  summarise(
-    n_rows = n(),
-    n_events = sum(first_adopt == 1L),
-    .groups = "drop"
+print(event_lag_audit)
+
+lost_event_qa <- risk_panel_before_lag_filter |>
+  semi_join(
+    lost_event_firms,
+    by = "cik"
+  ) |>
+  filter(
+    first_adopt == 1L
+  ) |>
+  select(
+    cik,
+    year,
+    fyear,
+    ai_adoption_year,
+    first_adopt,
+    lag_source_fyear,
+    lag_is_consecutive
+  ) |>
+  arrange(
+    year,
+    cik
   )
 
-lost_event_qa
+print(lost_event_qa)
 
 
 det_panel <- risk_panel_before_lag_filter |>
-  filter(lag_is_consecutive %in% TRUE) |>
+  filter(
+    lag_is_consecutive %in% TRUE
+  ) |>
   mutate(
     roa_l1_w = winsorize_vec(roa_l1),
     leverage_l1_w = winsorize_vec(leverage_l1),
-    rd_reporter_l1 = as.integer(rd_reporter_l1),
-    rd_intensity_l1_filled = if_else(
-      rd_reporter_l1 == 0L,
-      0,
-      rd_intensity_l1
-    )
+    
+    rd_reporter_l1 =
+      as.integer(rd_reporter_l1),
+    
+    rd_intensity_l1_filled =
+      if_else(
+        rd_reporter_l1 == 0L,
+        0,
+        rd_intensity_l1
+      )
   )
 
 event_counts <- det_panel |>

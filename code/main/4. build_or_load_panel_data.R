@@ -20,10 +20,10 @@
 #   source("code/main/4. build_or_load_panel_data.R")
 #
 # Refresh Compustat from WRDS and rebuild everything:
-   BUILD_PANEL_DATA <- TRUE
-   REBUILD_ANNUAL_PANEL <- TRUE
-   REFRESH_FROM_WRDS <- TRUE
-   source("code/main/4. build_or_load_panel_data.R")
+#   BUILD_PANEL_DATA <- TRUE
+#   REBUILD_ANNUAL_PANEL <- TRUE
+#   REFRESH_FROM_WRDS <- TRUE
+#   source("code/main/4. build_or_load_panel_data.R")
 # ------------------------------------------------------------------------------
 
 source("code/config/global_settings.R")
@@ -88,6 +88,35 @@ FINAL_UNMATCHED_CSV <- get0(
   )
 )
 
+PROFITABILITY_AUDIT_CSV <- get0(
+  "PROFITABILITY_AUDIT_CSV",
+  ifnotfound = file.path(
+    OUTPUT_DIR,
+    "panel_data",
+    "operating_profitability_winsor_audit.csv"
+  )
+)
+
+PROFITABILITY_WINSOR_LOWER <- as.numeric(get0(
+  "PROFITABILITY_WINSOR_LOWER",
+  ifnotfound = 0.01
+))
+
+PROFITABILITY_WINSOR_UPPER <- as.numeric(get0(
+  "PROFITABILITY_WINSOR_UPPER",
+  ifnotfound = 0.99
+))
+
+if (
+  !is.finite(PROFITABILITY_WINSOR_LOWER) ||
+    !is.finite(PROFITABILITY_WINSOR_UPPER) ||
+    PROFITABILITY_WINSOR_LOWER < 0 ||
+    PROFITABILITY_WINSOR_UPPER > 1 ||
+    PROFITABILITY_WINSOR_LOWER >= PROFITABILITY_WINSOR_UPPER
+) {
+  stop("Profitability winsorisation probabilities must satisfy 0 <= lower < upper <= 1.")
+}
+
 
 # ---- Decide whether to rebuild ------------------------------------------------
 
@@ -148,6 +177,131 @@ panel_analysis_scope <- build_final_analysis_panel(
 )
 
 setDT(panel_analysis_scope)
+
+
+# ---- Operating profitability outcome ----------------------------------------
+#
+# OIBDP is a fiscal-year flow and total assets are the scale variable. Ratios
+# are defined only when both inputs are finite and total assets are strictly
+# positive. Estimate one pooled pair of winsorisation bounds on the eligible
+# year/exchange sample, before restricting on AI-history availability, and use
+# those same bounds for every year, cohort, and treatment group.
+
+required_profitability_cols <- c("oibdp", "at")
+missing_profitability_cols <- setdiff(
+  required_profitability_cols,
+  names(panel_analysis_scope)
+)
+
+if (length(missing_profitability_cols) > 0L) {
+  stop(
+    "Cannot construct operating profitability; panel is missing: ",
+    paste(missing_profitability_cols, collapse = ", ")
+  )
+}
+
+panel_analysis_scope[, operating_profitability := fifelse(
+  is.finite(oibdp) & is.finite(at) & at > 0,
+  oibdp / at,
+  NA_real_
+)]
+
+valid_profitability <- is.finite(
+  panel_analysis_scope$operating_profitability
+)
+
+if (sum(valid_profitability) < 2L) {
+  stop("Fewer than two valid operating-profitability observations are available.")
+}
+
+profitability_winsor_bounds <- as.numeric(quantile(
+  panel_analysis_scope$operating_profitability[valid_profitability],
+  probs = c(PROFITABILITY_WINSOR_LOWER, PROFITABILITY_WINSOR_UPPER),
+  na.rm = TRUE,
+  names = FALSE,
+  type = 7
+))
+
+if (
+  length(profitability_winsor_bounds) != 2L ||
+    any(!is.finite(profitability_winsor_bounds)) ||
+    profitability_winsor_bounds[1] > profitability_winsor_bounds[2]
+) {
+  stop("Operating-profitability winsorisation bounds are invalid.")
+}
+
+panel_analysis_scope[, operating_profitability_w := fifelse(
+  is.finite(operating_profitability),
+  pmin(
+    pmax(operating_profitability, profitability_winsor_bounds[1]),
+    profitability_winsor_bounds[2]
+  ),
+  NA_real_
+)]
+
+# Remove the superseded names if an older cached merged panel was loaded. This
+# prevents stale upstream values from being used accidentally in later scripts.
+legacy_profitability_cols <- intersect(
+  c("operating_profit", "operating_profit_w"),
+  names(panel_analysis_scope)
+)
+if (length(legacy_profitability_cols) > 0L) {
+  panel_analysis_scope[, (legacy_profitability_cols) := NULL]
+}
+
+profitability_audit <- data.table(
+  outcome = "operating_profitability_w",
+  numerator = "OIBDP",
+  denominator = "total assets",
+  eligible_observations = nrow(panel_analysis_scope),
+  valid_raw_observations = sum(valid_profitability),
+  missing_or_nonfinite_oibdp = sum(!is.finite(panel_analysis_scope$oibdp)),
+  missing_nonfinite_or_nonpositive_assets = sum(
+    !is.finite(panel_analysis_scope$at) | panel_analysis_scope$at <= 0
+  ),
+  lower_probability = PROFITABILITY_WINSOR_LOWER,
+  upper_probability = PROFITABILITY_WINSOR_UPPER,
+  lower_bound = profitability_winsor_bounds[1],
+  upper_bound = profitability_winsor_bounds[2],
+  observations_below_lower_bound = sum(
+    panel_analysis_scope$operating_profitability < profitability_winsor_bounds[1],
+    na.rm = TRUE
+  ),
+  observations_above_upper_bound = sum(
+    panel_analysis_scope$operating_profitability > profitability_winsor_bounds[2],
+    na.rm = TRUE
+  ),
+  raw_median = median(
+    panel_analysis_scope$operating_profitability,
+    na.rm = TRUE
+  ),
+  winsorized_mean = mean(
+    panel_analysis_scope$operating_profitability_w,
+    na.rm = TRUE
+  ),
+  winsorized_sd = sd(
+    panel_analysis_scope$operating_profitability_w,
+    na.rm = TRUE
+  )
+)
+
+if (
+  any(
+    is.finite(panel_analysis_scope$operating_profitability_w) &
+      (
+        panel_analysis_scope$operating_profitability_w <
+          profitability_winsor_bounds[1] |
+          panel_analysis_scope$operating_profitability_w >
+            profitability_winsor_bounds[2]
+      )
+  ) ||
+    any(
+      is.na(panel_analysis_scope$operating_profitability) !=
+        is.na(panel_analysis_scope$operating_profitability_w)
+    )
+) {
+  stop("Operating-profitability construction QA failed.")
+}
 
 
 # ---- Validate required treatment variables -----------------------------------
@@ -488,6 +642,12 @@ dir.create(
   showWarnings = FALSE
 )
 
+dir.create(
+  dirname(PROFITABILITY_AUDIT_CSV),
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
 
 # Main dataset used in DiD and other causal analyses
 saveRDS(
@@ -507,6 +667,11 @@ saveRDS(
 fwrite(
   panel_analysis_unmatched,
   FINAL_UNMATCHED_CSV
+)
+
+fwrite(
+  profitability_audit,
+  PROFITABILITY_AUDIT_CSV
 )
 
 

@@ -931,7 +931,7 @@ if (SAVE_PANEL_DIAGNOSTICS_FIGURES) {
 
 # ---- Save diagnostics bundle --------------------------------------------------
 
-  panel_diagnostics <- list(
+panel_diagnostics <- list(
   panel_overview = panel_overview,
   panel_by_year = panel_by_year,
   treatment_status_summary = treatment_status_summary,

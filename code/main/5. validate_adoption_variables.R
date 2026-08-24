@@ -47,7 +47,7 @@ SAVE_VALIDATION_FIGURES <- TRUE
 
 VALIDATION_PLOT_BASE_SIZE <- 11
 VALIDATION_POINT_SIZE <- 3.5
-VALIDATION_LINE_WIDTH <- 1.2
+VALIDATION_LINE_WIDTH <- 0.8
 VALIDATION_LABEL_SIZE <- 2.7
 VALIDATION_CORR_LABEL_SIZE <- 4
 VALIDATION_AXIS_TITLE_SIZE <- 13
@@ -388,12 +388,12 @@ validation_plot_labels <- validation_plot_data |>
       naics2 == "52" ~ "Finance"
     ),
     label_hjust = case_when(
-      naics2 %in% c("22", "51", "62") ~ 1.10,
+     naics2 %in% c("51") ~ 1.2,
       naics2 %in% c("54") ~ +1.10,
       TRUE ~ -0.05
     ),
     label_vjust = case_when(
-      naics2 %in% c("22", "44-45", "54", "56") ~ 1.3,
+      naics2 %in% c("22", "44-45", "52", "54", "56") ~ 1.3,
       TRUE ~ -0.65
     )
   )
@@ -464,7 +464,7 @@ p_validation_side_by_side <- ggplot(
     method = "lm",
     formula = y ~ x,
     se = FALSE,
-    color = "black",
+    color = "#253342",
     linewidth = VALIDATION_LINE_WIDTH
   ) +
   geom_text(
@@ -501,12 +501,7 @@ p_validation_side_by_side <- ggplot(
   ) +
   labs(
     x = "External AI adoption share",
-    y = "Filing-based AI adoption share",
-    caption = paste0(
-      "Filing-based adoption uses the absorbing treatment definition (ai_adopted = 1). ",
-      "Census ABS: ", ABS_QDESC, "/", ABS_QDESC_LABEL, ", ", ABS_BUSCHAR,
-      "; 2023 collection, reference period 2020-2022."
-    )
+    y = "EDGAR filing-based AI adoption share"
   ) +
   theme_minimal(base_size = VALIDATION_PLOT_BASE_SIZE) +
   theme(
@@ -531,7 +526,6 @@ analysis_sample_overview <- tibble::tibble(
     "Unique firms",
     "Years covered",
     "Treatment definition",
-    "Excluded NAICS2 sectors",
     "Included exchanges"
   ),
   value = c(
@@ -544,7 +538,6 @@ analysis_sample_overview <- tibble::tibble(
       max(panel_analysis$year, na.rm = TRUE)
     ),
     "Absorbing treatment: ai_adopted = 1 from first treatment onward",
-    paste(FINAL_ANALYSIS_EXCLUDED_NAICS2, collapse = ", "),
     paste(FINAL_ANALYSIS_INCLUDED_EXCHG, collapse = ", ")
   )
 )

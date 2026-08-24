@@ -5,13 +5,15 @@
 # ------------------------------------------------------------------------------
 # This script uses the saved post-validation final analysis panel to:
 # 1. produce the main descriptive table for outcomes and controls;
-# 2. compare firm characteristics by adoption status;
-# 3. summarise pre-treatment balance; and
-# 4. trace both AI-adoption definitions over time;
-# 5. trace mean AI scores across key NAICS2 sectors;
-# 6. compare AI adoption across the largest NAICS2 sectors;
-# 7. compare pre-treatment characteristic distributions for adopters and non-adopters; and
-# 8. compare contemporaneous firm-characteristic distributions by AI-adoption status.
+# 2. summarise and visualise the fixed-2017 HHI competition regimes;
+# 3. compare firm characteristics by adoption status;
+# 4. summarise pre-treatment balance;
+# 5. trace both AI-adoption definitions over time;
+# 6. trace mean AI scores across key NAICS2 sectors;
+# 7. compare AI adoption across the largest NAICS2 sectors;
+# 8. compare pre-treatment characteristic distributions for adopters and non-adopters;
+# 9. compare contemporaneous firm-characteristic distributions by AI-adoption status; and
+# 10. decompose treated firm-years into strong and not-yet-strong adoption.
 # ------------------------------------------------------------------------------
 
 source("code/config/global_settings.R")
@@ -27,6 +29,7 @@ SUMMARY_STATS_BUNDLE_RDS <- file.path(
   SUMMARY_STATS_OUTPUT_DIR,
   "summary_stats_bundle.rds"
 )
+FULL_PANEL_RDS <- file.path(INPUT_DIR, "compustat_ai_panel.rds")
 KEY_DISTRIBUTION_PNG <- file.path(
   SUMMARY_STATS_OUTPUT_DIR,
   "key_variable_distributions_by_adoption_status.png"
@@ -34,6 +37,14 @@ KEY_DISTRIBUTION_PNG <- file.path(
 ADOPTION_PREVALENCE_PNG <- file.path(
   SUMMARY_STATS_OUTPUT_DIR,
   "ai_adoption_prevalence_over_time.png"
+)
+ADOPTER_COMPOSITION_PNG <- file.path(
+  SUMMARY_STATS_OUTPUT_DIR,
+  "ai_adopter_composition_over_time.png"
+)
+ADOPTION_OVERVIEW_PNG <- file.path(
+  SUMMARY_STATS_OUTPUT_DIR,
+  "ai_adoption_prevalence_and_composition.png"
 )
 KEY_SECTOR_SCORE_PNG <- file.path(
   SUMMARY_STATS_OUTPUT_DIR,
@@ -47,9 +58,21 @@ ADOPTION_STATUS_DISTRIBUTION_PNG <- file.path(
   SUMMARY_STATS_OUTPUT_DIR,
   "firm_characteristic_distributions_by_ai_adoption.png"
 )
+NAICS3_HHI_HISTOGRAM_PNG <- file.path(
+  SUMMARY_STATS_OUTPUT_DIR,
+  "naics3_hhi_histogram.png"
+)
+FIRM_HHI_HISTOGRAM_PNG <- file.path(
+  SUMMARY_STATS_OUTPUT_DIR,
+  "firm_hhi_histogram.png"
+)
 
 SAVE_SUMMARY_BUNDLE <- TRUE
 SAVE_SUMMARY_FIGURES <- TRUE
+
+HHI_BASE_YEAR <- 2017L
+HHI_COMPETITION_CUTOFF <- 1800
+HHI_HISTOGRAM_BINWIDTH <- 250
 
 # Fixed sectors used for the long-run mean-score comparison. Construction is
 # retained even though its adoption rate is low because it is economically
@@ -217,9 +240,15 @@ firm_char_density_plot <- function(data, vars, labels) {
     )
 }
 
-balance_table <- function(data, vars, labels) {
-  data |>
-    mutate(balance_group = if_else(ever_treated == 1L, "treated", "control")) |>
+pre_treatment_adopter_table <- function(data, vars, labels) {
+  balance_rows <- data |>
+    mutate(
+      balance_group = if_else(
+        ever_treated == 1L,
+        "ever_treated",
+        "never_treated"
+      )
+    ) |>
     select(balance_group, all_of(vars)) |>
     pivot_longer(
       cols = all_of(vars),
@@ -239,23 +268,58 @@ balance_table <- function(data, vars, labels) {
       names_glue = "{balance_group}_{.value}"
     ) |>
     mutate(
-      diff = treated_mean - control_mean,
-      diff_se = sqrt((treated_sd^2 / treated_n) + (control_sd^2 / control_n)),
-      p_value = 2 * pnorm(-abs(diff / diff_se)),
+      variable_order = match(characteristic, vars),
+      diff = ever_treated_mean - never_treated_mean,
+      pooled_sd = sqrt(
+        (
+          (never_treated_n - 1L) * never_treated_sd^2 +
+            (ever_treated_n - 1L) * ever_treated_sd^2
+        ) /
+          (never_treated_n + ever_treated_n - 2L)
+      ),
+      normalized_diff = if_else(
+        is.finite(pooled_sd) & pooled_sd > 0,
+        diff / pooled_sd,
+        NA_real_
+      ),
       characteristic = recode(characteristic, !!!labels)
     ) |>
+    arrange(variable_order) |>
     rename(
-      Characteristic = characteristic,
-      N_control = control_n,
-      N_treated = treated_n,
-      Mean_control = control_mean,
-      Mean_treated = treated_mean,
-      Diff_treated_minus_control = diff,
-      SE_diff = diff_se,
-      SD_control = control_sd,
-      SD_treated = treated_sd
+      `Variable (pre-treatment)` = characteristic,
+      `Never-treated (mean)` = never_treated_mean,
+      `Ever-treated (mean)` = ever_treated_mean,
+      Diff = diff,
+      `Norm. diff` = normalized_diff
+    ) |>
+    select(
+      `Variable (pre-treatment)`,
+      `Never-treated (mean)`,
+      `Ever-treated (mean)`,
+      Diff,
+      `Norm. diff`
     ) |>
     round_numeric_cols()
+
+  # The final N row reports the full treatment-group roster. Variable means
+  # use the available exact baseline observations; the separate baseline audit
+  # reports firms for which an exact g-1 row is unavailable.
+  group_counts <- data |>
+    count(ever_treated, name = "n_firms")
+
+  never_treated_n <- group_counts$n_firms[group_counts$ever_treated == 0L]
+  ever_treated_n <- group_counts$n_firms[group_counts$ever_treated == 1L]
+
+  bind_rows(
+    balance_rows,
+    tibble::tibble(
+      `Variable (pre-treatment)` = "N (firms)",
+      `Never-treated (mean)` = as.numeric(never_treated_n),
+      `Ever-treated (mean)` = as.numeric(ever_treated_n),
+      Diff = NA_real_,
+      `Norm. diff` = NA_real_
+    )
+  )
 }
 
 
@@ -266,10 +330,55 @@ if (!file.exists(ANALYSIS_PANEL_RDS)) {
     ". Run 4. build_or_load_panel_data.R first."
   )
 }
+if (!file.exists(FULL_PANEL_RDS)) {
+  stop(
+    "Full Compustat-AI panel not found: ", FULL_PANEL_RDS,
+    ". Run 3. get_panel_data/2. build_compustat_ai_panel.R first."
+  )
+}
+
+# Construct contemporaneous sales-based NAICS3 HHI using the full Compustat
+# market denominator, consistent with the project's HHI analysis. HHI is on
+# the conventional 0--10,000 scale.
+full_panel_hhi_source <- readRDS(FULL_PANEL_RDS) |>
+  transmute(
+    cik = as.character(cik),
+    year = as.integer(year),
+    naics3 = as.character(naics3),
+    sale = as.numeric(sale)
+  )
+
+hhi_naics3_by_year <- full_panel_hhi_source |>
+  filter(
+    !is.na(year),
+    year >= ANALYSIS_START_YEAR,
+    year <= ANALYSIS_END_YEAR,
+    !is.na(naics3),
+    nzchar(naics3),
+    is.finite(sale),
+    sale > 0
+  ) |>
+  group_by(year, naics3) |>
+  summarise(
+    hhi_naics3 = sum((100 * sale / sum(sale))^2),
+    .groups = "drop"
+  )
+
+if (
+  nrow(hhi_naics3_by_year) == 0L ||
+  any(!is.finite(hhi_naics3_by_year$hhi_naics3)) ||
+  any(hhi_naics3_by_year$hhi_naics3 <= 0) ||
+  any(hhi_naics3_by_year$hhi_naics3 > 10000 + 1e-8)
+) {
+  stop("NAICS3 HHI construction failed: values must lie in (0, 10,000].")
+}
 
 panel_summary <- readRDS(ANALYSIS_PANEL_RDS) |>
   mutate(
+    cik = as.character(cik),
     year = as.integer(year),
+    naics3 = as.character(naics3),
+    rd_reporter = as.integer(rd_reporter),
     repurchases = case_when(
       is.na(prstkc) ~ 0,
       prstkc < 0 ~ NA_real_,
@@ -292,6 +401,10 @@ panel_summary <- readRDS(ANALYSIS_PANEL_RDS) |>
     !is.na(year),
     year >= ANALYSIS_START_YEAR,
     year <= ANALYSIS_END_YEAR
+  ) |>
+  left_join(
+    hhi_naics3_by_year,
+    by = c("year", "naics3")
   )
 
 
@@ -300,7 +413,42 @@ panel_score_summary <- panel_summary |>
 
 # ---- Main descriptive table ---------------------------------------------------
 overall_var_labels <- c(
-  ai_adopted = "AI adopted (binary)",
+  emp = "Employment (000s)",
+  sale = "Sales ($m)",
+  xopr = "Operating costs ($m)",
+  labor_productivity = "Labour productivity (sales/emp)",
+  operating_profitability_w = "Operating profit (OIBDP/assets)",
+  at = "Total assets ($m)",
+  firm_age = "Firm age (years)",
+  cash_ratio = "Cash ratio",
+  leverage = "Leverage",
+  roa = "ROA",
+  capx_intensity_y_w = "CAPX intensity",
+  rd_intensity_y_w = "R&D intensity",
+  rd_reporter = "R&D reporter (0/1)",
+  hhi_naics3 = "HHI (NAICS3)",
+  ai_score = "AI adoption score (1/2/3)"
+)
+
+overall_var_sections <- c(
+  emp = "Outcomes",
+  sale = "Outcomes",
+  xopr = "Outcomes",
+  labor_productivity = "Outcomes",
+  operating_profitability_w = "Outcomes",
+  at = "Covariates",
+  firm_age = "Covariates",
+  cash_ratio = "Covariates",
+  leverage = "Covariates",
+  roa = "Covariates",
+  capx_intensity_y_w = "Covariates",
+  rd_intensity_y_w = "Covariates",
+  rd_reporter = "Covariates",
+  hhi_naics3 = "Covariates",
+  ai_score = "AI measure"
+)
+
+firm_char_var_labels <- c(
   aiie = "Industry AI exposure (AIIE)",
   log_at = "Firm size (log assets)",
   log_market_cap = "Market value (log)",
@@ -323,13 +471,395 @@ overall_summary <- descriptive_table(
   panel_summary,
   names(overall_var_labels),
   overall_var_labels
+) |>
+  mutate(
+    summary_order = match(Variable, unname(overall_var_labels)),
+    Section = unname(
+      overall_var_sections[names(overall_var_labels)[summary_order]]
+    ),
+    .before = Variable
+  ) |>
+  arrange(summary_order) |>
+  select(-summary_order)
+
+
+# ---- Competition regime summary ----------------------------------------------
+# Match the HHI heterogeneity design: assign each firm to its fixed 2017 NAICS3
+# market and classify that market using its 2017 sales-based HHI.
+hhi_base_year <- hhi_naics3_by_year |>
+  filter(year == HHI_BASE_YEAR) |>
+  transmute(
+    baseline_naics3 = naics3,
+    hhi_base = hhi_naics3
+  )
+
+firm_baseline_market <- full_panel_hhi_source |>
+  filter(
+    year == HHI_BASE_YEAR,
+    !is.na(cik), cik != "",
+    !is.na(naics3), naics3 != ""
+  ) |>
+  transmute(
+    cik,
+    baseline_naics3 = naics3
+  )
+
+if (
+  anyDuplicated(hhi_base_year$baseline_naics3) ||
+  anyDuplicated(firm_baseline_market$cik)
+) {
+  stop("Fixed-2017 HHI lookup contains duplicate market or firm keys.")
+}
+
+competition_regime_firm_assignment <- panel_summary |>
+  distinct(cik) |>
+  left_join(firm_baseline_market, by = "cik") |>
+  left_join(hhi_base_year, by = "baseline_naics3") |>
+  mutate(
+    competition_regime = case_when(
+      !is.finite(hhi_base) ~ NA_character_,
+      hhi_base <= HHI_COMPETITION_CUTOFF ~ "high_competition",
+      hhi_base > HHI_COMPETITION_CUTOFF ~ "low_competition"
+    ),
+    competition_regime = factor(
+      competition_regime,
+      levels = c("high_competition", "low_competition")
+    )
+  )
+
+competition_regime_coverage <- competition_regime_firm_assignment |>
+  summarise(
+    analysis_firms = n(),
+    classified_firms = sum(!is.na(competition_regime)),
+    unclassified_firms = sum(is.na(competition_regime)),
+    classified_share = classified_firms / analysis_firms
+  )
+
+competition_regime_panel <- panel_summary |>
+  inner_join(
+    competition_regime_firm_assignment |>
+      filter(!is.na(competition_regime)) |>
+      select(cik, baseline_naics3, hhi_base, competition_regime),
+    by = "cik"
+  )
+
+competition_regime_firm_stats <- competition_regime_panel |>
+  distinct(cik, competition_regime, baseline_naics3, hhi_base) |>
+  group_by(competition_regime) |>
+  summarise(
+    n_firms = n(),
+    mean_hhi = mean(hhi_base),
+    median_hhi = median(hhi_base),
+    n_naics3_markets = n_distinct(baseline_naics3),
+    .groups = "drop"
+  )
+
+competition_regime_stats <- competition_regime_panel |>
+  group_by(competition_regime) |>
+  summarise(
+    n_firm_years = n(),
+    ai_adoption_rate_pct = 100 * mean(ai_adopted == 1L),
+    mean_log_assets = safe_mean(log_at),
+    .groups = "drop"
+  ) |>
+  left_join(
+    competition_regime_firm_stats,
+    by = "competition_regime"
+  ) |>
+  mutate(share_firms = n_firms / sum(n_firms))
+
+if (
+  nrow(competition_regime_stats) != 2L ||
+  any(!is.finite(competition_regime_stats$mean_hhi)) ||
+  abs(sum(competition_regime_stats$share_firms) - 1) > 1e-10
+) {
+  stop("Competition-regime summary failed its coverage or share QA.")
+}
+
+competition_regime_stat_labels <- c(
+  n_firms = "N firms",
+  share_firms = "Share of firms",
+  n_firm_years = "N firm-years",
+  mean_hhi = "Mean HHI",
+  median_hhi = "Median HHI",
+  n_naics3_markets = "N NAICS3 markets",
+  ai_adoption_rate_pct = "AI adoption rate (%)",
+  mean_log_assets = "Mean firm size (log assets)"
 )
 
-firm_chars <- setdiff(names(overall_var_labels), "ai_adopted")
+competition_regime_summary <- competition_regime_stats |>
+  select(
+    competition_regime,
+    all_of(names(competition_regime_stat_labels))
+  ) |>
+  pivot_longer(
+    cols = -competition_regime,
+    names_to = "statistic",
+    values_to = "value"
+  ) |>
+  mutate(
+    statistic_order = match(
+      statistic,
+      names(competition_regime_stat_labels)
+    ),
+    statistic = recode(statistic, !!!competition_regime_stat_labels)
+  ) |>
+  arrange(statistic_order) |>
+  select(-statistic_order) |>
+  pivot_wider(
+    names_from = competition_regime,
+    values_from = value
+  ) |>
+  rename(
+    Statistic = statistic,
+    `High competition (HHI ≤ 1,800)` = high_competition,
+    `Low competition (HHI > 1,800)` = low_competition
+  ) |>
+  round_numeric_cols()
+
+hhi_histogram_data <- competition_regime_panel |>
+  distinct(baseline_naics3, hhi_base, competition_regime) |>
+  mutate(
+    competition_regime = factor(
+      competition_regime,
+      levels = c("high_competition", "low_competition"),
+      labels = c(
+        "High competition (HHI ≤ 1,800)",
+        "Low competition (HHI > 1,800)"
+      )
+    )
+  )
+
+if (
+  nrow(hhi_histogram_data) !=
+    sum(competition_regime_stats$n_naics3_markets)
+) {
+  stop("HHI histogram data must contain one row per classified NAICS3 market.")
+}
+
+hhi_histogram_plot <- function(
+  data,
+  title,
+  subtitle,
+  y_label,
+  grey_bars = FALSE
+) {
+  competition_region_data <- tibble(
+    competition_regime = factor(
+      c(
+        "High competition (HHI ≤ 1,800)",
+        "Low competition (HHI > 1,800)"
+      ),
+      levels = levels(data$competition_regime)
+    ),
+    xmin = c(0, HHI_COMPETITION_CUTOFF),
+    xmax = c(HHI_COMPETITION_CUTOFF, 10000),
+    ymin = -Inf,
+    ymax = Inf
+  )
+
+  competition_region_layer <- if (grey_bars) {
+    geom_rect(
+      data = competition_region_data,
+      aes(
+        xmin = xmin,
+        xmax = xmax,
+        ymin = ymin,
+        ymax = ymax,
+        fill = competition_regime
+      ),
+      inherit.aes = FALSE,
+      alpha = 0.45
+    )
+  } else {
+    list(
+      annotate(
+        "rect",
+        xmin = 0,
+        xmax = HHI_COMPETITION_CUTOFF,
+        ymin = -Inf,
+        ymax = Inf,
+        fill = "#D9EEF7",
+        alpha = 0.45
+      ),
+      annotate(
+        "rect",
+        xmin = HHI_COMPETITION_CUTOFF,
+        xmax = 10000,
+        ymin = -Inf,
+        ymax = Inf,
+        fill = "#F9DEDE",
+        alpha = 0.45
+      )
+    )
+  }
+
+  histogram_layer <- if (grey_bars) {
+    geom_histogram(
+      fill = "grey65",
+      binwidth = HHI_HISTOGRAM_BINWIDTH,
+      boundary = HHI_COMPETITION_CUTOFF %% HHI_HISTOGRAM_BINWIDTH,
+      colour = "white",
+      linewidth = 0.3,
+      alpha = 0.9,
+      show.legend = FALSE
+    )
+  } else {
+    geom_histogram(
+      aes(fill = competition_regime),
+      binwidth = HHI_HISTOGRAM_BINWIDTH,
+      boundary = HHI_COMPETITION_CUTOFF %% HHI_HISTOGRAM_BINWIDTH,
+      colour = "white",
+      linewidth = 0.3,
+      alpha = 0.9
+    )
+  }
+
+  competition_colours <- if (grey_bars) {
+    c(
+      "High competition (HHI ≤ 1,800)" = "#D9EEF7",
+      "Low competition (HHI > 1,800)" = "#F9DEDE"
+    )
+  } else {
+    c(
+      "High competition (HHI ≤ 1,800)" = "#9ECAE1",
+      "Low competition (HHI > 1,800)" = "#F4A6A6"
+    )
+  }
+
+  competition_region_label_layer <- if (grey_bars) {
+    list(
+      annotate(
+        "text",
+        x = 250,
+        y = Inf,
+        label = "High competition",
+        hjust = 0,
+        vjust = 1.35,
+     #   fontface = "bold",
+        size = 3.8
+      ),
+      annotate(
+        "text",
+        x = 9750,
+        y = Inf,
+        label = "Low competition",
+        hjust = 1,
+        vjust = 1.35,
+   #     fontface = "bold",
+        size = 3.8
+      )
+    )
+  } else {
+    NULL
+  }
+
+  ggplot(data, aes(x = hhi_base)) +
+    competition_region_layer +
+    histogram_layer +
+    geom_vline(
+      xintercept = HHI_COMPETITION_CUTOFF,
+      colour = "black",
+      linewidth = 0.8,
+      linetype = "dashed"
+    ) +
+    annotate(
+      "text",
+      x = HHI_COMPETITION_CUTOFF,
+      y = Inf,
+      label = "HHI = 1,800",
+      hjust = -0.08,
+      vjust = 1.35,
+      size = 3.6
+    ) +
+    competition_region_label_layer +
+    scale_fill_manual(
+      values = competition_colours,
+      name = NULL
+    ) +
+    guides(
+      fill = if (grey_bars) {
+        "none"
+      } else {
+        guide_legend(
+          override.aes = list(
+            alpha = 0.9,
+            colour = NA
+          )
+        )
+      }
+    ) +
+    scale_x_continuous(
+      breaks = c(0, HHI_COMPETITION_CUTOFF, 4000, 6000, 8000, 10000),
+      labels = scales::label_comma(),
+      expand = expansion(mult = c(0, 0.01))
+    ) +
+    scale_y_continuous(
+      breaks = scales::breaks_pretty(n = 6),
+      expand = expansion(mult = c(0, 0.08))
+    ) +
+    labs(
+  #    title = title,
+      subtitle = subtitle,
+      x = "NAICS3 sales HHI",
+      y = y_label
+    ) +
+    coord_cartesian(xlim = c(0, 10000), clip = "off") +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "bottom",
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank()
+    )
+}
+
+p_naics3_hhi_histogram <- hhi_histogram_plot(
+  hhi_histogram_data,
+  title = "Distribution of 2017 NAICS3 market concentration",
+  subtitle = paste0(
+    "Sales-based HHI across classified markets; dashed line marks the ",
+    "competition-regime cutoff"
+  ),
+  y_label = "Number of NAICS3 markets"
+)
+
+hhi_firm_histogram_data <- competition_regime_firm_assignment |>
+  filter(!is.na(competition_regime)) |>
+  transmute(
+    cik,
+    hhi_base,
+    competition_regime = factor(
+      competition_regime,
+      levels = c("high_competition", "low_competition"),
+      labels = c(
+        "High competition (HHI ≤ 1,800)",
+        "Low competition (HHI > 1,800)"
+      )
+    )
+  )
+
+if (
+  anyDuplicated(hhi_firm_histogram_data$cik) ||
+  nrow(hhi_firm_histogram_data) != competition_regime_coverage$classified_firms
+) {
+  stop("Firm-level HHI histogram data must contain one row per classified firm.")
+}
+
+p_firm_hhi_histogram <- hhi_histogram_plot(
+  hhi_firm_histogram_data,
+#  title = "Distribution of 2017 NAICS3 market concentration across firms",
+  subtitle = paste0(
+    "Grey bars show firms; shaded regions define the competition regimes"
+  ),
+  y_label = "Number of firms",
+  grey_bars = TRUE
+)
+
+firm_chars <- names(firm_char_var_labels)
 firm_char_summary <- group_summary_table(
   panel_summary,
   firm_chars,
-  overall_var_labels[firm_chars]
+  firm_char_var_labels
 )
 
 firm_char_summary_wide <- firm_char_summary |>
@@ -352,19 +882,30 @@ ai_adoption_prevalence_by_year <- panel_summary |>
   group_by(year) |>
   summarise(
     n_firm_years = n(),
-    `AI adoption ≥ 2` = mean(ai_adopted == 1L),
-    `Strong AI adoption = 3` = mean(ai_adopted3 == 1L),
+    `Any adoption (≥2)` = mean(ai_adopted == 1L),
+    `Limited (=2)` = mean(
+      ai_adopted == 1L & ai_adopted3 == 0L
+    ),
+    `Strong (=3)` = mean(ai_adopted3 == 1L),
     .groups = "drop"
   ) |>
   pivot_longer(
-    cols = c(`AI adoption ≥ 2`, `Strong AI adoption = 3`),
+    cols = c(
+      `Any adoption (≥2)`,
+      `Limited (=2)`,
+      `Strong (=3)`
+    ),
     names_to = "adoption_definition",
     values_to = "share_firm_years"
   ) |>
   mutate(
     adoption_definition = factor(
       adoption_definition,
-      levels = c("AI adoption ≥ 2", "Strong AI adoption = 3")
+      levels = c(
+        "Any adoption (≥2)",
+        "Limited (=2)",
+        "Strong (=3)"
+      )
     )
   )
 
@@ -377,17 +918,21 @@ p_ai_adoption_prevalence <- ggplot(
   )
 ) +
   geom_line(linewidth = 1) +
-  geom_point(size = 2.2) +
+  geom_point(
+    size = 2.2
+  ) +
   scale_colour_manual(
     values = c(
-      "AI adoption ≥ 2" = "#12436D",
-      "Strong AI adoption = 3" = "#F46A25"
+      "Any adoption (≥2)" = "#28A197",
+      "Limited (=2)" = "black",
+      "Strong (=3)" = "#C20E35"
     ),
     name = NULL
   ) +
   scale_x_continuous(
     breaks = sort(unique(ai_adoption_prevalence_by_year$year)),
-    expand = expansion(mult = c(0.015, 0.015))
+    expand = expansion(mult = c(0.015, 0.015)),
+    guide = guide_axis(check.overlap = TRUE)
   ) +
   scale_y_continuous(
     labels = scales::percent_format(accuracy = 1),
@@ -396,8 +941,8 @@ p_ai_adoption_prevalence <- ggplot(
     expand = expansion(mult = c(0, 0.06))
   ) +
   labs(
-    title = "AI adoption prevalence over time",
-    subtitle = "The two treatment definitions used in the empirical analysis",
+  #  title = "AI adoption prevalence over time",
+  #  subtitle = "The two treatment definitions used in the empirical analysis",
     x = NULL,
     y = "Share of firm-years"
   ) +
@@ -407,6 +952,118 @@ p_ai_adoption_prevalence <- ggplot(
     panel.grid.minor = element_blank(),
     panel.grid.major.x = element_blank()
   )
+
+
+# ---- Composition of AI adopters over time ------------------------------------
+# The denominator here differs from the prevalence graph: it contains only
+# firm-years already treated under the main AI-adoption definition. Because the
+# treatment measures are absorbing, the first category is intentionally not
+# labelled "Score 2"; it identifies firms that have adopted but have not yet
+# reached the strong-adoption threshold.
+ai_adopter_composition_by_year <- panel_summary |>
+  filter(
+    ai_adopted == 1L,
+    !is.na(ai_adopted3)
+  ) |>
+  mutate(
+    adopter_status = if_else(
+      ai_adopted3 == 1L,
+      "Strong (=3)",
+      "Limited (=2)"
+    ),
+    adopter_status = factor(
+      adopter_status,
+      levels = c(
+        "Limited (=2)",
+        "Strong (=3)"
+      )
+    )
+  ) |>
+  count(year, adopter_status, name = "n_firm_years", .drop = FALSE) |>
+  group_by(year) |>
+  mutate(
+    n_ai_adopter_firm_years = sum(n_firm_years),
+    share_ai_adopters = n_firm_years / n_ai_adopter_firm_years
+  ) |>
+  ungroup()
+
+composition_qa <- ai_adopter_composition_by_year |>
+  group_by(year) |>
+  summarise(
+    n_statuses = n(),
+    share_sum = sum(share_ai_adopters),
+    .groups = "drop"
+  )
+
+if (
+  nrow(composition_qa) == 0L ||
+  any(composition_qa$n_statuses != 2L) ||
+  any(abs(composition_qa$share_sum - 1) > 1e-10)
+) {
+  stop("AI-adopter composition QA failed: yearly shares must sum to one.")
+}
+
+p_ai_adopter_composition <- ggplot(
+  ai_adopter_composition_by_year,
+  aes(
+    x = year,
+    y = share_ai_adopters,
+    fill = adopter_status
+  )
+) +
+  geom_col(
+    width = 0.78
+  ) +
+#  geom_text(
+#    aes(label = scales::percent(share_ai_adopters, accuracy = 1)),
+#    position = position_stack(vjust = 0.5),
+#    colour = "white",
+#    size = 3.2,
+#    fontface = "bold",
+#    show.legend = FALSE
+#  ) +
+  scale_fill_manual(
+    values = c(
+      "Limited (=2)" = "#12436D",
+      "Strong (=3)" = "#C20E35"
+    ),
+    name = NULL
+  ) +
+  scale_x_continuous(
+    breaks = sort(unique(ai_adopter_composition_by_year$year)),
+    expand = expansion(mult = c(0.015, 0.015)),
+    guide = guide_axis(check.overlap = TRUE)
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    breaks = seq(0, 1, by = 0.2),
+    limits = c(0, 1),
+    expand = expansion(mult = c(0, 0))
+  ) +
+  labs(
+    title = NULL,
+    subtitle = "Share of treated firms",
+    x = NULL,
+    y = "Share of AI-adopting firm-years"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    legend.box = "vertical",
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+
+p_ai_adoption_overview <- patchwork::wrap_plots( 
+  p_ai_adoption_prevalence + 
+    labs( title = NULL, subtitle = "Share of firms" ),
+  p_ai_adopter_composition + 
+    labs( title = NULL, subtitle = "Share of treated firms" ) + 
+    guides(fill = "none"), 
+  ncol = 2, 
+  widths = c(1, 1), 
+  guides = "collect" ) &
+  theme(legend.position = "bottom")
 
 
 # ---- Mean AI score across key sectors ----------------------------------------
@@ -443,7 +1100,7 @@ key_sector_end_labels <- key_sector_score_by_year |>
 
 p_mean_ai_score_by_key_sector <- ggplot(
   key_sector_score_by_year,
-  aes(x = year, y = mean_ai_score, colour = sector_label)
+  aes(x = year, y = share_ai_adopted, colour = sector_label)
 ) +
   geom_line(linewidth = 0.9) +
   geom_point(size = 2) +
@@ -461,7 +1118,7 @@ p_mean_ai_score_by_key_sector <- ggplot(
   ) +
   scale_y_continuous(
     breaks = scales::breaks_pretty(n = 6),
-    limits = c(1, NA),
+    limits = c(0, 1),
     expand = expansion(mult = c(0, 0.05))
   ) +
   scale_colour_manual(values = c(
@@ -470,17 +1127,17 @@ p_mean_ai_score_by_key_sector <- ggplot(
     "Education" = "#AF0000",
     "Mining" = "#A6761D",
     "Information" = "#1B9E77",
-    "Professional & Scientific" = "#E6CC00",
+    "Professional & Scientific" = "#3D3D3D",
     "Health Care" = "#7570B3",
     "Manufacturing" = "#E7298A",
     "Retail Trade" = "#66A61E",
     "Construction" = "#666666"
   )) +
   labs(
-    title = "Mean AI-adoption score across key sectors",
-    subtitle = "Mean filing-level score among firm-years with an observed AI score",
+#    title = "Share AI-adoption across key sectors",
+#    subtitle = "Share firm-years with an observed AI score",
     x = "Year",
-    y = "Mean AI score (1–3)"
+    y = "Share of firm-years"
   ) +
   coord_cartesian(clip = "off") +
   theme_minimal(base_size = 12) +
@@ -491,7 +1148,7 @@ p_mean_ai_score_by_key_sector <- ggplot(
   )
 
 # ---- AI adoption across major industries -------------------------------------
-industry_comparison_end_year <- max(panel_summary$year, na.rm = TRUE) - 1
+industry_comparison_end_year <- max(panel_summary$year, na.rm = TRUE)
 industry_comparison_start_year <- max(min(panel_summary$year, na.rm = TRUE),2022)
 
 industry_adoption_summary <- panel_summary |>
@@ -539,17 +1196,17 @@ p_ai_adoption_by_industry <- ggplot(
     lineend = "round"
   ) +
   geom_point(
-    aes(x = share_ai_adoption, colour = "AI adoption ≥ 2"),
+    aes(x = share_ai_adoption, colour = "Any adoption (≥2)"),
     size = 3
   ) +
   geom_point(
-    aes(x = share_strong_ai_adoption, colour = "Strong AI adoption = 3"),
+    aes(x = share_strong_ai_adoption, colour = "Strong (=3)"),
     size = 3
   ) +
   scale_colour_manual(
     values = c(
-      "AI adoption ≥ 2" = "#12436D",
-      "Strong AI adoption = 3" = "#F46A25"
+      "Any adoption (≥2)" = "#12436D",
+      "Strong (=3)" = "#7A1F3D"
     ),
     name = NULL
   ) +
@@ -581,23 +1238,110 @@ p_ai_adoption_by_industry <- ggplot(
 
 
 # ---- Pre-treatment balance ----------------------------------------------------
-pre_treatment_balance_data <- panel_summary |>
+PRE_TREATMENT_BALANCE_LABELS <- c(
+  log_at = "Total assets (log)",
+  firm_age = "Firm age",
+  cash_ratio = "Cash ratio",
+  leverage = "Leverage",
+  roa = "ROA",
+  capx_intensity_y_w = "CAPX intensity",
+  rd_intensity_y_w = "R&D intensity",
+  rd_reporter = "R&D reporter",
+  labor_productivity = "Labour productivity",
+  emp = "Employment",
+  sale = "Sales",
+  hhi_naics3 = "HHI (NAICS3)"
+)
+
+pre_treatment_firm_roster <- panel_summary |>
   filter(
     !is.na(cik), cik != "",
     !is.na(year),
-    !is.na(ai_adoption_year),
-    ai_adoption_year == 0L | year < ai_adoption_year
+    !is.na(ai_adoption_year)
   ) |>
-  group_by(cik, ever_treated) |>
+  group_by(cik) |>
   summarise(
-    across(all_of(firm_chars), safe_mean),
+    ai_adoption_year = first(ai_adoption_year),
+    n_adoption_year_values = n_distinct(ai_adoption_year),
+    first_observed_year = min(year),
+    .groups = "drop"
+  ) |>
+  mutate(
+    ever_treated = as.integer(ai_adoption_year > 0L),
+    baseline_year = if_else(
+      ever_treated == 1L,
+      ai_adoption_year - 1L,
+      first_observed_year
+    )
+  )
+
+if (any(pre_treatment_firm_roster$n_adoption_year_values != 1L)) {
+  stop("Each firm must have one consistent AI-adoption year.")
+}
+
+pre_treatment_baseline_values <- panel_summary |>
+  transmute(
+    cik,
+    baseline_year = year,
+    across(all_of(names(PRE_TREATMENT_BALANCE_LABELS))),
+    # Match the determinant analysis: non-reporters have zero R&D intensity,
+    # while the reporter indicator separately captures the disclosure margin.
+    rd_intensity_y_w = if_else(
+      rd_reporter == 0L,
+      0,
+      rd_intensity_y_w
+    ),
+    baseline_observed = TRUE
+  )
+
+pre_treatment_balance_data <- pre_treatment_firm_roster |>
+  select(
+    cik,
+    ai_adoption_year,
+    ever_treated,
+    first_observed_year,
+    baseline_year
+  ) |>
+  left_join(
+    pre_treatment_baseline_values,
+    by = c("cik", "baseline_year")
+  ) |>
+  mutate(baseline_observed = coalesce(baseline_observed, FALSE))
+
+if (
+  anyDuplicated(pre_treatment_balance_data$cik) ||
+  nrow(pre_treatment_balance_data) != nrow(pre_treatment_firm_roster) ||
+  any(
+    pre_treatment_balance_data$baseline_observed &
+      pre_treatment_balance_data$ever_treated == 1L &
+      pre_treatment_balance_data$baseline_year !=
+        pre_treatment_balance_data$ai_adoption_year - 1L
+  )
+) {
+  stop("Pre-treatment baseline construction failed its timing or uniqueness QA.")
+}
+
+pre_treatment_baseline_audit <- pre_treatment_balance_data |>
+  mutate(
+    adoption_group = if_else(
+      ever_treated == 1L,
+      "Ever-treated",
+      "Never-treated"
+    )
+  ) |>
+  group_by(adoption_group) |>
+  summarise(
+    n_firms = n(),
+    n_with_baseline_observation = sum(baseline_observed),
+    baseline_year_min = min(baseline_year),
+    baseline_year_max = max(baseline_year),
     .groups = "drop"
   )
 
-pre_treatment_balance <- balance_table(
+pre_treatment_balance <- pre_treatment_adopter_table(
   pre_treatment_balance_data,
-  firm_chars,
-  overall_var_labels[firm_chars]
+  names(PRE_TREATMENT_BALANCE_LABELS),
+  PRE_TREATMENT_BALANCE_LABELS
 )
 
 
@@ -641,7 +1385,10 @@ p_key_variable_distributions <- ggplot(
   ) +
   labs(
     title = "Pre-treatment distributions of key firm characteristics",
-    subtitle = "Firm-level means before first adoption; ever adopters vs never adopters",
+    subtitle = paste0(
+      "Firm-level baselines: g−1 for ever adopters; first observed year ",
+      "for never adopters"
+    ),
     x = NULL,
     y = "Density"
   ) +
@@ -655,15 +1402,27 @@ p_key_variable_distributions <- ggplot(
 # ---- Save bundle --------------------------------------------------------------
 summary_stats_bundle <- list(
   overall_summary = overall_summary,
+  competition_regime_summary = competition_regime_summary,
+  competition_regime_coverage = competition_regime_coverage,
+  competition_regime_firm_assignment = competition_regime_firm_assignment,
+  hhi_histogram_data = hhi_histogram_data,
+  p_naics3_hhi_histogram = p_naics3_hhi_histogram,
+  hhi_firm_histogram_data = hhi_firm_histogram_data,
+  p_firm_hhi_histogram = p_firm_hhi_histogram,
   firm_char_summary = firm_char_summary,
   firm_char_summary_wide = firm_char_summary_wide,
   ai_adoption_prevalence_by_year = ai_adoption_prevalence_by_year,
+  ai_adopter_composition_by_year = ai_adopter_composition_by_year,
   key_sector_score_by_year = key_sector_score_by_year,
   key_sector_overview = key_sector_overview,
   industry_adoption_summary = industry_adoption_summary,
+  pre_treatment_balance_data = pre_treatment_balance_data,
+  pre_treatment_baseline_audit = pre_treatment_baseline_audit,
   pre_treatment_balance = pre_treatment_balance,
   key_distribution_data = key_distribution_data,
   p_ai_adoption_prevalence = p_ai_adoption_prevalence,
+  p_ai_adopter_composition = p_ai_adopter_composition,
+  p_ai_adoption_overview = p_ai_adoption_overview,
   p_mean_ai_score_by_key_sector = p_mean_ai_score_by_key_sector,
   p_ai_adoption_by_industry = p_ai_adoption_by_industry,
   p_firm_char_distributions_by_adoption = p_firm_char_distributions_by_adoption,
@@ -692,6 +1451,20 @@ if (SAVE_SUMMARY_FIGURES) {
     dpi = 300
   )
   ggsave(
+    filename = ADOPTER_COMPOSITION_PNG,
+    plot = p_ai_adopter_composition,
+    width = 10,
+    height = 5.5,
+    dpi = 300
+  )
+  ggsave(
+    filename = ADOPTION_OVERVIEW_PNG,
+    plot = p_ai_adoption_overview,
+    width = 16,
+    height = 8,
+    dpi = 300
+  )
+  ggsave(
     filename = KEY_SECTOR_SCORE_PNG,
     plot = p_mean_ai_score_by_key_sector,
     width = 11,
@@ -712,6 +1485,20 @@ if (SAVE_SUMMARY_FIGURES) {
     height = 8,
     dpi = 300
   )
+  ggsave(
+    filename = NAICS3_HHI_HISTOGRAM_PNG,
+    plot = p_naics3_hhi_histogram,
+    width = 10,
+    height = 5.5,
+    dpi = 300
+  )
+  ggsave(
+    filename = FIRM_HHI_HISTOGRAM_PNG,
+    plot = p_firm_hhi_histogram,
+    width = 10,
+    height = 5.5,
+    dpi = 300
+  )
 }
 
 
@@ -727,7 +1514,11 @@ if (SAVE_SUMMARY_BUNDLE) {
 if (SAVE_SUMMARY_FIGURES) {
   cat("Saved key distribution figure to:", KEY_DISTRIBUTION_PNG, "\n")
   cat("Saved AI-adoption prevalence figure to:", ADOPTION_PREVALENCE_PNG, "\n")
+  cat("Saved AI-adopter composition figure to:", ADOPTER_COMPOSITION_PNG, "\n")
+  cat("Saved combined AI-adoption figure to:", ADOPTION_OVERVIEW_PNG, "\n")
   cat("Saved key-sector mean-score figure to:", KEY_SECTOR_SCORE_PNG, "\n")
   cat("Saved industry-adoption figure to:", INDUSTRY_ADOPTION_PNG, "\n")
   cat("Saved adoption-status distribution figure to:", ADOPTION_STATUS_DISTRIBUTION_PNG, "\n")
+  cat("Saved NAICS3 HHI histogram to:", NAICS3_HHI_HISTOGRAM_PNG, "\n")
+  cat("Saved firm-level HHI histogram to:", FIRM_HHI_HISTOGRAM_PNG, "\n")
 }
