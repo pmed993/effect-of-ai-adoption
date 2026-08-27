@@ -43,6 +43,10 @@ DETERMINANTS_SAMPLE_AUDIT_CSV <- file.path(
   DETERMINANTS_OUTPUT_DIR,
   "ai_adoption_lpm_sample_audit.csv"
 )
+DETERMINANTS_RD_MISSINGNESS_AUDIT_CSV <- file.path(
+  DETERMINANTS_OUTPUT_DIR,
+  "ai_adoption_rd_missingness_audit.csv"
+)
 
 SAVE_DETERMINANTS_OUTPUTS <- TRUE
 
@@ -54,6 +58,9 @@ MIN_MODEL_ADOPTION_YEAR <- 2016L
 # R&D intensities were already winsorized before their lags were constructed.
 WINSOR_PROBS <- c(0.01, 0.99)
 
+# Use the same significance convention as the DiD and competition tables.
+SIGNIFICANCE_CODES <- c("***" = 0.01, "**" = 0.05, "*" = 0.10)
+
 
 # ---- Model variables ----------------------------------------------------------
 var_labels <- c(
@@ -62,7 +69,7 @@ var_labels <- c(
   cash_ratio_l1 = "Cash ratio (t-1)",
   leverage_l1_w = "Leverage (t-1, winsorized)",
   capx_intensity_l1 = "CAPX intensity (t-1)",
-  rd_intensity_l1_filled = "R&D intensity (t-1)",
+  rd_intensity_l1_filled = "R&D intensity (t-1; 0 if non-reporter)",
   rd_reporter_l1 = "R&D reporter (t-1)",
   log_labor_productivity_l1 = "Labour productivity (log, t-1)",
   firm_age_l1 = "Firm age (years, t-1)"
@@ -82,7 +89,7 @@ univariate_column_labels <- c(
   cash_ratio_l1 = "Cash ratio",
   leverage_l1_w = "Leverage",
   capx_intensity_l1 = "CAPX intensity",
-  rd_intensity_l1_filled = "R&D intensity",
+  rd_intensity_l1_filled = "R&D intensity (0 if non-reporter)",
   rd_reporter_l1 = "R&D reporter",
   log_labor_productivity_l1 = "Labour productivity",
   firm_age_l1 = "Firm age"
@@ -113,10 +120,9 @@ build_lpm_formula <- function(rhs_vars) {
 
 significance_stars <- function(p_value) {
   case_when(
-    p_value < 0.001 ~ "***",
-    p_value < 0.01 ~ "**",
-    p_value < 0.05 ~ "*",
-    p_value < 0.10 ~ ".",
+    p_value < SIGNIFICANCE_CODES[["***"]] ~ "***",
+    p_value < SIGNIFICANCE_CODES[["**"]] ~ "**",
+    p_value < SIGNIFICANCE_CODES[["*"]] ~ "*",
     TRUE ~ ""
   )
 }
@@ -235,6 +241,21 @@ summarise_model_sample <- function(model, model_name, model_type, source_data) {
     n_first_adoptions = sum(model_data$first_adopt),
     first_year = min(model_data$year),
     last_year = max(model_data$year)
+  )
+}
+
+summarise_rd_missingness <- function(data, sample) {
+  tibble(
+    sample,
+    firm_years = nrow(data),
+    reported_intensity_observed = sum(
+      data$rd_reporter_l1 == 1L & !is.na(data$rd_intensity_l1)
+    ),
+    nonreporters_zero_filled = sum(data$rd_reporter_l1 == 0L),
+    reporter_intensity_undefined = sum(
+      data$rd_reporter_l1 == 1L & is.na(data$rd_intensity_l1)
+    ),
+    filled_intensity_nonmissing = sum(!is.na(data$rd_intensity_l1_filled))
   )
 }
 
@@ -420,6 +441,34 @@ det_panel <- risk_panel_before_lag_filter |>
       )
   )
 
+# Compustat non-reporting is treated as a distinct disclosure margin. Set the
+# lagged intensity to zero only when lagged XRD is not reported and include the
+# reporter indicator separately. If XRD is reported but the ratio is undefined
+# (for example, because beginning assets are unavailable or non-positive), keep
+# the intensity missing; those rows are excluded whenever the intensity enters.
+if (
+  anyNA(det_panel$rd_reporter_l1) ||
+  any(
+    det_panel$rd_reporter_l1 == 0L &
+      (
+        is.na(det_panel$rd_intensity_l1_filled) |
+          det_panel$rd_intensity_l1_filled != 0
+      )
+  ) ||
+  any(
+    det_panel$rd_reporter_l1 == 1L &
+      is.na(det_panel$rd_intensity_l1) !=
+        is.na(det_panel$rd_intensity_l1_filled)
+  ) ||
+  any(
+    det_panel$rd_reporter_l1 == 1L &
+      !is.na(det_panel$rd_intensity_l1) &
+      det_panel$rd_intensity_l1 != det_panel$rd_intensity_l1_filled
+  )
+) {
+  stop("R&D non-reporter zero-fill rule failed its QA check.")
+}
+
 event_counts <- det_panel |>
   filter(first_adopt == 1L) |>
   count(cik, name = "n_events")
@@ -456,6 +505,11 @@ joint_model_panel <- det_panel[fixest::obs(joint_model), , drop = FALSE]
 if (sum(joint_model_panel$first_adopt) == 0L) {
   stop("The joint determinants sample contains no first-adoption events.")
 }
+
+rd_missingness_audit <- bind_rows(
+  summarise_rd_missingness(det_panel, "Eligible risk set"),
+  summarise_rd_missingness(joint_model_panel, "Joint LPM estimation sample")
+)
 
 univariate_results <- imap_dfr(
   univariate_models,
@@ -533,6 +587,7 @@ determinants_table <- etable(
   display_models,
   dict = var_labels,
   fitstat = ~ n + r2 + wr2,
+  signif.code = SIGNIFICANCE_CODES,
   digits.stats = 4,
   postprocess.df = format_etable_r2
 )
@@ -572,6 +627,10 @@ det_sample_overview <- tibble(
     "Candidate risk-set firm-years",
     "Rows without a consecutive prior fiscal year",
     "Eligible risk-set firm-years",
+    "R&D missing-data rule",
+    "Eligible rows with reported R&D intensity",
+    "Eligible non-reporters assigned zero R&D intensity",
+    "Eligible reporters with undefined R&D intensity",
     "One-variable sample rule",
     "One-variable firm-years (range)",
     "Joint-model firm-years",
@@ -590,6 +649,29 @@ det_sample_overview <- tibble(
     format(nrow(risk_panel_before_lag_filter), big.mark = ","),
     format(invalid_risk_lag_rows, big.mark = ","),
     format(nrow(det_panel), big.mark = ","),
+    paste0(
+      "Set lagged R&D intensity to zero only when the lagged R&D-reporter ",
+      "indicator equals zero; include the reporter indicator separately; ",
+      "leave undefined reporter ratios missing"
+    ),
+    format(
+      rd_missingness_audit$reported_intensity_observed[
+        rd_missingness_audit$sample == "Eligible risk set"
+      ],
+      big.mark = ","
+    ),
+    format(
+      rd_missingness_audit$nonreporters_zero_filled[
+        rd_missingness_audit$sample == "Eligible risk set"
+      ],
+      big.mark = ","
+    ),
+    format(
+      rd_missingness_audit$reporter_intensity_undefined[
+        rd_missingness_audit$sample == "Eligible risk set"
+      ],
+      big.mark = ","
+    ),
     "Available cases for the covariate in each model",
     paste0(
       format(
@@ -622,12 +704,18 @@ determinants_bundle <- list(
   ),
   det_panel = det_panel,
   joint_model_panel = joint_model_panel,
+  rd_missingness_audit = rd_missingness_audit,
   model_specs = list(
     one_variable = as.list(joint_vars),
     joint = joint_vars,
     sample_rule = list(
       one_variable = "Available cases for the covariate in each model",
       joint = "Complete cases for all joint-model covariates"
+    ),
+    rd_missing_data_rule = paste0(
+      "Lagged R&D intensity is set to zero only for lagged R&D non-reporters; ",
+      "the lagged reporter indicator enters separately. Reporter rows with an ",
+      "undefined intensity remain missing."
     )
   ),
   univariate_models = univariate_models,
@@ -647,6 +735,10 @@ if (SAVE_DETERMINANTS_OUTPUTS) {
   readr::write_csv(determinants_comparison, DETERMINANTS_COMPARISON_CSV)
   readr::write_csv(adopter_characteristics, DETERMINANTS_CHARACTERISTICS_CSV)
   readr::write_csv(model_sample_audit, DETERMINANTS_SAMPLE_AUDIT_CSV)
+  readr::write_csv(
+    rd_missingness_audit,
+    DETERMINANTS_RD_MISSINGNESS_AUDIT_CSV
+  )
 }
 
 
@@ -670,6 +762,23 @@ cat(
 cat("Joint-model rows:", format(nrow(joint_model_panel), big.mark = ","), "\n")
 cat("Joint-model firms:", format(n_distinct(joint_model_panel$cik), big.mark = ","), "\n")
 cat("Joint-model first-adoption events:", format(sum(joint_model_panel$first_adopt), big.mark = ","), "\n")
+cat(
+  "Joint-model R&D composition:",
+  format(
+    rd_missingness_audit$reported_intensity_observed[
+      rd_missingness_audit$sample == "Joint LPM estimation sample"
+    ],
+    big.mark = ","
+  ),
+  "reported-intensity rows +",
+  format(
+    rd_missingness_audit$nonreporters_zero_filled[
+      rd_missingness_audit$sample == "Joint LPM estimation sample"
+    ],
+    big.mark = ","
+  ),
+  "zero-filled non-reporter rows\n"
+)
 cat("Invalid/stale lag values retained: 0\n")
 
 cat("\nOne-variable LPM columns followed by the joint model:\n")

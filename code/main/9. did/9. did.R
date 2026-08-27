@@ -265,16 +265,30 @@ run_cs_did <- function(
 
   full_test <- custom$full_pretrend
   common_test <- custom$common_pretrend
+  full_event_times <- full_test$coefficients$event_time
+  full_window <- if (
+    identical(
+      full_event_times,
+      seq.int(min(full_event_times), max(full_event_times))
+    )
+  ) {
+    paste0("Event time ", min(full_event_times), ":", max(full_event_times))
+  } else {
+    paste0("Event times ", paste(full_event_times, collapse = ","))
+  }
   wald_test_tbl <- tibble(
     spec_order,
     spec_name,
     spec_label,
     outcome,
     Outcome = outcome_label,
+    full_window,
     `Wald statistic` = full_test$statistic,
     df = full_test$df,
     `p-value` = full_test$p_value,
     Assessment = assessment_label(full_test$p_value),
+    full_restrictions = full_test$restrictions,
+    full_rank_deficient = full_test$rank_deficient,
     common_window = "Event time -4:-1",
     `Common-window Wald statistic` = common_test$statistic,
     `Common-window df` = common_test$df,
@@ -901,7 +915,7 @@ save_best_dynamic_plots <- function(plot_data) {
         fill = "#12436D",
         alpha = 0.18
       ) +
-      geom_line(color = "#12436D", linewidth = 0.7) +
+      geom_line(color = "#12436D", linewidth = 0.55) +
       geom_point(color = "#12436D", size = 1) +
       scale_x_continuous(breaks = sort(unique(outcome_data$event_time))) +
       labs(

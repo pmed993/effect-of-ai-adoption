@@ -528,7 +528,7 @@ competition_overlay_plot <- ggplot(
     colour = NA,
     linetype = 0
   ) +
-  geom_line(linewidth = 0.72) +
+  geom_line(linewidth = 0.55) +
   geom_point(size = 1.5) +
   facet_grid(
     rows = vars(outcome_label),
@@ -605,7 +605,7 @@ competition_difference_plot <- ggplot(
     colour = NA,
     alpha = 0.14
   ) +
-  geom_line(linewidth = 0.72) +
+  geom_line(linewidth = 0.55) +
   geom_point(size = 1.5) +
   facet_grid(
     rows = vars(outcome_label),

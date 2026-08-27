@@ -280,30 +280,134 @@ did_estimate_gminus1_cell <- function(
   )
 }
 
-did_wald_test <- function(mp, keep) {
-  keep <- which(keep & is.finite(mp$att))
-  if (length(keep) == 0L) {
-    return(list(statistic = NA_real_, df = 0L, p_value = NA_real_))
+did_dynamic_event_wald_test <- function(
+    dynamic,
+    event_times
+) {
+  required_events <- sort(unique(as.integer(event_times)))
+  if (length(required_events) == 0L || anyNA(required_events)) {
+    stop("At least one valid event time is required for the dynamic Wald test.")
   }
-  covariance <- mp$V_analytical[keep, keep, drop = FALSE]
-  if (any(!is.finite(covariance)) || rcond(covariance) <= 1e-12) {
-    return(list(statistic = NA_real_, df = length(keep), p_value = NA_real_))
+  event_positions <- match(required_events, as.integer(dynamic$egt))
+  if (anyNA(event_positions)) {
+    stop(
+      "Dynamic aggregation is missing required pre-treatment event time(s): ",
+      paste(required_events[is.na(event_positions)], collapse = ", ")
+    )
   }
-  statistic <- as.numeric(
-    mp$n * crossprod(mp$att[keep], solve(covariance, mp$att[keep]))
+
+  beta <- as.numeric(dynamic$att.egt[event_positions])
+  influence <- as.matrix(
+    dynamic$inf.function$dynamic.inf.func.e[, event_positions, drop = FALSE]
   )
+  if (
+    length(beta) != length(required_events) ||
+      ncol(influence) != length(required_events) ||
+      any(!is.finite(beta)) ||
+      any(!is.finite(influence))
+  ) {
+    stop("Aggregated pre-treatment estimates or influence functions are invalid.")
+  }
+
+  n <- nrow(influence)
+  params <- dynamic$DIDparams
+  extra_cluster_vars <- params$clustervars[
+    !(params$clustervars %in% c(params$idname, ""))
+  ]
+  covariance_scores <- influence
+  if (length(extra_cluster_vars) > 0L) {
+    cluster_vector <- as.character(params$cluster_vector)
+    if (
+      length(extra_cluster_vars) != 1L ||
+        length(cluster_vector) != n ||
+        anyNA(cluster_vector)
+    ) {
+      stop("Aggregated pre-trend test is missing aligned cluster metadata.")
+    }
+    covariance_scores <- rowsum(influence, cluster_vector, reorder = TRUE)
+  }
+
+  # The influence-function covariance of the aggregated event-study estimator
+  # is crossprod(scores) / n^2.
+  covariance <- crossprod(covariance_scores) / n^2
+  covariance <- (covariance + t(covariance)) / 2
+  eigen_decomposition <- eigen(covariance, symmetric = TRUE)
+  eigen_scale <- max(abs(eigen_decomposition$values))
+  eigen_tolerance <- if (is.finite(eigen_scale) && eigen_scale > 0) {
+    length(beta) * sqrt(.Machine$double.eps) * eigen_scale
+  } else {
+    0
+  }
+  if (any(eigen_decomposition$values < -eigen_tolerance)) {
+    stop("Aggregated pre-trend covariance matrix is not positive semidefinite.")
+  }
+  retained_eigenvalues <- eigen_decomposition$values > eigen_tolerance
+  covariance_rank <- sum(retained_eigenvalues)
+
+  if (covariance_rank == 0L) {
+    statistic <- NA_real_
+    p_value <- NA_real_
+  } else {
+    inverse_covariance <- eigen_decomposition$vectors[, retained_eigenvalues, drop = FALSE] %*%
+      diag(1 / eigen_decomposition$values[retained_eigenvalues], covariance_rank) %*%
+      t(eigen_decomposition$vectors[, retained_eigenvalues, drop = FALSE])
+    statistic <- as.numeric(crossprod(beta, inverse_covariance %*% beta))
+    p_value <- pchisq(statistic, covariance_rank, lower.tail = FALSE)
+  }
+
   list(
     statistic = statistic,
-    df = length(keep),
-    p_value = pchisq(statistic, length(keep), lower.tail = FALSE)
+    df = as.integer(covariance_rank),
+    p_value = p_value,
+    restrictions = length(required_events),
+    rank_deficient = covariance_rank < length(required_events),
+    covariance_rank = as.integer(covariance_rank),
+    covariance_tolerance = eigen_tolerance,
+    covariance = covariance,
+    coefficients = tibble(
+      event_time = required_events,
+      estimate = beta,
+      std_error = sqrt(pmax(diag(covariance), 0))
+    )
   )
 }
 
-did_common_pretrend_test <- function(mp, min_event = -4L, max_event = -1L) {
-  event_time <- mp$t - mp$group
-  did_wald_test(
+did_pretrend_tests <- function(
     mp,
-    mp$group > mp$t & event_time >= min_event & event_time <= max_event
+    common_min_event = -4L,
+    common_max_event = -1L
+) {
+  cell_event_times <- as.integer(mp$t - mp$group)
+  finite_cells <- is.finite(mp$att) & is.finite(cell_event_times)
+  if (!any(finite_cells)) {
+    stop("No finite ATT(g,t) cells are available for dynamic aggregation.")
+  }
+  min_dynamic_event <- min(cell_event_times[finite_cells])
+  max_dynamic_event <- max(cell_event_times[finite_cells])
+  if (max_dynamic_event < 0L) {
+    stop("Dynamic aggregation requires at least one post-treatment event time.")
+  }
+  dynamic <- did::aggte(
+    mp,
+    type = "dynamic",
+    min_e = min_dynamic_event,
+    max_e = max_dynamic_event,
+    na.rm = FALSE,
+    bstrap = FALSE,
+    cband = FALSE,
+    clustervars = mp$DIDparams$clustervars
+  )
+  available_event_times <- sort(unique(as.integer(dynamic$egt)))
+  full_pre_events <- available_event_times[available_event_times < 0L]
+  common_pre_events <- seq.int(common_min_event, common_max_event)
+  if (length(full_pre_events) == 0L) {
+    stop("Dynamic aggregation contains no pre-treatment event times.")
+  }
+
+  list(
+    full = did_dynamic_event_wald_test(dynamic, full_pre_events),
+    common = did_dynamic_event_wald_test(dynamic, common_pre_events),
+    dynamic_event_times = available_event_times
   )
 }
 
@@ -522,7 +626,8 @@ did_build_gminus1_mp <- function(
     alp = alp,
     DIDparams = dp
   )
-  full_pretrend <- did_wald_test(mp, group > target)
+  pretrend_tests <- did_pretrend_tests(mp)
+  full_pretrend <- pretrend_tests$full
   mp$W <- full_pretrend$statistic
   mp$Wpval <- full_pretrend$p_value
 
@@ -596,6 +701,6 @@ did_build_gminus1_mp <- function(
     cluster_var = if (length(cluster_var) == 0L) "firm_id" else cluster_var,
     firm_meta = firm_meta,
     full_pretrend = full_pretrend,
-    common_pretrend = did_common_pretrend_test(mp)
+    common_pretrend = pretrend_tests$common
   )
 }

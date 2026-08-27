@@ -34,6 +34,19 @@ This project studies whether firm-level AI adoption is associated with differenc
 5. Validate the treatment variables and generate panel diagnostics and summary
    statistics using scripts 5--7 in `code/main`.
 
+   Table 3.5 reports the raw winsorized R&D-intensity ratio (`XRD` divided by
+   beginning assets) only when Compustat reports `XRD` and the denominator is
+   valid; its 18,168 nonmissing firm-years are therefore reporter observations.
+   The first-adoption determinants regressions use lagged R&D instead. They set
+   lagged R&D intensity to zero only for observations with a lagged R&D-reporter
+   indicator of zero and include that indicator separately, so the intensity
+   coefficient is conditional on the disclosure margin. Reporters whose ratio
+   is undefined remain missing and are excluded when R&D intensity enters a
+   model. Consequently, the 24,825-row joint regression contains 13,258
+   reported-intensity observations and 11,567 zero-filled non-reporter
+   observations; it is not a complete-case sample on raw R&D intensity.
+   The generated `ai_adoption_rd_missingness_audit.csv` records this bridge.
+
 6. Estimate the main Callaway--Sant'Anna models using the unbalanced,
    cohort-specific `g-1` doubly robust design.
    See [9. did.R](/Users/piomedolla/Desktop/effect-of-ai-adoption/code/main/9.%20did/9.%20did.R).

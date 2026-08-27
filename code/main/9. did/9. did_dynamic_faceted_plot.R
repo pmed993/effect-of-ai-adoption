@@ -175,7 +175,7 @@ dynamic_faceted_plot <- ggplot(
     alpha = 0.16,
     colour = NA
   ) +
-  geom_line(linewidth = 0.65) +
+  geom_line(linewidth = 0.55) +
   geom_point(size = 1.25) +
   facet_grid(
     rows = vars(outcome_label),

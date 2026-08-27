@@ -616,9 +616,12 @@ panel_by_year <- scope_by_year |>
   round_numeric_cols()
 
 
-# ---- Treatment summary --------------------------------------------------------
+# ---- Treatment summary for the Compustat-EDGAR matched sample -----------------
+# Use the same contemporaneously matched firm roster as the pre-treatment
+# balance table in `7. summary_stats.R`. This prevents firms represented only by
+# causal-panel rows with a missing annual AI score from entering this summary.
 
-firm_treatment_summary <- panel_analysis |>
+firm_treatment_summary <- panel_score |>
   group_by(
     cik
   ) |>
@@ -634,20 +637,30 @@ firm_treatment_summary <- panel_analysis |>
     ai_adoption_year = first(
       ai_adoption_year
     ),
-    ever_treated = any(
-      ai_adopted == 1L
-    ),
-    first_treated_year = if (
-      any(ai_adopted == 1L)
-    ) {
-      min(
-        year[ai_adopted == 1L]
-      )
-    } else {
-      NA_integer_
-    },
     .groups = "drop"
+  ) |>
+  mutate(
+    # Use the stored first-adoption year for firm-level treatment status. This
+    # matches the pre-treatment balance table and correctly retains late-2025
+    # adopters whose matched fiscal-year treatment indicator has not yet turned
+    # on within the observed panel.
+    ever_treated = ai_adoption_year > 0L,
+    first_treated_year = if_else(
+      ever_treated,
+      ai_adoption_year,
+      NA_integer_
+    )
   )
+
+if (
+  nrow(firm_treatment_summary) != n_distinct(panel_score$cik) ||
+  any(
+    firm_treatment_summary$ever_treated !=
+      (firm_treatment_summary$ai_adoption_year > 0L)
+  )
+) {
+  stop("Matched-sample firm treatment summary failed its roster or status QA.")
+}
 
 
 treatment_status_summary <- firm_treatment_summary |>

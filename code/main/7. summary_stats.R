@@ -1,9 +1,14 @@
 #!/usr/bin/env Rscript
 
 # ------------------------------------------------------------------------------
-# Summary statistics for the final analysis panel
+# Summary statistics for the Compustat-EDGAR matched analysis panel
 # ------------------------------------------------------------------------------
-# This script uses the saved post-validation final analysis panel to:
+# All reported tables and figures use only firm-years with a contemporaneous
+# Compustat-EDGAR match. The sole exception is the HHI denominator: market HHI
+# is constructed from the full Compustat panel before being joined to the
+# matched analysis sample.
+#
+# The script:
 # 1. produce the main descriptive table for outcomes and controls;
 # 2. summarise and visualise the fixed-2017 HHI competition regimes;
 # 3. compare firm characteristics by adoption status;
@@ -29,7 +34,14 @@ SUMMARY_STATS_BUNDLE_RDS <- file.path(
   SUMMARY_STATS_OUTPUT_DIR,
   "summary_stats_bundle.rds"
 )
-FULL_PANEL_RDS <- file.path(INPUT_DIR, "compustat_ai_panel.rds")
+MATCHED_ANALYSIS_PANEL_RDS <- file.path(
+  INPUT_DIR,
+  "compustat_ai_analysis_matched_panel.rds"
+)
+FULL_COMPUSTAT_PANEL_RDS <- file.path(
+  INPUT_DIR,
+  "compustat_annual_panel.rds"
+)
 KEY_DISTRIBUTION_PNG <- file.path(
   SUMMARY_STATS_OUTPUT_DIR,
   "key_variable_distributions_by_adoption_status.png"
@@ -37,6 +49,14 @@ KEY_DISTRIBUTION_PNG <- file.path(
 ADOPTION_PREVALENCE_PNG <- file.path(
   SUMMARY_STATS_OUTPUT_DIR,
   "ai_adoption_prevalence_over_time.png"
+)
+ADOPTION_BY_COMPETITION_PNG <- file.path(
+  SUMMARY_STATS_OUTPUT_DIR,
+  "ai_adoption_prevalence_by_competition.png"
+)
+ADOPTION_BY_ANNUAL_COMPETITION_PNG <- file.path(
+  SUMMARY_STATS_OUTPUT_DIR,
+  "ai_adoption_prevalence_by_annual_competition.png"
 )
 ADOPTER_COMPOSITION_PNG <- file.path(
   SUMMARY_STATS_OUTPUT_DIR,
@@ -323,24 +343,25 @@ pre_treatment_adopter_table <- function(data, vars, labels) {
 }
 
 
-# ---- Load final analysis panel ------------------------------------------------
-if (!file.exists(ANALYSIS_PANEL_RDS)) {
+# ---- Load matched analysis sample and full Compustat HHI universe -------------
+if (!file.exists(MATCHED_ANALYSIS_PANEL_RDS)) {
   stop(
-    "Final analysis panel not found: ", ANALYSIS_PANEL_RDS,
+    "Compustat-EDGAR matched analysis panel not found: ",
+    MATCHED_ANALYSIS_PANEL_RDS,
     ". Run 4. build_or_load_panel_data.R first."
   )
 }
-if (!file.exists(FULL_PANEL_RDS)) {
+if (!file.exists(FULL_COMPUSTAT_PANEL_RDS)) {
   stop(
-    "Full Compustat-AI panel not found: ", FULL_PANEL_RDS,
-    ". Run 3. get_panel_data/2. build_compustat_ai_panel.R first."
+    "Full Compustat panel not found: ", FULL_COMPUSTAT_PANEL_RDS,
+    ". Run 3. get_panel_data/1. build_compustat_annual_panel.R first."
   )
 }
 
 # Construct contemporaneous sales-based NAICS3 HHI using the full Compustat
-# market denominator, consistent with the project's HHI analysis. HHI is on
-# the conventional 0--10,000 scale.
-full_panel_hhi_source <- readRDS(FULL_PANEL_RDS) |>
+# market denominator before restricting to the Compustat-EDGAR matched sample.
+# HHI is on the conventional 0--10,000 scale.
+full_panel_hhi_source <- readRDS(FULL_COMPUSTAT_PANEL_RDS) |>
   transmute(
     cik = as.character(cik),
     year = as.integer(year),
@@ -373,7 +394,16 @@ if (
   stop("NAICS3 HHI construction failed: values must lie in (0, 10,000].")
 }
 
-panel_summary <- readRDS(ANALYSIS_PANEL_RDS) |>
+matched_analysis_input <- readRDS(MATCHED_ANALYSIS_PANEL_RDS)
+
+if (anyNA(matched_analysis_input$ai_score)) {
+  stop(
+    "The matched analysis sample contains missing `ai_score` values; ",
+    "use only contemporaneously matched Compustat-EDGAR firm-years."
+  )
+}
+
+panel_summary <- matched_analysis_input |>
   mutate(
     cik = as.character(cik),
     year = as.integer(year),
@@ -407,6 +437,28 @@ panel_summary <- readRDS(ANALYSIS_PANEL_RDS) |>
     by = c("year", "naics3")
   )
 
+if (
+  nrow(panel_summary) != nrow(matched_analysis_input) ||
+  nrow(distinct(panel_summary, cik, year)) != nrow(panel_summary)
+) {
+  stop(
+    "Matched-sample QA failed: filtering or the HHI join changed the ",
+    "firm-year sample."
+  )
+}
+
+summary_sample_audit <- tibble::tibble(
+  dataset = c(
+    "Full Compustat panel used to construct HHI",
+    "Compustat-EDGAR matched analysis sample"
+  ),
+  firm_years = c(nrow(full_panel_hhi_source), nrow(panel_summary)),
+  firms = c(
+    n_distinct(full_panel_hhi_source$cik),
+    n_distinct(panel_summary$cik)
+  )
+)
+
 
 panel_score_summary <- panel_summary |>
   filter(!is.na(ai_score))
@@ -424,7 +476,7 @@ overall_var_labels <- c(
   leverage = "Leverage",
   roa = "ROA",
   capx_intensity_y_w = "CAPX intensity",
-  rd_intensity_y_w = "R&D intensity",
+  rd_intensity_y_w = "R&D intensity (reporters only)",
   rd_reporter = "R&D reporter (0/1)",
   hhi_naics3 = "HHI (NAICS3)",
   ai_score = "AI adoption score (1/2/3)"
@@ -481,6 +533,15 @@ overall_summary <- descriptive_table(
   ) |>
   arrange(summary_order) |>
   select(-summary_order)
+
+overall_summary_notes <- paste0(
+  "R&D intensity is winsorized XRD divided by beginning assets and is reported ",
+  "only when Compustat XRD and a valid denominator are observed (N = ",
+  format(sum(!is.na(panel_summary$rd_intensity_y_w)), big.mark = ","),
+  "). The determinants regressions instead set lagged R&D intensity to zero ",
+  "only for lagged non-reporters and include a separate lagged R&D-reporter ",
+  "indicator; undefined ratios for reporters remain missing."
+)
 
 
 # ---- Competition regime summary ----------------------------------------------
@@ -954,6 +1015,176 @@ p_ai_adoption_prevalence <- ggplot(
   )
 
 
+# ---- AI-adoption prevalence by competition regime ----------------------------
+# This is cumulative adoption prevalence because `ai_adopted` is absorbing.
+# Competition is fixed using each firm's 2017 NAICS3 market, whose HHI is
+# calculated from the full Compustat universe. Reported rates use only the
+# Compustat-EDGAR matched analysis sample.
+competition_trend_labels <- c(
+  high_competition = "High competition (HHI ≤ 1,800)",
+  low_competition = "Low competition (HHI > 1,800)"
+)
+
+ai_adoption_by_competition_year <- competition_regime_panel |>
+  mutate(
+    competition_group = factor(
+      unname(competition_trend_labels[as.character(competition_regime)]),
+      levels = unname(competition_trend_labels)
+    )
+  ) |>
+  group_by(year, competition_group) |>
+  summarise(
+    n_firm_years = n(),
+    n_firms = n_distinct(cik),
+    adoption_prevalence = mean(ai_adopted == 1L),
+    .groups = "drop"
+  ) |>
+  arrange(year, competition_group)
+
+if (
+  nrow(ai_adoption_by_competition_year) !=
+    2L * n_distinct(ai_adoption_by_competition_year$year) ||
+  any(!is.finite(ai_adoption_by_competition_year$adoption_prevalence)) ||
+  any(
+    ai_adoption_by_competition_year$adoption_prevalence < 0 |
+      ai_adoption_by_competition_year$adoption_prevalence > 1
+  )
+) {
+  stop("Competition-specific AI-adoption trend failed its coverage or rate QA.")
+}
+
+p_ai_adoption_by_competition <- ggplot(
+  ai_adoption_by_competition_year,
+  aes(
+    x = year,
+    y = adoption_prevalence,
+    colour = competition_group,
+    group = competition_group
+  )
+) +
+  geom_line(linewidth = 1.05) +
+  geom_point(size = 2.3) +
+  scale_colour_manual(
+    values = c(
+      "High competition (HHI ≤ 1,800)" = "#12436D",
+      "Low competition (HHI > 1,800)" = "#C20E35"
+    ),
+    name = NULL
+  ) +
+  scale_x_continuous(
+    breaks = sort(unique(ai_adoption_by_competition_year$year)),
+    expand = expansion(mult = c(0.015, 0.015)),
+    guide = guide_axis(check.overlap = TRUE)
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    breaks = scales::breaks_pretty(n = 6),
+    limits = c(0, NA),
+    expand = expansion(mult = c(0, 0.08))
+  ) +
+  labs(
+    title = "AI adoption over time by market competition",
+    subtitle = paste0(
+      "Cumulative adoption (score ≥2); regimes use full-Compustat 2017 ",
+      "NAICS3 HHI"
+    ),
+    x = NULL,
+    y = "Share of firms with AI adoption"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+
+
+# ---- AI adoption by annually reclassified competition regime -----------------
+# Unlike the fixed-2017 heterogeneity design above, this descriptive chart uses
+# the contemporaneous full-Compustat NAICS3 HHI in each year. Firms can therefore
+# move between competition regimes as their market's concentration changes.
+ai_adoption_by_annual_competition_year <- panel_summary |>
+  filter(is.finite(hhi_naics3)) |>
+  mutate(
+    competition_group = if_else(
+      hhi_naics3 <= HHI_COMPETITION_CUTOFF,
+      competition_trend_labels[["high_competition"]],
+      competition_trend_labels[["low_competition"]]
+    ),
+    competition_group = factor(
+      competition_group,
+      levels = unname(competition_trend_labels)
+    )
+  ) |>
+  group_by(year, competition_group) |>
+  summarise(
+    n_firm_years = n(),
+    n_firms = n_distinct(cik),
+    n_naics3_markets = n_distinct(naics3),
+    adoption_prevalence = mean(ai_adopted == 1L),
+    mean_hhi = mean(hhi_naics3),
+    .groups = "drop"
+  ) |>
+  arrange(year, competition_group)
+
+if (
+  nrow(ai_adoption_by_annual_competition_year) !=
+    2L * n_distinct(ai_adoption_by_annual_competition_year$year) ||
+  any(!is.finite(ai_adoption_by_annual_competition_year$adoption_prevalence)) ||
+  any(
+    ai_adoption_by_annual_competition_year$adoption_prevalence < 0 |
+      ai_adoption_by_annual_competition_year$adoption_prevalence > 1
+  )
+) {
+  stop("Annual competition-specific AI-adoption trend failed its QA checks.")
+}
+
+p_ai_adoption_by_annual_competition <- ggplot(
+  ai_adoption_by_annual_competition_year,
+  aes(
+    x = year,
+    y = adoption_prevalence,
+    colour = competition_group,
+    group = competition_group
+  )
+) +
+  geom_line(linewidth = 1.05) +
+  geom_point(size = 2.3) +
+  scale_colour_manual(
+    values = c(
+      "High competition (HHI ≤ 1,800)" = "#12436D",
+      "Low competition (HHI > 1,800)" = "#C20E35"
+    ),
+    name = NULL
+  ) +
+  scale_x_continuous(
+    breaks = sort(unique(ai_adoption_by_annual_competition_year$year)),
+    expand = expansion(mult = c(0.015, 0.015)),
+    guide = guide_axis(check.overlap = TRUE)
+  ) +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    breaks = scales::breaks_pretty(n = 6),
+    limits = c(0, NA),
+    expand = expansion(mult = c(0, 0.08))
+  ) +
+  labs(
+    title = "AI adoption by annually measured market competition",
+    subtitle = paste0(
+      "Cumulative adoption (score ≥2); markets are reclassified each year ",
+      "using full-Compustat NAICS3 HHI"
+    ),
+    x = NULL,
+    y = "Share of firms with AI adoption"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank()
+  )
+
+
 # ---- Composition of AI adopters over time ------------------------------------
 # The denominator here differs from the prevalence graph: it contains only
 # firm-years already treated under the main AI-adoption definition. Because the
@@ -1401,7 +1632,9 @@ p_key_variable_distributions <- ggplot(
 
 # ---- Save bundle --------------------------------------------------------------
 summary_stats_bundle <- list(
+  sample_audit = summary_sample_audit,
   overall_summary = overall_summary,
+  overall_summary_notes = overall_summary_notes,
   competition_regime_summary = competition_regime_summary,
   competition_regime_coverage = competition_regime_coverage,
   competition_regime_firm_assignment = competition_regime_firm_assignment,
@@ -1412,6 +1645,9 @@ summary_stats_bundle <- list(
   firm_char_summary = firm_char_summary,
   firm_char_summary_wide = firm_char_summary_wide,
   ai_adoption_prevalence_by_year = ai_adoption_prevalence_by_year,
+  ai_adoption_by_competition_year = ai_adoption_by_competition_year,
+  ai_adoption_by_annual_competition_year =
+    ai_adoption_by_annual_competition_year,
   ai_adopter_composition_by_year = ai_adopter_composition_by_year,
   key_sector_score_by_year = key_sector_score_by_year,
   key_sector_overview = key_sector_overview,
@@ -1421,6 +1657,9 @@ summary_stats_bundle <- list(
   pre_treatment_balance = pre_treatment_balance,
   key_distribution_data = key_distribution_data,
   p_ai_adoption_prevalence = p_ai_adoption_prevalence,
+  p_ai_adoption_by_competition = p_ai_adoption_by_competition,
+  p_ai_adoption_by_annual_competition =
+    p_ai_adoption_by_annual_competition,
   p_ai_adopter_composition = p_ai_adopter_composition,
   p_ai_adoption_overview = p_ai_adoption_overview,
   p_mean_ai_score_by_key_sector = p_mean_ai_score_by_key_sector,
@@ -1446,6 +1685,20 @@ if (SAVE_SUMMARY_FIGURES) {
   ggsave(
     filename = ADOPTION_PREVALENCE_PNG,
     plot = p_ai_adoption_prevalence,
+    width = 10,
+    height = 5.5,
+    dpi = 300
+  )
+  ggsave(
+    filename = ADOPTION_BY_COMPETITION_PNG,
+    plot = p_ai_adoption_by_competition,
+    width = 10,
+    height = 5.5,
+    dpi = 300
+  )
+  ggsave(
+    filename = ADOPTION_BY_ANNUAL_COMPETITION_PNG,
+    plot = p_ai_adoption_by_annual_competition,
     width = 10,
     height = 5.5,
     dpi = 300
@@ -1504,7 +1757,16 @@ if (SAVE_SUMMARY_FIGURES) {
 
 # ---- Console output -----------------------------------------------------------
 cat("\nGenerated summary statistics.\n")
-cat("Final analysis panel rows:", format(nrow(panel_summary), big.mark = ","), "\n")
+cat(
+  "Compustat-EDGAR matched analysis rows:",
+  format(nrow(panel_summary), big.mark = ","),
+  "\n"
+)
+cat(
+  "Full Compustat rows used as the HHI universe:",
+  format(nrow(full_panel_hhi_source), big.mark = ","),
+  "\n"
+)
 cat("Years covered:", min(panel_summary$year, na.rm = TRUE), "to", max(panel_summary$year, na.rm = TRUE), "\n")
 
 if (SAVE_SUMMARY_BUNDLE) {
@@ -1514,6 +1776,16 @@ if (SAVE_SUMMARY_BUNDLE) {
 if (SAVE_SUMMARY_FIGURES) {
   cat("Saved key distribution figure to:", KEY_DISTRIBUTION_PNG, "\n")
   cat("Saved AI-adoption prevalence figure to:", ADOPTION_PREVALENCE_PNG, "\n")
+  cat(
+    "Saved AI-adoption-by-competition figure to:",
+    ADOPTION_BY_COMPETITION_PNG,
+    "\n"
+  )
+  cat(
+    "Saved annually reclassified AI-adoption-by-competition figure to:",
+    ADOPTION_BY_ANNUAL_COMPETITION_PNG,
+    "\n"
+  )
   cat("Saved AI-adopter composition figure to:", ADOPTER_COMPOSITION_PNG, "\n")
   cat("Saved combined AI-adoption figure to:", ADOPTION_OVERVIEW_PNG, "\n")
   cat("Saved key-sector mean-score figure to:", KEY_SECTOR_SCORE_PNG, "\n")

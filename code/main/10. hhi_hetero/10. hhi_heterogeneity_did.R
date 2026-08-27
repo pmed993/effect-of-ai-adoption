@@ -62,7 +62,12 @@ HHI_COVARIATE_AUDIT_CSV <- file.path(
   "hhi_pre_treatment_covariate_audit.csv"
 )
 HHI_SAMPLE_AUDIT_CSV <- file.path(HHI_OUTPUT_DIR, "hhi_sample_audit.csv")
-HHI_WALD_CSV <- file.path(HHI_OUTPUT_DIR, "hhi_parallel_trends_wald.csv")
+HHI_WALD_CSV <- file.path(OUTPUT_DIR, "hhi_heterogeneity_wald_pretrends.csv")
+HHI_WALD_FULL_CSV <- file.path(
+  OUTPUT_DIR,
+  "hhi_heterogeneity_wald_pretrends_full.csv"
+)
+HHI_WALD_LATEX <- file.path(OUTPUT_DIR, "hhi_heterogeneity_wald_pretrends.tex")
 HHI_PUBLICATION_CSV <- file.path(
   HHI_OUTPUT_DIR,
   "hhi_heterogeneity_publication_table.csv"
@@ -116,6 +121,14 @@ OUTCOME_LABELS <- c(
   operating_profitability_w = "Operating profitability (OIBDP/total assets)"
 )
 DID_OUTCOMES <- names(OUTCOME_LABELS)
+WALD_OUTCOME_LABELS <- c(
+  log_emp = "Employment",
+  log_xopr = "Operating costs",
+  log_labor_productivity = "Labour productivity",
+  log_sale = "Sales",
+  operating_profitability_w = "Operating profitability"
+)
+WALD_PRETREND_EVENTS <- -4L:-1L
 
 FIRM_DID_CONTROLS <- c(
   "log_at",
@@ -645,15 +658,63 @@ run_hhi_model <- function(
     )
   )
 
-  wald_rows <- tibble(
+  full_pretrend <- custom$full_pretrend
+  common_pretrend <- custom$common_pretrend
+  wald_full_row <- tibble(
     treatment_id,
     outcome,
     competition_regime = regime,
-    test = c("All available pre-treatment cells", "Common event window -4:-1"),
-    statistic = c(custom$full_pretrend$statistic, custom$common_pretrend$statistic),
-    df = c(custom$full_pretrend$df, custom$common_pretrend$df),
-    p_value = c(custom$full_pretrend$p_value, custom$common_pretrend$p_value)
+    wald_statistic = full_pretrend$statistic,
+    df = full_pretrend$df,
+    p_value = full_pretrend$p_value
   )
+  wald_row <- tibble(
+    treatment_id,
+    outcome,
+    competition_regime = regime,
+    wald_statistic = common_pretrend$statistic,
+    df = common_pretrend$df,
+    p_value = common_pretrend$p_value
+  )
+  wald_full_coefficients <- full_pretrend$coefficients |>
+    mutate(
+      treatment_id,
+      outcome,
+      competition_regime = regime,
+      .before = 1L
+    )
+  wald_coefficients <- common_pretrend$coefficients |>
+    mutate(
+      treatment_id,
+      outcome,
+      competition_regime = regime,
+      .before = 1L
+    )
+
+  cat(
+    "Full-window aggregated pre-trend coefficients:", treatment_id,
+    "|", outcome, "|", regime, "\n"
+  )
+  print(wald_full_coefficients |> select(event_time, estimate, std_error))
+  if (full_pretrend$rank_deficient) {
+    cat(
+      "Rank-deficient full-window covariance: rank",
+      full_pretrend$covariance_rank, "of",
+      full_pretrend$restrictions, "restrictions.\n"
+    )
+  }
+  cat(
+    "Common-window aggregated pre-trend coefficients:", treatment_id,
+    "|", outcome, "|", regime, "\n"
+  )
+  print(wald_coefficients |> select(event_time, estimate, std_error))
+  if (common_pretrend$rank_deficient) {
+    cat(
+      "Rank-deficient pre-trend covariance: rank",
+      common_pretrend$covariance_rank, "of",
+      common_pretrend$restrictions, "restrictions.\n"
+    )
+  }
 
   list(
     model = custom$mp,
@@ -663,7 +724,10 @@ run_hhi_model <- function(
     cell_rows = cell_rows,
     covariate_audit = covariate_audit,
     sample_audit = sample_audit,
-    wald_rows = wald_rows
+    wald_full_row = wald_full_row,
+    wald_full_coefficients = wald_full_coefficients,
+    wald_row = wald_row,
+    wald_coefficients = wald_coefficients
   )
 }
 
@@ -752,7 +816,32 @@ cohort_effects <- map_dfr(model_results, "cohort_rows")
 cell_audit <- map_dfr(model_results, "cell_rows")
 covariate_audit <- map_dfr(model_results, "covariate_audit")
 sample_audit <- map_dfr(model_results, "sample_audit")
-wald_results <- map_dfr(model_results, "wald_rows")
+wald_results <- map_dfr(model_results, "wald_row") |>
+  arrange(
+    match(treatment_id, TREATMENT_DEFINITIONS$treatment_id),
+    match(outcome, names(WALD_OUTCOME_LABELS)),
+    match(competition_regime, HHI_REGIMES)
+  )
+wald_full_results <- map_dfr(model_results, "wald_full_row") |>
+  arrange(
+    match(treatment_id, TREATMENT_DEFINITIONS$treatment_id),
+    match(outcome, names(WALD_OUTCOME_LABELS)),
+    match(competition_regime, HHI_REGIMES)
+  )
+wald_coefficients <- map_dfr(model_results, "wald_coefficients") |>
+  arrange(
+    match(treatment_id, TREATMENT_DEFINITIONS$treatment_id),
+    match(outcome, names(WALD_OUTCOME_LABELS)),
+    match(competition_regime, HHI_REGIMES),
+    event_time
+  )
+wald_full_coefficients <- map_dfr(model_results, "wald_full_coefficients") |>
+  arrange(
+    match(treatment_id, TREATMENT_DEFINITIONS$treatment_id),
+    match(outcome, names(WALD_OUTCOME_LABELS)),
+    match(competition_regime, HHI_REGIMES),
+    event_time
+  )
 
 if (any(!covariate_audit$timing_pass)) {
   stop("HHI QA failed: at least one model did not use the common cohort g-1 baseline.")
@@ -773,6 +862,78 @@ if (
     "HHI QA failed: subgroup inference is not clustered by ",
     HHI_CLUSTER_LABEL, "."
   )
+}
+expected_wald_tests <- nrow(TREATMENT_DEFINITIONS) *
+  length(DID_OUTCOMES) * length(HHI_REGIMES)
+expected_wald_coefficients <- crossing(
+  treatment_id = TREATMENT_DEFINITIONS$treatment_id,
+  outcome = names(WALD_OUTCOME_LABELS),
+  competition_regime = HHI_REGIMES,
+  event_time = WALD_PRETREND_EVENTS
+)
+missing_wald_coefficients <- anti_join(
+  expected_wald_coefficients,
+  wald_coefficients,
+  by = c("treatment_id", "outcome", "competition_regime", "event_time")
+)
+if (
+  nrow(wald_results) != expected_wald_tests ||
+    anyDuplicated(wald_results[c(
+      "treatment_id", "outcome", "competition_regime"
+    )]) ||
+    nrow(wald_coefficients) != nrow(expected_wald_coefficients) ||
+    nrow(missing_wald_coefficients) > 0L
+) {
+  stop(
+    "HHI QA failed: each model must contribute one Wald test and exactly ",
+    "four aggregated coefficients for event times -4:-1."
+  )
+}
+if (any(wald_results$df != length(WALD_PRETREND_EVENTS))) {
+  rank_deficient_tests <- wald_results |>
+    filter(df != length(WALD_PRETREND_EVENTS))
+  warning(
+    "Rank-deficient aggregated pre-trend covariance in ",
+    nrow(rank_deficient_tests), " model(s); the reported df is the actual rank."
+  )
+  print(rank_deficient_tests)
+}
+full_restriction_counts <- wald_full_coefficients |>
+  group_by(treatment_id, outcome, competition_regime) |>
+  summarise(
+    restrictions = n(),
+    min_event_time = min(event_time),
+    max_event_time = max(event_time),
+    .groups = "drop"
+  )
+full_wald_validation <- wald_full_results |>
+  left_join(
+    full_restriction_counts,
+    by = c("treatment_id", "outcome", "competition_regime")
+  )
+if (
+  nrow(wald_full_results) != expected_wald_tests ||
+    anyDuplicated(wald_full_results[c(
+      "treatment_id", "outcome", "competition_regime"
+    )]) ||
+    anyNA(full_wald_validation$restrictions) ||
+    any(full_wald_validation$max_event_time != -1L) ||
+    any(full_wald_validation$df > full_wald_validation$restrictions)
+) {
+  stop(
+    "HHI QA failed: full-window tests must use every available aggregated ",
+    "negative event-time coefficient through e=-1."
+  )
+}
+if (any(full_wald_validation$df != full_wald_validation$restrictions)) {
+  rank_deficient_full_tests <- full_wald_validation |>
+    filter(df != restrictions)
+  warning(
+    "Rank-deficient full-window aggregated pre-trend covariance in ",
+    nrow(rank_deficient_full_tests),
+    " model(s); the reported df is the actual rank."
+  )
+  print(rank_deficient_full_tests)
 }
 
 
@@ -1056,6 +1217,102 @@ write_publication_markdown <- function(data, path) {
   writeLines(lines, path, useBytes = TRUE)
 }
 
+format_wald_latex_p_value <- function(value) {
+  if (!is.finite(value)) {
+    "--"
+  } else if (value < 0.001) {
+    "$<0.001$"
+  } else {
+    sprintf("%.3f", value)
+  }
+}
+
+write_wald_pretrends_latex <- function(data, path) {
+  all_four_restrictions <- all(data$df == length(WALD_PRETREND_EVENTS))
+  panel_labels <- c(
+    ai_adoption_2 = "Panel A: AI adoption $\\geq 2$",
+    ai_adoption_3 = "Panel B: Strong AI adoption $=3$"
+  )
+  lines <- c(
+    "\\begin{table}[!htbp]",
+    "\\centering",
+    "\\caption{Joint Wald tests of HHI-subgroup pre-treatment coefficients}",
+    "\\label{tab:hhi-wald-pretrends}",
+    "\\begin{tabular}{lrrrr}",
+    "\\toprule",
+    paste0(
+      " & \\multicolumn{2}{c}{High competition}",
+      " & \\multicolumn{2}{c}{Low competition} \\\\"
+    ),
+    "\\cmidrule(lr){2-3} \\cmidrule(lr){4-5}",
+    "Outcome & Wald & p-value & Wald & p-value \\\\",
+    "\\midrule"
+  )
+
+  for (treatment in TREATMENT_DEFINITIONS$treatment_id) {
+    lines <- c(
+      lines,
+      paste0(
+        "\\multicolumn{5}{l}{\\textit{",
+        panel_labels[[treatment]],
+        "}} \\\\"
+      )
+    )
+    for (outcome_name in names(WALD_OUTCOME_LABELS)) {
+      outcome_rows <- data |>
+        filter(treatment_id == treatment, outcome == outcome_name)
+      high <- outcome_rows |>
+        filter(competition_regime == "high_competition")
+      low <- outcome_rows |>
+        filter(competition_regime == "low_competition")
+      if (nrow(high) != 1L || nrow(low) != 1L) {
+        stop("LaTeX Wald table requires one row per treatment/outcome/regime.")
+      }
+      lines <- c(
+        lines,
+        paste0(
+          WALD_OUTCOME_LABELS[[outcome_name]], " & ",
+          sprintf("%.3f", high$wald_statistic), " & ",
+          format_wald_latex_p_value(high$p_value), " & ",
+          sprintf("%.3f", low$wald_statistic), " & ",
+          format_wald_latex_p_value(low$p_value), " \\\\"
+        )
+      )
+    }
+    if (!identical(treatment, tail(TREATMENT_DEFINITIONS$treatment_id, 1L))) {
+      lines <- c(lines, "\\addlinespace")
+    }
+  }
+
+  restriction_note <- if (all_four_restrictions) {
+    paste0(
+      "Each test jointly imposes $ATT(e=-4)=ATT(e=-3)=ATT(e=-2)=",
+      "ATT(e=-1)=0$ (df = 4)."
+    )
+  } else {
+    paste0(
+      "Degrees of freedom equal the actual rank of each four-coefficient ",
+      "covariance matrix; see the accompanying CSV."
+    )
+  }
+  lines <- c(
+    lines,
+    "\\bottomrule",
+    "\\end{tabular}",
+    "\\begin{minipage}{0.96\\linewidth}",
+    "\\footnotesize",
+    paste0(
+      "Notes: ", restriction_note, " Tests use aggregated dynamic ",
+      "Callaway--Sant'Anna coefficients from the preferred conditional ",
+      "specification and fixed-2017 NAICS", HHI_NAICS_DIGITS,
+      " market-clustered influence-function covariance matrices."
+    ),
+    "\\end{minipage}",
+    "\\end{table}"
+  )
+  writeLines(lines, path, useBytes = TRUE)
+}
+
 
 # ---- Save --------------------------------------------------------------------
 model_keys <- paste(
@@ -1100,7 +1357,10 @@ hhi_results <- list(
   cell_audit = cell_audit,
   covariate_audit = covariate_audit,
   sample_audit = sample_audit,
+  wald_full_results = wald_full_results,
+  wald_full_coefficients = wald_full_coefficients,
   wald_results = wald_results,
+  wald_coefficients = wald_coefficients,
   models = named_models
 )
 
@@ -1117,7 +1377,9 @@ if (SAVE_HHI_OUTPUTS) {
   write_csv(cell_audit, HHI_CELL_AUDIT_CSV)
   write_csv(covariate_audit, HHI_COVARIATE_AUDIT_CSV)
   write_csv(sample_audit, HHI_SAMPLE_AUDIT_CSV)
+  write_csv(wald_full_results, HHI_WALD_FULL_CSV)
   write_csv(wald_results, HHI_WALD_CSV)
+  write_wald_pretrends_latex(wald_results, HHI_WALD_LATEX)
   write_csv(publication_table, HHI_PUBLICATION_CSV)
   write_publication_markdown(publication_table, HHI_PUBLICATION_MD)
   # Market value is no longer part of the DiD/HHI analysis. Keep the upstream
@@ -1151,6 +1413,10 @@ cat(
   "firm-treatment records across",
   n_distinct(support_exclusion_table$firm_id), "unique firms.\n"
 )
+cat("\nFull-window aggregated event-study Wald tests:\n")
+print(wald_full_results)
+cat("\nCommon-window aggregated event-study Wald tests (event times -4:-1):\n")
+print(wald_results)
 cat("\nHigh-minus-low ATT tests:\n")
 print(
   difference_results |>
@@ -1161,4 +1427,7 @@ print(
 )
 if (SAVE_HHI_OUTPUTS) {
   cat("\nSaved HHI heterogeneity outputs to:\n", HHI_OUTPUT_DIR, "\n")
+  cat("Saved full-window Wald CSV to:\n", HHI_WALD_FULL_CSV, "\n")
+  cat("Saved corrected Wald CSV to:\n", HHI_WALD_CSV, "\n")
+  cat("Saved corrected Wald LaTeX table to:\n", HHI_WALD_LATEX, "\n")
 }
